@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理员后台 - 用户密码查看</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Microsoft YaHei', sans-serif;
+            background: #f0f2f5;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px 30px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .header h1 {
+            font-size: 24px;
+        }
+        .header .actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .header .actions button {
+            background: rgba(255,255,255,0.2);
+            border: 1px solid rgba(255,255,255,0.3);
+            color: white;
+            padding: 8px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        .header .actions button:hover {
+            background: rgba(255,255,255,0.3);
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stats .card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            text-align: center;
+        }
+        .stats .card .number {
+            font-size: 32px;
+            font-weight: bold;
+            color: #667eea;
+        }
+        .stats .card .label {
+            color: #666;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        .card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .card .title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #f0f2f5;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .card .title .badge {
+            background: #667eea;
+            color: white;
+            padding: 2px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+        .table-wrapper {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        table th {
+            background: #f7f8fc;
+            padding: 12px 15px;
+            text-align: left;
+            font-weight: 600;
+            color: #333;
+            border-bottom: 2px solid #e8ecf1;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        table td {
+            padding: 10px 15px;
+            border-bottom: 1px solid #e8ecf1;
+            vertical-align: middle;
+        }
+        table tr:hover {
+            background: #f8f9ff;
+        }
+        .badge-status {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .badge-admin { background: #fef3c7; color: #92400e; }
+        .badge-user { background: #dbeafe; color: #1e40af; }
+        .badge-approved { background: #dcfce7; color: #15803d; }
+        .badge-pending { background: #fee2e2; color: #b91c1c; }
+        .badge-active { background: #dcfce7; color: #15803d; }
+        .badge-inactive { background: #fee2e2; color: #b91c1c; }
+        .password-cell {
+            font-family: 'Courier New', monospace;
+            background: #f7f8fc;
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+            font-size: 13px;
+            font-weight: bold;
+            color: #dc2626;
+        }
+        .copy-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 2px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-left: 5px;
+            transition: all 0.3s;
+        }
+        .copy-btn:hover {
+            background: #5a67d8;
+            transform: scale(1.05);
+        }
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        .search-box input {
+            flex: 1;
+            min-width: 200px;
+            padding: 10px 15px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+            outline: none;
+            transition: all 0.3s;
+        }
+        .search-box input:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
+        }
+        .search-box select {
+            padding: 10px 15px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+            background: white;
+            outline: none;
+            cursor: pointer;
+        }
+        .search-box select:focus {
+            border-color: #667eea;
+        }
+        .search-box button {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        .search-box button:hover {
+            background: #5a67d8;
+        }
+        .search-box .btn-danger {
+            background: #ef4444;
+        }
+        .search-box .btn-danger:hover {
+            background: #dc2626;
+        }
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #10b981;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 9999;
+            animation: slideIn 0.3s ease;
+        }
+        .toast.error { background: #ef4444; }
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        .export-btn {
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s;
+        }
+        .export-btn:hover {
+            background: #059669;
+        }
+        .create-admin-box {
+            background: #fef3c7;
+            border: 2px dashed #f59e0b;
+            border-radius: 8px;
+            padding: 15px 20px;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        .create-admin-box input {
+            padding: 8px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+            outline: none;
+        }
+        .create-admin-box input:focus {
+            border-color: #667eea;
+        }
+        .create-admin-box .btn-create {
+            background: #f59e0b;
+            color: white;
+            border: none;
+            padding: 8px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .create-admin-box .btn-create:hover {
+            background: #d97706;
+        }
+        .text-muted {
+            color: #6b7280;
+            font-size: 12px;
+        }
+        .danger-zone {
+            border: 2px solid #ef4444;
+            background: #fef2f2;
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+        .danger-zone .title {
+            color: #dc2626;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        @media (max-width: 768px) {
+            .header { flex-direction: column; text-align: center; }
+            .header h1 { font-size: 20px; }
+            .stats { grid-template-columns: repeat(2, 1fr); }
+            table { font-size: 12px; }
+            table th, table td { padding: 6px 8px; }
+            .password-cell { font-size: 11px; }
+            .create-admin-box { flex-direction: column; align-items: stretch; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 顶部 -->
+        <div class="header">
+            <h1>🔐 管理员后台 - 用户密码管理</h1>
+            <div class="actions">
+                <button onclick="window.location.href='questions.html'">📚 题库中心</button>
+                <button onclick="location.reload()">🔄 刷新</button>
+                <button onclick="window.location.href='index.html'">🏠 返回首页</button>
+            </div>
+        </div>
+
+        <!-- 统计 -->
+        <div class="stats" id="stats">
+            <div class="card">
+                <div class="number" id="total-users">0</div>
+                <div class="label">👥 总用户</div>
+            </div>
+            <div class="card">
+                <div class="number" id="pending-users">0</div>
+                <div class="label">⏳ 待审核</div>
+            </div>
+            <div class="card">
+                <div class="number" id="admin-count">0</div>
+                <div class="label">👑 管理员</div>
+            </div>
+            <div class="card">
+                <div class="number" id="active-users">0</div>
+                <div class="label">✅ 活跃用户</div>
+            </div>
+        </div>
+
+        <!-- 用户列表 -->
+        <div class="card">
+            <div class="title">
+                <span>📋 所有用户列表（含密码）</span>
+                <div>
+                    <button class="export-btn" onclick="exportData()">📥 导出数据</button>
+                    <span class="badge" id="user-count-badge">0 人</span>
+                </div>
+            </div>
+
+            <!-- 创建管理员 -->
+            <div class="create-admin-box">
+                <span style="font-weight:bold;">👑 快速创建管理员：</span>
+                <input type="text" id="admin-username" placeholder="用户名" style="flex:1;min-width:120px;">
+                <input type="text" id="admin-email" placeholder="邮箱" style="flex:1;min-width:150px;">
+                <input type="text" id="admin-password" placeholder="密码" style="flex:1;min-width:120px;" value="admin123">
+                <button class="btn-create" onclick="createAdmin()">➕ 创建管理员</button>
+            </div>
+
+            <!-- 搜索 -->
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="🔍 搜索用户名、邮箱..." oninput="filterTable()">
+                <select id="filter-status" onchange="filterTable()">
+                    <option value="all">全部状态</option>
+                    <option value="approved">已审核</option>
+                    <option value="pending">待审核</option>
+                    <option value="active">已启用</option>
+                    <option value="inactive">已禁用</option>
+                </select>
+                <select id="filter-role" onchange="filterTable()">
+                    <option value="all">全部角色</option>
+                    <option value="admin">管理员</option>
+                    <option value="user">普通用户</option>
+                </select>
+                <button onclick="filterTable()">筛选</button>
+                <button onclick="resetFilter()" style="background:#6b7280;">重置</button>
+            </div>
+
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>用户名</th>
+                            <th>邮箱</th>
+                            <th>🔑 密码</th>
+                            <th>角色</th>
+                            <th>审核状态</th>
+                            <th>账号状态</th>
+                            <th>注册时间</th>
+                            <th>最后登录</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="user-table-body">
+                        <tr>
+                            <td colspan="10" style="text-align:center;padding:40px;">
+                                <div style="font-size:20px;color:#6b7280;">⏳ 加载中...</div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 危险操作区 -->
+            <div class="danger-zone">
+                <div class="title">⚠️ 危险操作区</div>
+                <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                    <button onclick="clearAllUsers()" style="background:#ef4444;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">🗑️ 删除所有用户</button>
+                    <button onclick="resetDB()" style="background:#dc2626;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">🔄 重置数据库</button>
+                </div>
+                <p class="text-muted" style="margin-top:8px;">⚠️ 危险操作，请谨慎使用！</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'api.php';
+        let csrf = '';
+        let allUsers = [];
+
+        // ===================== API调用 =====================
+        async function api(action, postData = {}) {
+            const fd = new FormData();
+            fd.set('action', action);
+            if (csrf) fd.set('csrf_token', csrf);
+            for (let k in postData) {
+                fd.set(k, postData[k]);
+            }
+            try {
+                const res = await fetch(API_URL, { method: 'POST', body: fd });
+                const json = await res.json();
+                if (json.csrf_token) csrf = json.csrf_token;
+                return json;
+            } catch (e) {
+                return { success: false, message: '网络错误: ' + e.message };
+            }
+        }
+
+        // ===================== Toast通知 =====================
+        function showToast(msg, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = msg;
+            document.body.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(100%)';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // ===================== 复制密码 =====================
+        function copyPassword(password) {
+            navigator.clipboard.writeText(password).then(() => {
+                showToast('✅ 密码已复制到剪贴板');
+            }).catch(() => {
+                const input = document.createElement('input');
+                input.value = password;
+                document.body.appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                document.body.removeChild(input);
+                showToast('✅ 密码已复制到剪贴板');
+            });
+        }
+
+        // ===================== 创建管理员 =====================
+        async function createAdmin() {
+            const username = document.getElementById('admin-username').value.trim();
+            const email = document.getElementById('admin-email').value.trim();
+            const password = document.getElementById('admin-password').value.trim();
+
+            if (!username || !email || !password) {
+                showToast('请完整填写用户名、邮箱和密码', 'error');
+                return;
+            }
+
+            // 检查是否已存在
+            const exist = allUsers.find(u => u.username === username || u.email === email);
+            if (exist) {
+                showToast('用户名或邮箱已存在', 'error');
+                return;
+            }
+
+            try {
+                // 直接插入用户（明文密码）
+                const fd = new FormData();
+                fd.set('action', 'create_admin');
+                fd.set('username', username);
+                fd.set('email', email);
+                fd.set('password', password);
+                if (csrf) fd.set('csrf_token', csrf);
+
+                const res = await fetch(API_URL, { method: 'POST', body: fd });
+                const json = await res.json();
+
+                if (json.success) {
+                    showToast('✅ 管理员创建成功！');
+                    document.getElementById('admin-username').value = '';
+                    document.getElementById('admin-email').value = '';
+                    document.getElementById('admin-password').value = 'admin123';
+                    loadUsers();
+                } else {
+                    showToast('创建失败: ' + json.message, 'error');
+                }
+            } catch (e) {
+                showToast('创建失败: ' + e.message, 'error');
+            }
+        }
+
+        // ===================== 加载用户数据 =====================
+        async function loadUsers() {
+            try {
+                const ret = await api('get_admin_panel', {});
+                if (!ret.success) {
+                    document.getElementById('user-table-body').innerHTML = `
+                        <tr><td colspan="10" style="text-align:center;padding:40px;color:#ef4444;">
+                            ❌ ${ret.message}
+                        </td></tr>
+                    `;
+                    return;
+                }
+
+                allUsers = ret.data.users || [];
+                renderUsers(allUsers);
+
+                // 更新统计
+                const total = allUsers.length;
+                const pending = allUsers.filter(u => !u.is_approved).length;
+                const admins = allUsers.filter(u => u.is_admin).length;
+                const active = allUsers.filter(u => u.is_active).length;
+
+                document.getElementById('total-users').textContent = total;
+                document.getElementById('pending-users').textContent = pending;
+                document.getElementById('admin-count').textContent = admins;
+                document.getElementById('active-users').textContent = active;
+                document.getElementById('user-count-badge').textContent = total + ' 人';
+
+            } catch (e) {
+                document.getElementById('user-table-body').innerHTML = `
+                    <tr><td colspan="10" style="text-align:center;padding:40px;color:#ef4444;">
+                        ❌ 加载失败: ${e.message}
+                    </td></tr>
+                `;
+            }
+        }
+
+        // ===================== 渲染表格 =====================
+        function renderUsers(users) {
+            if (!users || users.length === 0) {
+                document.getElementById('user-table-body').innerHTML = `
+                    <tr><td colspan="10" style="text-align:center;padding:40px;color:#6b7280;">
+                        📭 暂无用户数据，请创建管理员
+                    </td></tr>
+                `;
+                return;
+            }
+
+            document.getElementById('user-table-body').innerHTML = users.map(u => `
+                <tr>
+                    <td><strong>${u.id}</strong></td>
+                    <td><strong>${u.username}</strong></td>
+                    <td>${u.email}</td>
+                    <td>
+                        <span class="password-cell">${u.password}</span>
+                        <button class="copy-btn" onclick="copyPassword('${u.password}')">复制</button>
+                    </td>
+                    <td>
+                        <span class="badge-status ${u.is_admin ? 'badge-admin' : 'badge-user'}">
+                            ${u.is_admin ? '👑 管理员' : '👤 用户'}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="badge-status ${u.is_approved ? 'badge-approved' : 'badge-pending'}">
+                            ${u.is_approved ? '✅ 已审核' : '⏳ 待审核'}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="badge-status ${u.is_active ? 'badge-active' : 'badge-inactive'}">
+                            ${u.is_active ? '🟢 启用' : '🔴 禁用'}
+                        </span>
+                    </td>
+                    <td style="font-size:12px;color:#6b7280;">${u.created_at || '-'}</td>
+                    <td style="font-size:12px;color:#6b7280;">${u.last_login || '从未登录'}</td>
+                    <td>
+                        ${!u.is_admin ? `<button class="copy-btn" onclick="makeAdmin(${u.id})" style="background:#f59e0b;">设为管理</button>` : ''}
+                        <button class="copy-btn" onclick="deleteUser(${u.id})" style="background:#ef4444;">删除</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // ===================== 筛选 =====================
+        function filterTable() {
+            const keyword = document.getElementById('search-input').value.toLowerCase().trim();
+            const status = document.getElementById('filter-status').value;
+            const role = document.getElementById('filter-role').value;
+
+            let filtered = allUsers;
+
+            if (keyword) {
+                filtered = filtered.filter(u => 
+                    u.username.toLowerCase().includes(keyword) ||
+                    u.email.toLowerCase().includes(keyword)
+                );
+            }
+
+            if (status === 'approved') {
+                filtered = filtered.filter(u => u.is_approved);
+            } else if (status === 'pending') {
+                filtered = filtered.filter(u => !u.is_approved);
+            } else if (status === 'active') {
+                filtered = filtered.filter(u => u.is_active);
+            } else if (status === 'inactive') {
+                filtered = filtered.filter(u => !u.is_active);
+            }
+
+            if (role === 'admin') {
+                filtered = filtered.filter(u => u.is_admin);
+            } else if (role === 'user') {
+                filtered = filtered.filter(u => !u.is_admin);
+            }
+
+            renderUsers(filtered);
+            document.getElementById('user-count-badge').textContent = filtered.length + ' 人';
+        }
+
+        function resetFilter() {
+            document.getElementById('search-input').value = '';
+            document.getElementById('filter-status').value = 'all';
+            document.getElementById('filter-role').value = 'all';
+            renderUsers(allUsers);
+            document.getElementById('user-count-badge').textContent = allUsers.length + ' 人';
+        }
+
+        // ===================== 导出数据 =====================
+        function exportData() {
+            if (!allUsers || allUsers.length === 0) {
+                showToast('没有数据可导出', 'error');
+                return;
+            }
+
+            const headers = ['ID', '用户名', '邮箱', '密码', '角色', '审核状态', '账号状态', '注册时间', '最后登录'];
+            const rows = allUsers.map(u => [
+                u.id,
+                u.username,
+                u.email,
+                u.password,
+                u.is_admin ? '管理员' : '普通用户',
+                u.is_approved ? '已审核' : '待审核',
+                u.is_active ? '启用' : '禁用',
+                u.created_at || '',
+                u.last_login || ''
+            ]);
+
+            let csv = headers.join(',') + '\n';
+            rows.forEach(row => {
+                csv += row.map(cell => `"${cell}"`).join(',') + '\n';
+            });
+
+            const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `用户数据_${new Date().toLocaleDateString()}.csv`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            showToast('✅ 数据导出成功');
+        }
+
+        // ===================== 管理员操作 =====================
+        async function makeAdmin(uid) {
+            if (!confirm('确定要将该用户设为管理员吗？')) return;
+            try {
+                const ret = await api('make_admin', { user_id: uid });
+                if (ret.success) {
+                    showToast('✅ 已设为管理员');
+                    loadUsers();
+                } else {
+                    showToast(ret.message, 'error');
+                }
+            } catch (e) {
+                showToast('操作失败: ' + e.message, 'error');
+            }
+        }
+
+        async function deleteUser(uid) {
+            if (!confirm('确定要删除该用户吗？此操作不可撤销！')) return;
+            try {
+                const ret = await api('delete_user', { user_id: uid });
+                if (ret.success) {
+                    showToast('✅ 用户已删除');
+                    loadUsers();
+                } else {
+                    showToast(ret.message, 'error');
+                }
+            } catch (e) {
+                showToast('操作失败: ' + e.message, 'error');
+            }
+        }
+
+        async function clearAllUsers() {
+            if (!confirm('⚠️ 确定要删除所有用户吗？此操作不可撤销！')) return;
+            if (!confirm('再次确认：删除所有用户数据！')) return;
+            try {
+                const ret = await api('clear_users', {});
+                if (ret.success) {
+                    showToast('✅ 所有用户已删除');
+                    loadUsers();
+                } else {
+                    showToast(ret.message, 'error');
+                }
+            } catch (e) {
+                showToast('操作失败: ' + e.message, 'error');
+            }
+        }
+
+        async function resetDB() {
+            if (!confirm('⚠️ 确定要重置数据库吗？所有数据将丢失！')) return;
+            if (!confirm('再次确认：重置整个数据库！')) return;
+            try {
+                const ret = await api('reset_db', {});
+                if (ret.success) {
+                    showToast('✅ 数据库已重置');
+                    loadUsers();
+                } else {
+                    showToast(ret.message, 'error');
+                }
+            } catch (e) {
+                showToast('操作失败: ' + e.message, 'error');
+            }
+        }
+
+        // ===================== 页面初始化 =====================
+        loadUsers();
+
+        // 自动刷新（每30秒）
+        setInterval(loadUsers, 30000);
+    </script>
+</body>
+</html>
