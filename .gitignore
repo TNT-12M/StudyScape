@@ -1,0 +1,21 @@
+# ===== 数据库文件（永远不要提交）=====
+exam.db
+exam.db-journal
+exam.db-wal
+exam.db-shm
+*.sqlite
+*.sqlite3
+*.db
+
+# ===== 临时/运行时文件 =====
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+
+# ===== 密码/密钥类临时脚本 =====
+*password*.php
+*restore*.php
+push_me.bundle
