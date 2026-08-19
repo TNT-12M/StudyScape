@@ -629,6 +629,53 @@
 
     <!-- =================== 批量导入（管理员） =================== -->
     <div class="panel" id="panel-import">
+        <!-- 文档智能导入：把 extract.py 能力暴露到 Web 端 -->
+        <div class="card" style="border:2px dashed var(--primary);background:#f8f9ff;">
+            <div class="card-header" style="border-bottom-color:var(--primary);">
+                <span>📄 文档智能导入（PDF/Word/TXT → 自动解析）</span>
+                <span class="badge badge-type">Beta</span>
+            </div>
+            <div id="extract-alert"></div>
+
+            <!-- 拖拽 / 点击上传区 -->
+            <div id="drop-zone" style="
+                border:2px dashed var(--border);
+                border-radius:8px;
+                padding:1.5rem;
+                text-align:center;
+                cursor:pointer;
+                transition:all 0.3s;
+                background:white;
+            ">
+                <div style="font-size:2.5rem;">📄</div>
+                <div id="drop-zone-label" style="margin-top:0.5rem;font-weight:500;">点击选择 或 拖拽文件到此处</div>
+                <div class="text-muted" style="font-size:0.8rem;margin-top:0.3rem;color:var(--text-light);">
+                    支持 PDF / DOC / DOCX / TXT / MD，最大 10MB · 需要 OCR 的扫描件可能耗时 1-2 分钟
+                </div>
+                <input type="file" id="doc-file" accept=".pdf,.doc,.docx,.txt,.md"
+                       style="display:none;" onchange="onDocPicked(event)">
+            </div>
+
+            <!-- 进度条 -->
+            <div id="extract-progress" class="hide" style="margin-top:1rem;">
+                <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:0.3rem;color:var(--text-light);">
+                    <span id="extract-status">上传中...</span>
+                    <span id="extract-percent">0%</span>
+                </div>
+                <div style="background:var(--border);border-radius:9999px;overflow:hidden;height:8px;">
+                    <div id="extract-bar" style="background:var(--primary);height:100%;width:0;transition:width 0.2s;"></div>
+                </div>
+            </div>
+
+            <!-- 解析后预览统计 -->
+            <div id="extract-result" class="hide" style="margin-top:1rem;"></div>
+
+            <div class="actions-bar" style="margin-top:1rem;">
+                <button class="btn btn-info" onclick="doExtract()">🤖 智能解析</button>
+                <button class="btn btn-secondary" onclick="clearDocPick()">清除</button>
+            </div>
+        </div>
+
         <div class="card">
             <div class="card-header">
                 <span>📥 批量导入 (JSON)</span>
@@ -786,8 +833,9 @@ const TYPE_LABELS = { single:'单选题', multiple:'多选题', judge:'判断题
 
 // ===================== API 调用 =====================
 // 超时控制：避免后端 hang 住时前端一直显示"加载中"
+// 第三个参数 timeoutMs 用于复用同一通道处理较长任务（如批量解析）
 let _reqSeq = 0;
-async function api(action, postData = {}) {
+async function api(action, postData = {}, timeoutMs = 15000) {
     const fd = new FormData();
     fd.set('action', action);
     if (csrf) fd.set('csrf_token', csrf);
@@ -796,7 +844,7 @@ async function api(action, postData = {}) {
     }
     const seq = ++_reqSeq;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);  // 15秒超时
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);  // 默认 15s，可由调用方按需放宽
     const startedAt = performance.now();
     try {
         const res = await fetch(API_URL, {
@@ -1312,6 +1360,146 @@ async function doImport() {
     await loadStats();
     await loadSubjects();
     await reloadList(1);
+}
+
+// ===================== 文档智能导入 =====================
+// 把 extract.py 能力通过 Web 端暴露：上传 → 解析 → 回填 JSON 文本框 → 复用 doImport 入库
+let pickedFile = null;
+
+function onDocPicked(event) {
+    const files = event.target?.files || (event.dataTransfer?.files);
+    const f = files && files[0];
+    if (!f) return;
+    pickedFile = f;
+    const sizeMB = (f.size / 1024 / 1024).toFixed(2);
+    document.getElementById('drop-zone-label').textContent = `已选择: ${f.name} (${sizeMB} MB)`;
+    setAlert('extract-alert', '', 'info');
+    document.getElementById('extract-result').classList.add('hide');
+}
+
+function clearDocPick() {
+    pickedFile = null;
+    document.getElementById('doc-file').value = '';
+    document.getElementById('drop-zone-label').textContent = '点击选择 或 拖拽文件到此处';
+    document.getElementById('extract-progress').classList.add('hide');
+    document.getElementById('extract-result').classList.add('hide');
+    setAlert('extract-alert', '', 'info');
+}
+
+// 绑定拖拽 + 点击
+(function bindDropZone() {
+    const dz = document.getElementById('drop-zone');
+    if (!dz) return;
+    dz.addEventListener('dragover', e => {
+        e.preventDefault();
+        dz.style.borderColor = 'var(--primary)';
+        dz.style.background = '#eef';
+    });
+    dz.addEventListener('dragleave', () => {
+        dz.style.borderColor = 'var(--border)';
+        dz.style.background = 'white';
+    });
+    dz.addEventListener('drop', e => {
+        e.preventDefault();
+        dz.style.borderColor = 'var(--border)';
+        dz.style.background = 'white';
+        const files = e.dataTransfer.files;
+        if (files && files.length) {
+            // dataTransfer 不可直接赋给 input.files，模拟一个事件
+            onDocPicked({ dataTransfer: { files }, target: {} });
+        }
+    });
+    dz.addEventListener('click', () => document.getElementById('doc-file').click());
+})();
+
+async function doExtract() {
+    if (!pickedFile) {
+        setAlert('extract-alert', '请先选择文件', 'danger');
+        return;
+    }
+
+    const fd = new FormData();
+    fd.set('action', 'extract_document');
+    fd.set('document', pickedFile);
+    fd.set('subject', document.getElementById('import-subject').value.trim());
+    if (csrf) fd.set('csrf_token', csrf);
+
+    // UI: 显示进度条
+    const progBox = document.getElementById('extract-progress');
+    const resBox  = document.getElementById('extract-result');
+    const barEl   = document.getElementById('extract-bar');
+    const statEl = document.getElementById('extract-status');
+    const pctEl   = document.getElementById('extract-percent');
+
+    progBox.classList.remove('hide');
+    resBox.classList.add('hide');
+    barEl.style.width = '0%';
+    statEl.textContent = '上传中...';
+    pctEl.textContent = '0%';
+    setAlert('extract-alert', '', 'info');
+
+    // 走独立 XHR 通道以获取上传进度（fetch 暂不便支持 upload progress）
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', API_URL);
+    xhr.upload.onprogress = e => {
+        if (!e.lengthComputable) return;
+        const pct = Math.round(e.loaded / e.total * 100);
+        barEl.style.width = pct + '%';
+        pctEl.textContent = pct + '%';
+        if (pct === 100) {
+            statEl.textContent = '服务器解析中（OCR 大文件可能需 1-2 分钟）...';
+        }
+    };
+
+    const result = await new Promise(resolve => {
+        xhr.onload = () => {
+            try {
+                resolve(JSON.parse(xhr.responseText));
+            } catch (err) {
+                resolve({ success: false, message: '服务器响应非 JSON: ' + xhr.responseText.slice(0, 200) });
+            }
+        };
+        xhr.onerror = () => resolve({ success: false, message: '网络错误：请求未送达服务器' });
+        xhr.ontimeout = () => resolve({ success: false, message: '请求超时（OCR 大文件可能需更长时间，请尝试拆分文档或调整 php.ini max_execution_time）' });
+        xhr.timeout = 180000; // 3 分钟，与后端 set_time_limit(180) 对齐
+        xhr.send(fd);
+    });
+
+    progBox.classList.add('hide');
+
+    if (!result.success) {
+        // 区分 Python 缺失 / 其他错误，给出不同回退提示
+        const msg = result.message || '解析失败';
+        if (msg.indexOf('Python') >= 0 || msg.indexOf('extract.py') >= 0) {
+            setAlert('extract-alert',
+                '⚠️ ' + escapeHtml(msg) +
+                '<br><br>如需启用文档智能导入，请按技术文档 §6.1 安装 Python 3 与依赖；' +
+                '在此之前，您可继续使用下方 <b>JSON 批量导入</b>。',
+                'warning');
+        } else {
+            setAlert('extract-alert', escapeHtml(msg), 'danger');
+        }
+        return;
+    }
+    if (result.csrf_token) csrf = result.csrf_token;
+
+    const data = result.data;
+    // 回填到现有 JSON 文本框，复用 import_questions_json 入库
+    document.getElementById('import-json').value = JSON.stringify(data.questions, null, 2);
+
+    resBox.classList.remove('hide');
+    resBox.innerHTML = `
+        <div class="alert alert-success">
+            ✅ 解析成功：共 <b>${data.parsed_count}</b> 道题
+            （方式: ${escapeHtml(data.method || 'unknown')}，识别科目: ${escapeHtml(data.subject)}）<br>
+            <small style="color:var(--text-light);">已自动填入下方 JSON 文本框，请检查后点击「开始导入」</small>
+        </div>
+        <details style="margin-top:0.5rem;">
+            <summary style="cursor:pointer;font-size:0.85rem;color:var(--text-light);">查看原文片段（前 500 字）</summary>
+            <pre class="pre-wrap" style="margin-top:0.3rem;">${escapeHtml(data.raw_text_preview || '')}</pre>
+        </details>
+    `;
+    toast('解析完成，请确认后点击下方「开始导入」');
 }
 
 // ===================== 管理：列表 =====================

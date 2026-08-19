@@ -682,6 +682,83 @@ if ($action) {
                 ]);
                 break;
 
+            // ---------- 文档智能导入（解析阶段，不写库） ----------
+            case 'extract_document':
+                if (!isLoggedIn()) jsonOut(false, "请先登录");
+                if (!isAdmin())    jsonOut(false, "权限不足，仅管理员可操作");
+
+                // 1. 文件存在性校验
+                if (!isset($_FILES['document']) || $_FILES['document']['error'] !== UPLOAD_ERR_OK) {
+                    jsonOut(false, "未收到文件或上传失败（错误码: " . ($_FILES['document']['error'] ?? -1) . "）");
+                }
+
+                $file = $_FILES['document'];
+                $ext  = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+
+                // 2. 解析器注册表：扩展名 → 处理器
+                $parsers = getParsers();
+                if (!isset($parsers[$ext])) {
+                    jsonOut(false, "不支持的文件类型: .$ext，当前支持: " . implode('/', array_keys($parsers)));
+                }
+
+                // 3. 大小校验（10MB）
+                if ($file['size'] > 10 * 1024 * 1024) {
+                    jsonOut(false, "文件过大（" . round($file['size']/1024/1024, 2) . "MB），最大支持 10MB");
+                }
+
+                // 4. MIME 简单校验（防伪造扩展名）
+                $allowedMime = [
+                    'pdf'  => ['application/pdf', 'application/x-pdf'],
+                    'doc'  => ['application/msword'],
+                    'docx' => ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+                    'txt'  => ['text/plain', 'application/octet-stream'],
+                    'md'   => ['text/plain', 'text/markdown', 'application/octet-stream'],
+                ];
+                $finfo = new finfo(FILEINFO_MIME_TYPE);
+                $mime  = $finfo->file($file['tmp_name']);
+                if (!empty($allowedMime[$ext]) && !in_array($mime, $allowedMime[$ext], true)) {
+                    jsonOut(false, "文件内容与扩展名不匹配（检测到 MIME: $mime）");
+                }
+
+                // 5. 保存到 uploads/（自动建目录）
+                $uploadsDir = __DIR__ . '/uploads';
+                if (!is_dir($uploadsDir)) @mkdir($uploadsDir, 0755, true);
+                $tmpFile = $uploadsDir . '/import_' . uniqid('doc_', true) . '.' . $ext;
+                if (!move_uploaded_file($file['tmp_name'], $tmpFile)) {
+                    jsonOut(false, "临时文件保存失败，请检查 uploads 目录权限");
+                }
+
+                try {
+                    $parsed = call_user_func($parsers[$ext], $tmpFile, $file['name']);
+                } catch (Exception $e) {
+                    @unlink($tmpFile);
+                    jsonOut(false, "解析异常: " . $e->getMessage());
+                }
+                @unlink($tmpFile); // 用完即删
+
+                if (empty($parsed['success'])) {
+                    jsonOut(false, $parsed['message'] ?? '解析失败');
+                }
+
+                // 6. 归一化为扁平数组（与 import_questions_json 兼容）
+                $subjectOverride = sanitizeInput($_POST['subject'] ?? '');
+                $flat = normalizeExtractedQuestions(
+                    $parsed['questions'] ?? [],
+                    $subjectOverride,
+                    $file['name'],
+                    $parsed['text'] ?? ''
+                );
+
+                jsonOut(true, "解析完成: 共 " . count($flat) . " 道题（method=" . ($parsed['method'] ?? 'unknown') . "）", [
+                    'questions'         => $flat,
+                    'subject'           => $subjectOverride !== '' ? $subjectOverride : detectSubjectFromName($file['name'], $parsed['text'] ?? ''),
+                    'method'            => $parsed['method'] ?? '',
+                    'file_type'         => $parsed['type'] ?? $ext,
+                    'raw_text_preview'  => mb_substr($parsed['text'] ?? '', 0, 500),
+                    'parsed_count'      => count($flat)
+                ]);
+                break;
+
             // ==================== 默认 ====================
             default:
                 jsonOut(false, "未知操作");
@@ -840,5 +917,140 @@ function importEstimateDifficulty(string $text): int {
     if ($len < 300) return 3;
     if ($len < 500) return 4;
     return 5;
+}
+
+// =====================================================
+// ============== 文档智能导入辅助函数 =================
+// =====================================================
+// 设计目标：
+//   1) 解析器注册表模式：新增格式只需在 getParsers() 注册一项
+//   2) 不直接依赖具体实现（Python / PHP 原生均可），保证可替换
+//   3) 输出格式与 import_questions_json 兼容，可无缝回填入库
+
+/**
+ * 解析器注册表
+ * 新增格式时只需在此注册一项：'扩展名' => '处理器函数名'
+ * 每个 parser 必须返回:
+ *   ['success'=>bool, 'message'=>?, 'method'=>?, 'text'=>?, 'questions'=>[], 'type'=>?]
+ */
+function getParsers(): array {
+    return [
+        'pdf'   => 'parserPythonExtract',
+        'doc'   => 'parserPythonExtract',
+        'docx'  => 'parserPythonExtract',
+        'txt'   => 'parserPythonExtract',
+        'md'    => 'parserPythonExtract',
+        // 扩展示例（未启用，预留接口）：
+        // 'csv'  => 'parserCsv',
+        // 'xlsx' => 'parserXlsx',
+    ];
+}
+
+/**
+ * 调用 extract.py 解析文档（兼容 PDF/DOC/DOCX/TXT/MD）
+ * 依赖：Python 3 + extract.py 同目录 + (可选) pdftotext / pdf2image / pytesseract / python-docx / antiword
+ */
+function parserPythonExtract(string $tmpFile, string $origName): array {
+    $pyBin = getPythonBinary();
+    if ($pyBin === null) {
+        return [
+            'success' => false,
+            'message' => '服务器未安装 Python 或不可调用（python/python3 均失败）。请联系运维安装 Python 3，或继续使用 JSON 导入。',
+        ];
+    }
+    $script = __DIR__ . '/extract.py';
+    if (!file_exists($script)) {
+        return ['success' => false, 'message' => 'extract.py 脚本缺失'];
+    }
+
+    // 命令三段全部 escapeshellarg 包裹，防止注入
+    $cmd = escapeshellarg($pyBin) . ' ' . escapeshellarg($script)
+         . ' ' . escapeshellarg($tmpFile) . ' --parse 2>&1';
+
+    // 临时抬高执行时间，避免 OCR 大文件超时
+    $origLimit = @ini_get('max_execution_time');
+    @set_time_limit(180);
+
+    $output = shell_exec($cmd);
+
+    if ($origLimit) @set_time_limit((int)$origLimit);
+
+    if ($output === null || $output === '') {
+        return ['success' => false, 'message' => '调用 extract.py 无输出（可能 shell_exec 被 php.ini disable_functions 禁用）'];
+    }
+    $data = json_decode($output, true);
+    if (!is_array($data)) {
+        return ['success' => false, 'message' => 'extract.py 输出非 JSON: ' . mb_substr($output, 0, 200)];
+    }
+    return $data;
+}
+
+/**
+ * 探测可用 Python 二进制
+ * 优先级：环境变量 PYTHON_BIN > python > python3
+ * 结果在单次请求内缓存
+ */
+function getPythonBinary(): ?string {
+    static $cached = null;
+    if ($cached !== null) return $cached === '' ? null : $cached;
+
+    $env = getenv('PYTHON_BIN');
+    if ($env && isPythonBinaryReady($env)) {
+        $cached = $env;
+        return $cached;
+    }
+    foreach (['python', 'python3'] as $c) {
+        if (isPythonBinaryReady($c)) {
+            $cached = $c;
+            return $cached;
+        }
+    }
+    $cached = '';
+    return null;
+}
+
+function isPythonBinaryReady(string $bin): bool {
+    $test = @shell_exec(escapeshellarg($bin) . ' --version 2>&1');
+    return $test !== null && stripos($test, 'Python') !== false;
+}
+
+/**
+ * 归一化 extract.py 输出为扁平数组（与 import_questions_json 兼容）
+ * 缺省字段按 importNormalizeFlat() 的同款规则补齐
+ */
+function normalizeExtractedQuestions(array $questions, string $subjectOverride, string $fileName, string $rawText): array {
+    $subject = $subjectOverride !== '' ? $subjectOverride : detectSubjectFromName($fileName, $rawText);
+    $flat = [];
+    foreach ($questions as $q) {
+        $content = $q['content'] ?? '';
+        if (trim($content) === '') continue;
+        $flat[] = [
+            'subject'        => $subject,
+            'question_type'  => $q['question_type'] ?? 'single',
+            'content'        => $content,
+            'options'        => $q['options'] ?? null,
+            'correct_answer' => $q['correct_answer'] ?? '',
+            'explanation'    => null,
+            'difficulty'     => $q['difficulty'] ?? importEstimateDifficulty($content),
+            'points'         => (float)($q['points'] ?? 2.0),
+        ];
+    }
+    return $flat;
+}
+
+/**
+ * 从文件名 + 文本片段识别科目（与 import_questions_json 共用同一份 subjectMap）
+ */
+function detectSubjectFromName(string $fileName, string $rawText = ''): string {
+    $subjectMap = [
+        '生物' => '生物', '化学' => '化学', '物理' => '物理', '数学' => '数学',
+        '英语' => '英语', '语文' => '语文', '历史' => '历史', '地理' => '地理',
+        '政治' => '政治', '信息技术' => '信息技术', '计算机' => '信息技术',
+    ];
+    $haystack = $fileName . ' ' . mb_substr($rawText, 0, 500);
+    foreach ($subjectMap as $k => $v) {
+        if (str_contains($haystack, $k)) return $v;
+    }
+    return '综合';
 }
 ?>
