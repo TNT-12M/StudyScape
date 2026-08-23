@@ -1227,24 +1227,33 @@ async function loadPaperSubjects() {
         if (cur) sel.value = cur;
     }
 }
-async function loadManageSubjects() {
+// ownerReqId：调用方传入的「请求世代」，若调用期间用户切学段/点取消导致世代号推进，
+// 我们就不刷新科目下拉（旧结果覆盖新 UI 会导致科目/列表不一致）。
+async function loadManageSubjects(ownerReqId) {
     const level = document.getElementById('manage-level')?.value || '';
-    const ret = await api('get_subjects', { education_level: level });
+    if (!level) return;
+    const ret = await api('get_subjects', { education_level: level }, 10000);
+    if (ownerReqId != null && ownerReqId !== _manageReqId) return;     // 已被新请求取代，静默丢弃
+    const sel = document.getElementById('manage-subject');
     if (!ret.success) {
-        // 失败不阻塞后续列表加载，但toast提示
+        if (sel) {
+            const prevOnChange = sel.onchange;
+            sel.onchange = null;
+            sel.innerHTML = '<option value="">全部</option>';
+            sel.value = '';
+            sel.onchange = prevOnChange;
+        }
+        // 失败不阻塞后续列表加载，但 toast 提示（只给一次，避免并发多次）
         toast('加载管理区科目失败：' + (ret.message || ''), 'error');
         return;
     }
     const subjects = ret.data.subjects || [];
-    const sel = document.getElementById('manage-subject');
     if (sel) {
-        // 临时禁用 onchange，避免再次触发 loadManageList 导致并发/重复请求
         const prevOnChange = sel.onchange;
         const prev = sel.value;
         sel.onchange = null;
         sel.innerHTML = '<option value="">全部</option>' +
             subjects.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
-        // 之前选过的科目仍在新集合内则保留，否则回到“全部”
         if (prev && subjects.indexOf(prev) >= 0) sel.value = prev; else sel.value = '';
         sel.onchange = prevOnChange;
     }
@@ -1790,69 +1799,147 @@ async function doExtract() {
 }
 
 // ===================== 管理：列表 =====================
-// 防止切换学段/科目时多次触发 loadManageList，导致一直转圈。
-let _manageLoading = false;
+// 用「请求世代 ID」取代简单布尔锁：取消、重入、联动刷新时旧请求即使晚到也不会把 UI 渲染回 loading；
+// 并接入 AbortController 真取消，避免旧请求仍占用 finally 释放锁。
+let _manageReqId = 0;
+let _manageAbort = null;
 async function loadManageList(page) {
     if (!currentUser || !currentUser.is_admin) return;
-    if (_manageLoading) return;
-    const level = document.getElementById('manage-level').value;
+    const levelEl = document.getElementById('manage-level');
+    const listEl  = document.getElementById('manage-list');
+    const pageEl  = document.getElementById('manage-pagination');
+    if (!levelEl || !listEl) return;
+    const level = levelEl.value;
     if (!level) {
-        document.getElementById('manage-list').innerHTML = '<div class="empty-state"><div class="icon">🎓</div><div>请先选择学段</div></div>';
-        document.getElementById('manage-pagination').innerHTML = '';
+        if (_manageAbort) { try { _manageAbort.abort(); } catch (e) {} _manageAbort = null; }
+        _manageReqId++;          // 作废仍在飞的任何旧请求
+        listEl.innerHTML = '<div class="empty-state"><div class="icon">🎓</div><div>请先选择学段</div></div>';
+        if (pageEl) pageEl.innerHTML = '';
         manageState.selected.clear();
         updateManageSelection();
         return;
     }
-    const listEl = document.getElementById('manage-list');
+    // 每次进入新请求：先取消旧请求、再 bump 世代号，之后只有自己这条世代能渲染成功/失败态。
+    if (_manageAbort) { try { _manageAbort.abort(); } catch (e) {} _manageAbort = null; }
+    const myId = ++_manageReqId;
+    const abort = new AbortController();
+    _manageAbort = abort;
+    manageState.page = page || 1;
     const savedScroll = window.scrollY;
-    // 先显示“加载中”，再做任何异步请求，保证请求未回来前 UI 至少可取消重试
     listEl.innerHTML = `<div class="loading"><div class="spinner"></div><div>加载中...</div></div>
         <div style="text-align:center;margin-top:8px">
             <button class="btn btn-sm btn-secondary" onclick="_cancelManageLoading()">⏹ 取消/重试</button>
         </div>`;
     requestAnimationFrame(() => window.scrollTo(0, savedScroll));
-    _manageLoading = true;
+
+    let ret;
     try {
-        await loadManageSubjects();
-        manageState.page = page || 1;
-        const ret = await api('list_questions', {
+        await loadManageSubjects(myId);
+        if (myId !== _manageReqId) return;   // 被并发/取消取代，不再继续发 list_questions
+        // 把 AbortController 同时塞进 api() 的超时：既要保留后端 20s 超时，也要允许中途取消。
+        const timeoutMs = 20000;
+        const seq = (window.__apiReqSeq = (window.__apiReqSeq || 0) + 1);
+        const startedAt = performance.now();
+        const fd = new FormData();
+        fd.set('action', 'list_questions');
+        if (window.csrf) fd.set('csrf_token', window.csrf);
+        const params = {
             scope: 'manage_all',
             page: manageState.page,
             page_size: 10,
             subject: document.getElementById('manage-subject').value,
             education_level: level,
             qtype:    document.getElementById('manage-type').value,
+            question_type: document.getElementById('manage-type').value,
             keyword:  document.getElementById('manage-keyword').value.trim()
-        }, 20000);
-        if (!ret.success) {
-            listEl.innerHTML = `<div class="alert alert-danger">
-                <strong>加载失败：</strong>${escapeHtml(ret.message)}
-                <br><br>
-                <button class="btn btn-sm btn-primary" onclick="loadManageList(${manageState.page})">🔄 重试</button>
-            </div>`;
-            return;
+        };
+        for (const k in params) {
+            if (params[k] !== undefined && params[k] !== null) fd.set(k, params[k]);
         }
-        const data = ret.data;
-        manageState.total = data.total;
-        manageState.total_pages = data.total_pages;
-        manageState.selected.clear();
-        updateManageSelection();
-        if (!data.items || data.items.length === 0) {
-            listEl.innerHTML = '<div class="empty-state"><div class="icon">📭</div><div>暂无题目</div></div>';
-            document.getElementById('manage-pagination').innerHTML = '';
-            return;
+        const raceAbort = new AbortController();
+        const followAbort = () => { try { raceAbort.abort(); } catch (e) {} };
+        abort.signal.addEventListener('abort', followAbort, { once: true });
+        const timeoutId = setTimeout(() => raceAbort.abort(), timeoutMs);
+        let res;
+        try {
+            res = await fetch(API_URL, {
+                method:'POST', body: fd, signal: raceAbort.signal,
+                credentials:'same-origin', cache:'no-store'
+            });
+        } catch (e) {
+            const elapsed = (performance.now() - startedAt).toFixed(0);
+            const name = (e && e.name) || 'Error';
+            const msg = name === 'AbortError'
+                ? `请求超时或被取消（${elapsed}ms）`
+                : `网络请求失败：${e && e.message ? e.message : e}`;
+            ret = { success: false, message: msg };
+        } finally {
+            clearTimeout(timeoutId);
+            abort.signal.removeEventListener('abort', followAbort);
         }
-        listEl.innerHTML = data.items.map(q => renderQuestionCard(q, true)).join('');
-        updateManageSelection();
-        renderPagination('manage-pagination', data, (p) => loadManageList(p));
-        requestAnimationFrame(() => window.scrollTo(0, savedScroll));
-    } finally {
-        _manageLoading = false;
+        if (!ret && res) {
+            if (!res.ok) {
+                const t = await res.text().catch(() => '<无法读取响应>');
+                ret = { success:false, message:`服务器返回 HTTP ${res.status} ${res.statusText}` };
+                console.error('[manage#list_questions] HTTP', res.status, t.slice(0,200));
+            } else {
+                const txt = await res.text();
+                let json;
+                try { json = JSON.parse(txt); }
+                catch (e) {
+                    ret = { success:false, message:'服务器返回了非 JSON 数据（可能 PHP 报错）' };
+                    console.error('[manage#list_questions] 非 JSON', txt.slice(0,200));
+                }
+                if (json) {
+                    if (json.csrf_token) window.csrf = json.csrf_token;
+                    ret = json;
+                }
+            }
+        }
+    } catch (e) {
+        console.error('loadManageList 异常:', e);
+        ret = { success:false, message: '加载出错：' + (e && e.message ? e.message : e) };
     }
+    // 世代已过期：被后续请求取代 / 取消按钮点过，什么都不渲染（避免覆盖掉新请求的 UI）。
+    if (myId !== _manageReqId) return;
+    _manageAbort = null;
+    if (!ret || !ret.success) {
+        const msg = (ret && ret.message) ? ret.message : '未知错误';
+        listEl.innerHTML = `<div class="alert alert-danger">
+            <strong>加载失败：</strong>${escapeHtml(msg)}
+            <br><br>
+            <button class="btn btn-sm btn-primary" onclick="loadManageList(${manageState.page})">🔄 重试</button>
+            <button class="btn btn-sm btn-secondary" onclick="resetManageFilters()">重置筛选</button>
+        </div>`;
+        if (pageEl) pageEl.innerHTML = '';
+        return;
+    }
+    const data = ret.data || {};
+    manageState.total = data.total || 0;
+    manageState.total_pages = data.total_pages || 1;
+    manageState.selected.clear();
+    updateManageSelection();
+    if (!data.items || data.items.length === 0) {
+        listEl.innerHTML = '<div class="empty-state"><div class="icon">📭</div><div>暂无题目</div></div>';
+        if (pageEl) pageEl.innerHTML = '';
+        return;
+    }
+    listEl.innerHTML = data.items.map(q => renderQuestionCard(q, true)).join('');
+    updateManageSelection();
+    if (pageEl) renderPagination('manage-pagination', data, (p) => loadManageList(p));
+    requestAnimationFrame(() => window.scrollTo(0, savedScroll));
 }
 function _cancelManageLoading() {
-    _manageLoading = false;
+    if (_manageAbort) { try { _manageAbort.abort(); } catch (e) {} _manageAbort = null; }
+    _manageReqId++;    // 让旧请求世代彻底作废，避免旧请求 finally 又改 UI
     loadManageList(manageState.page || 1);
+}
+function resetManageFilters() {
+    const ml = document.getElementById('manage-level'); if (ml) ml.value = '';
+    const ms = document.getElementById('manage-subject'); if (ms) ms.innerHTML = '<option value="">全部</option>';
+    const mt = document.getElementById('manage-type'); if (mt) mt.value = '';
+    const mk = document.getElementById('manage-keyword'); if (mk) mk.value = '';
+    loadManageList(1);
 }
 
 // ===================== 编辑 =====================

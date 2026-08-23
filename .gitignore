@@ -29,3 +29,6 @@ public/.user.ini
 # ===== 打包/构建产物 =====
 *.tar.gz
 update.tar.gz
+
+.ssh_temp/
+
