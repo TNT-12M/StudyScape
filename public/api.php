@@ -2050,7 +2050,8 @@ if ($action) {
                 $subject = sanitizeInput($_POST['subject'] ?? $_GET['subject'] ?? '');
                 $keyword = sanitizeInput($_POST['keyword'] ?? $_GET['keyword'] ?? '');
                 $educationLevel = validateEducationLevel($_POST['education_level'] ?? $_GET['education_level'] ?? '', '');
-                if (isAdmin() && $educationLevel === '') jsonOut(false, '管理员查看资料前请选择学段');
+                // 管理员在资料中心可选择"全部学段"查看所有资料（不再强制必须选具体学段）；
+                // 若需限制学段仅用于筛选，空值即代表跨学段浏览。
                 $where = ['1=1']; $args = [];
                 if ($educationLevel !== '') { $where[] = 'education_level=?'; $args[] = $educationLevel; }
                 if ($subject !== '') { $where[] = "subject=?"; $args[] = $subject; }

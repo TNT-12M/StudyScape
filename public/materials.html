@@ -194,10 +194,22 @@ async function req(action, params = {}) {
         else if (typeof params[k] === 'object') fd.append(k, JSON.stringify(params[k]));
         else fd.append(k, params[k]);
     }
-    const res = await fetch(API, { method: 'POST', body: fd });
-    const j = await res.json();
-    if (j.message && !j.success) alert(j.message);
-    return j;
+    try {
+        const res = await fetch(API, { method: 'POST', body: fd });
+        const txt = await res.text();
+        let j;
+        try { j = JSON.parse(txt); }
+        catch (e) {
+            console.error('[req#' + action + '] 非 JSON 响应:', txt.slice(0, 300));
+            return { success: false, message: '服务器返回了非 JSON 数据' };
+        }
+        if (j.csrf_token) STATE.csrf = j.csrf_token;
+        if (j.message && !j.success) alert(j.message);
+        return j;
+    } catch (e) {
+        console.error('[req#' + action + '] 网络错误:', e);
+        return { success: false, message: '网络请求失败：' + (e.message || e) };
+    }
 }
 
 /* ============ 启动 ============ */
@@ -223,15 +235,9 @@ async function bootstrap() {
     };
     document.getElementById('btnShowUpload').style.display = STATE.isAdmin ? '' : 'none';
     bindDropZone();
-    // 管理员进入后仅做 UI 初始化，不加载列表；选择学段后再触发加载
-    // 普通用户默认为“全部学段”并立即加载
-    if (STATE.isAdmin) {
-        setStage('');
-        document.getElementById('listSummary').textContent = '请选择学段后查看资料';
-        document.getElementById('matGrid').innerHTML = '<div class="empty" style="grid-column:1/-1">管理员请先选择初中或高中</div>';
-    } else {
-        setStage('');
-    }
+    // 管理员进入后默认以"全部学段"加载列表，允许跨学段查看；
+    // 普通用户默认为"全部学段"并立即加载
+    setStage('');
 }
 
 /* ============ 列表渲染 ============ */
@@ -254,7 +260,10 @@ async function loadList() {
     const level = document.getElementById('f-level')?.value || '';
     const kw = document.getElementById('f-kw').value || '';
     const ret = await req('material_list', { education_level: level, subject: sub, keyword: kw });
-    if (!ret.success) return;
+    if (!ret.success) {
+        document.getElementById('listSummary').textContent = '加载失败：' + (ret.message || '未知错误');
+        return;
+    }
     const data = ret.data || {};
     const subs = data.subjects || [];
     const old = document.getElementById('f-subject').value;
