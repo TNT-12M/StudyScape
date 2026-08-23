@@ -164,7 +164,7 @@ try {
         }
     }
     if (!$hasUpdated) {
-        $db->exec("ALTER TABLE questions ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP");
+        $db->exec("ALTER TABLE questions ADD COLUMN updated_at DATETIME");
     }
 } catch (Exception $e) {
     // 静默：表不存在等已被 CREATE 兜底
@@ -197,7 +197,8 @@ try {
         $db->exec("ALTER TABLE materials ADD COLUMN education_level TEXT NOT NULL DEFAULT 'junior'");
     }
     if (!tableHasColumn($db, 'materials', 'updated_at')) {
-        $db->exec("ALTER TABLE materials ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP");
+        // SQLite 的 ALTER ADD COLUMN 不允许 CURRENT_TIMESTAMP 这类非字面量默认值，故省略 DEFAULT（列允许 NULL，写入时由应用层填充）
+        $db->exec("ALTER TABLE materials ADD COLUMN updated_at DATETIME");
     }
     $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='education_level_category_v1'");
     if (!$migration) {
@@ -216,7 +217,8 @@ try {
     $db->exec("CREATE INDEX IF NOT EXISTS idx_materials_education_level ON materials(education_level)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_materials_level_subject ON materials(education_level, subject)");
 } catch (Exception $e) {
-    @$db->exec('ROLLBACK');
+    // ROLLBACK 自身可能因无活跃事务而抛异常（enableExceptions(true) 时 @ 无法抑制），用内部 try-catch 兜底，避免掩盖原始错误
+    try { $db->exec('ROLLBACK'); } catch (Exception $rb) {}
     error_log('education_level migration failed: ' . $e->getMessage());
     die(json_encode(['success' => false, 'message' => '学段字段迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
