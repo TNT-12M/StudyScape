@@ -22,3 +22,10 @@ test/
 *password*.php
 *restore*.php
 push_me.bundle
+
+# ===== 服务器特定配置（含服务器路径/IP，各环境不同，勿入库）=====
+public/.user.ini
+
+# ===== 打包/构建产物 =====
+*.tar.gz
+update.tar.gz
