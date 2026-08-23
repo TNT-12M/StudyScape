@@ -1838,7 +1838,6 @@ async function loadManageList(page) {
         if (myId !== _manageReqId) return;   // 被并发/取消取代，不再继续发 list_questions
         // 把 AbortController 同时塞进 api() 的超时：既要保留后端 20s 超时，也要允许中途取消。
         const timeoutMs = 20000;
-        const seq = (window.__apiReqSeq = (window.__apiReqSeq || 0) + 1);
         const startedAt = performance.now();
         const fd = new FormData();
         fd.set('action', 'list_questions');
