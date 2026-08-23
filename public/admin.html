@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理员后台 - 用户密码管理</title>
+    <link rel="stylesheet" href="assets/app.css">
+    <style>
+        /* admin.html 专用：保留旧的 DOM 类名，仅把颜色改为 app.css 变量 */
+        .topbar {
+            position: sticky; top: 0; z-index: 50;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+        }
+        .topbar-inner {
+            max-width: 1400px; margin: 0 auto;
+            padding: 12px 20px; display: flex; align-items: center;
+            justify-content: space-between; gap: 12px;
+        }
+        .brand { font-size: var(--fs-title-2); font-weight: 600; display: flex; gap: 8px; align-items: center; color: var(--text); }
+        .nav { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .nav a {
+            padding: 6px 14px; border-radius: var(--radius); font-size: var(--fs-body);
+            color: var(--text-mute); text-decoration: none;
+        }
+        .nav a:hover { background: var(--bg-soft); color: var(--text); }
+        .nav button.ghost {
+            padding: 6px 12px; border-radius: var(--radius);
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text); cursor: pointer; font-size: 13px;
+        }
+        .nav button.ghost:hover { background: var(--bg-soft); }
+
+        .container { margin-top: 20px; }
+
+        /* 统计区：用 summary-grid 兼容旧 stats 容器，但保留 number/label */
+        .stats {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px; margin-bottom: 20px;
+        }
+        .stats .card {
+            text-align: center; padding: 18px;
+            border: 1px solid var(--border); box-shadow: none;
+        }
+        .stats .card .number {
+            font-size: 28px; font-weight: 700; color: var(--accent);
+        }
+        .stats .card .label {
+            color: var(--text-mute); font-size: 13px; margin-top: 4px;
+        }
+
+        .card .title {
+            font-size: 16px; font-weight: 600; margin-bottom: 14px;
+            padding-bottom: 10px; border-bottom: 1px solid var(--border);
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: 10px;
+        }
+        .card .title .badge {
+            background: var(--accent); color: #fff;
+            padding: 2px 10px; border-radius: 999px; font-size: 12px;
+        }
+
+        .badge-status {
+            display: inline-block; padding: 2px 10px; border-radius: 999px;
+            font-size: 12px; font-weight: 600;
+        }
+        .badge-admin    { background: var(--warn-bg); color: var(--warn); }
+        .badge-user     { background: var(--accent-soft); color: var(--accent); }
+        .badge-approved { background: var(--success-bg); color: var(--success); }
+        .badge-pending  { background: var(--warn-bg); color: var(--warn); }
+        .badge-active   { background: var(--success-bg); color: var(--success); }
+        .badge-inactive { background: var(--danger-bg); color: var(--danger); }
+
+        .password-cell {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            background: var(--bg-soft);
+            padding: 4px 8px; border-radius: 4px;
+            display: inline-block;
+            font-size: 13px; font-weight: 600;
+            color: var(--text); vertical-align: middle;
+            min-width: 6em; max-width: 18em; word-break: break-all;
+        }
+        .password-cell.masked {
+            color: var(--text-mute); letter-spacing: 2px;
+        }
+        .copy-btn, .toggle-btn {
+            color: #fff; border: none;
+            padding: 3px 10px; border-radius: 4px;
+            cursor: pointer; font-size: 12px;
+            margin-left: 5px; vertical-align: middle;
+        }
+        .copy-btn  { background: var(--accent); }
+        .copy-btn:hover  { background: var(--accent-hover); }
+        .toggle-btn{ background: var(--text-mute); }
+        .toggle-btn:hover{ background: var(--text); }
+
+        .search-box {
+            display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;
+        }
+        .search-box input, .search-box select {
+            padding: 9px 14px;
+            border: 1px solid var(--border); border-radius: var(--radius);
+            font-size: 14px; background: var(--bg); color: var(--text);
+            outline: none; transition: border-color .15s, box-shadow .15s;
+        }
+        .search-box input { flex: 1; min-width: 200px; }
+        .search-box input:focus, .search-box select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .search-box button {
+            padding: 9px 18px; background: var(--accent); color: #fff;
+            border: none; border-radius: var(--radius); cursor: pointer; font-size: 14px;
+        }
+        .search-box button:hover { background: var(--accent-hover); }
+        .search-box .btn-gray { background: var(--text-mute); }
+        .search-box .btn-gray:hover { background: var(--text); }
+
+        .toast {
+            position: fixed; top: 20px; right: 20px;
+            background: var(--success); color: #fff;
+            padding: 12px 24px; border-radius: var(--radius);
+            box-shadow: 0 8px 24px rgba(0,0,0,.15); z-index: 9999;
+            animation: slideIn 0.3s ease; font-size: 14px;
+        }
+        .toast.error { background: var(--danger); }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+        .export-btn {
+            background: var(--success); color: #fff; border: none;
+            padding: 7px 16px; border-radius: var(--radius);
+            cursor: pointer; font-size: 13px;
+        }
+        .export-btn:hover { filter: brightness(0.95); }
+
+        .create-admin-box {
+            background: var(--warn-bg);
+            border: 2px dashed var(--warn);
+            border-radius: var(--radius-card);
+            padding: 15px 20px; margin-bottom: 15px;
+            display: flex; align-items: center; gap: 15px; flex-wrap: wrap;
+        }
+        .create-admin-box input {
+            padding: 8px 12px; border: 1px solid var(--border);
+            border-radius: var(--radius); font-size: 14px;
+            background: var(--bg); color: var(--text); outline: none;
+        }
+        .create-admin-box input:focus { border-color: var(--accent); }
+        .create-admin-box .btn-create {
+            background: var(--warn); color: #fff; border: none;
+            padding: 8px 20px; border-radius: var(--radius);
+            cursor: pointer; font-size: 14px; font-weight: 600;
+        }
+        .create-admin-box .btn-create:hover { filter: brightness(0.95); }
+
+        .danger-zone {
+            border: 2px solid var(--danger);
+            background: var(--danger-bg);
+            padding: 15px 20px; border-radius: var(--radius-card);
+            margin-top: 15px;
+        }
+        .danger-zone .title {
+            color: var(--danger); font-weight: 600; margin-bottom: 10px;
+        }
+        .op-btn {
+            border: none; padding: 5px 12px; border-radius: 4px;
+            cursor: pointer; font-size: 12px; margin-left: 5px; color: #fff;
+        }
+        .op-btn.promote { background: var(--warn); }
+        .op-btn.promote:hover { filter: brightness(0.95); }
+        .op-btn.del { background: var(--danger); }
+        .op-btn.del:hover { filter: brightness(0.95); }
+
+        .text-muted { color: var(--text-mute); font-size: 12px; }
+        .danger-modal-backdrop {
+            position: fixed; inset: 0; z-index: 1000; display: none;
+            align-items: center; justify-content: center; padding: 20px;
+            background: rgba(0, 0, 0, .55);
+        }
+        .danger-modal-backdrop.show { display: flex; }
+        .danger-modal {
+            width: min(520px, 100%); background: var(--bg); color: var(--text);
+            border: 2px solid var(--danger); border-radius: var(--radius-card);
+            padding: 24px; box-shadow: 0 16px 48px rgba(0,0,0,.25);
+        }
+        .danger-modal h2 { margin: 0 0 12px; color: var(--danger); font-size: 20px; }
+        .danger-modal .challenge-code {
+            margin: 14px 0; padding: 14px; text-align: center;
+            background: var(--bg-soft); border: 1px dashed var(--danger);
+            font: 700 22px/1.3 ui-monospace, SFMono-Regular, Consolas, monospace;
+            letter-spacing: 3px; user-select: none;
+        }
+        .danger-modal input {
+            width: 100%; padding: 10px 12px; border: 1px solid var(--border);
+            border-radius: var(--radius); background: var(--bg); color: var(--text);
+            font: 600 16px ui-monospace, SFMono-Regular, Consolas, monospace;
+            letter-spacing: 2px; text-transform: uppercase;
+        }
+        .danger-modal .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+
+        @media (max-width: 768px) {
+            .stats { grid-template-columns: repeat(2, 1fr); }
+            table { font-size: 12px; }
+            table th, table td { padding: 6px 8px; }
+            .password-cell { font-size: 11px; }
+            .create-admin-box { flex-direction: column; align-items: stretch; }
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <div class="topbar-inner">
+            <div class="brand">🔐 管理员后台</div>
+            <div class="nav">
+                <a href="index.html">🏠 首页</a>
+                <a href="exam.html">📘 组卷</a>
+                <a href="practice.html">🎯 刷题</a>
+                <a href="materials.html">📁 资料</a>
+                <a href="questions.html">📚 题库</a>
+                <button class="ghost" onclick="location.reload()">🔄 刷新</button>
+                <button class="btn btn-ghost btn-sm" id="themeBtn" title="切换主题">🌓</button>
+                <span id="whoAmI" style="font-size:12px;color:var(--text-mute)"></span>
+                <button class="btn btn-danger btn-sm" id="logoutBtn">退出</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- 统计 -->
+        <div class="stats" id="stats">
+            <div class="card">
+                <div class="number" id="total-users">0</div>
+                <div class="label">👥 总用户</div>
+            </div>
+            <div class="card">
+                <div class="number" id="active-users">0</div>
+                <div class="label">✅ 活跃用户</div>
+            </div>
+            <div class="card">
+                <div class="number" id="admin-count">0</div>
+                <div class="label">👑 管理员</div>
+            </div>
+        </div>
+
+        <!-- 用户列表 -->
+        <div class="card">
+            <div class="title">
+                <span>📋 所有用户列表（含密码）</span>
+                <div>
+                    <button class="export-btn" onclick="exportData()">📥 导出数据</button>
+                    <span class="badge" id="user-count-badge">0 人</span>
+                </div>
+            </div>
+
+            <!-- 创建管理员 -->
+            <div class="create-admin-box">
+                <span style="font-weight:bold;">👑 快速创建管理员：</span>
+                <input type="text" id="admin-username" placeholder="用户名" style="flex:1;min-width:120px;">
+                <input type="text" id="admin-email" placeholder="邮箱" style="flex:1;min-width:150px;">
+                <input type="text" id="admin-password" placeholder="密码" style="flex:1;min-width:120px;" value="admin123">
+                <button class="btn-create" onclick="createAdmin()">➕ 创建管理员</button>
+            </div>
+
+            <!-- 搜索 -->
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="🔍 搜索用户名、邮箱..." oninput="filterTable()">
+                <select id="filter-status" onchange="filterTable()">
+                    <option value="all">全部状态</option>
+                    <option value="active">已启用</option>
+                    <option value="inactive">已禁用</option>
+                </select>
+                <select id="filter-role" onchange="filterTable()">
+                    <option value="all">全部角色</option>
+                    <option value="admin">管理员</option>
+                    <option value="user">普通用户</option>
+                </select>
+                <button onclick="filterTable()">筛选</button>
+                <button onclick="resetFilter()" class="btn-gray">重置</button>
+            </div>
+
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>用户名</th>
+                            <th>邮箱</th>
+                            <th>🔑 密码</th>
+                            <th>角色</th>
+                            <th>账号状态</th>
+                            <th>注册时间</th>
+                            <th>最后登录</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="user-table-body">
+                        <tr>
+                            <td colspan="9" style="text-align:center;padding:40px;">
+                                <div style="font-size:20px;color:#6b7280;">⏳ 加载中...</div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 危险操作区 -->
+            <div class="danger-zone">
+                <div class="title">⚠️ 危险操作区</div>
+                <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                    <button onclick="clearAllUsers()" style="background:#ef4444;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">🗑️ 删除所有用户</button>
+                    <button onclick="resetDB()" style="background:#dc2626;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">🔄 重置数据库</button>
+                </div>
+                <p class="text-muted" style="margin-top:8px;">⚠️ 危险操作，请谨慎使用！</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="danger-modal-backdrop" id="danger-modal" role="dialog" aria-modal="true" aria-labelledby="danger-modal-title">
+        <div class="danger-modal">
+            <h2 id="danger-modal-title">危险操作确认</h2>
+            <p id="danger-modal-scope"></p>
+            <p>请手工输入下方授权码。授权码仅包含大写英文字母，5分钟内有效且只能使用一次。</p>
+            <div class="challenge-code" id="danger-challenge-code"></div>
+            <input id="danger-code-input" type="text" autocomplete="off" spellcheck="false" inputmode="latin" aria-label="授权码">
+            <div class="modal-actions">
+                <button class="btn btn-ghost" type="button" id="danger-cancel">取消</button>
+                <button class="btn btn-danger" type="button" id="danger-confirm">验证授权码</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'api.php';
+        let csrf = '';
+        let allUsers = [];
+
+        // ========== P0-A2: XSS 转义（核心修复） ==========
+        function escapeHtml(s) {
+            if (s === null || s === undefined) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // ===================== API调用 =====================
+        async function api(action, postData = {}) {
+            const fd = new FormData();
+            fd.set('action', action);
+            if (csrf) fd.set('csrf_token', csrf);
+            for (let k in postData) {
+                fd.set(k, postData[k]);
+            }
+            try {
+                const res = await fetch(API_URL, { method: 'POST', body: fd });
+                const json = await res.json();
+                if (json.csrf_token) csrf = json.csrf_token;
+                return json;
+            } catch (e) {
+                return { success: false, message: '网络错误: ' + e.message };
+            }
+        }
+
+        // ===================== Toast通知 =====================
+        function showToast(msg, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = msg;
+            document.body.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(100%)';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // ===================== 复制密码（P0-A2+A6：从 data-password 属性读，避免引号注入） =====================
+        function copyPasswordFromCell(btn) {
+            const pwd = btn.getAttribute('data-password') || '';
+            const doCopy = (text) => {
+                navigator.clipboard.writeText(text).then(() => {
+                    showToast('✅ 密码已复制到剪贴板');
+                }).catch(() => {
+                    const input = document.createElement('input');
+                    input.value = text;
+                    document.body.appendChild(input);
+                    input.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(input);
+                    showToast('✅ 密码已复制到剪贴板');
+                });
+            };
+            // 如果当前是遮罩状态，复制的是明文（需要先从按钮属性取明文密码）
+            doCopy(pwd);
+        }
+
+        // ===================== 切换密码明文显示（P0-A6：单行遮罩） =====================
+        function togglePasswordVisible(btn) {
+            const row = btn.closest('tr');
+            if (!row) return;
+            const pwdCell = row.querySelector('.password-cell');
+            const pwd = btn.getAttribute('data-password') || '';
+            if (!pwdCell) return;
+            if (pwdCell.classList.toggle('masked')) {
+                pwdCell.textContent = '•••••';
+                btn.textContent = '显示';
+            } else {
+                pwdCell.textContent = pwd;
+                btn.textContent = '隐藏';
+            }
+        }
+
+        // ===================== 创建管理员 =====================
+        async function createAdmin() {
+            const username = document.getElementById('admin-username').value.trim();
+            const email = document.getElementById('admin-email').value.trim();
+            const password = document.getElementById('admin-password').value.trim();
+
+            if (!username || !email || !password) {
+                showToast('请完整填写用户名、邮箱和密码', 'error');
+                return;
+            }
+
+            // 检查是否已存在
+            const exist = allUsers.find(u => u.username === username || u.email === email);
+            if (exist) {
+                showToast('用户名或邮箱已存在', 'error');
+                return;
+            }
+
+            try {
+                const fd = new FormData();
+                fd.set('action', 'create_admin');
+                fd.set('username', username);
+                fd.set('email', email);
+                fd.set('password', password);
+                if (csrf) fd.set('csrf_token', csrf);
+
+                const res = await fetch(API_URL, { method: 'POST', body: fd });
+                const json = await res.json();
+                if (json.csrf_token) csrf = json.csrf_token;
+
+                if (json.success) {
+                    showToast('✅ 管理员创建成功！');
+                    document.getElementById('admin-username').value = '';
+                    document.getElementById('admin-email').value = '';
+                    document.getElementById('admin-password').value = 'admin123';
+                    loadUsers();
+                } else {
+                    showToast('创建失败: ' + json.message, 'error');
+                }
+            } catch (e) {
+                showToast('创建失败: ' + e.message, 'error');
+            }
+        }
+
+        // ===================== 加载用户数据 =====================
+        async function loadUsers() {
+            try {
+                const ret = await api('get_admin_panel', {});
+                if (!ret.success) {
+                    document.getElementById('user-table-body').innerHTML = `
+                        <tr><td colspan="9" style="text-align:center;padding:40px;color:#ef4444;">
+                            ❌ ${escapeHtml(ret.message)}
+                        </td></tr>
+                    `;
+                    return;
+                }
+
+                allUsers = ret.data.users || [];
+                renderUsers(allUsers);
+
+                const total = allUsers.length;
+                const admins = allUsers.filter(u => u.is_admin).length;
+                const active = allUsers.filter(u => u.is_active).length;
+
+                document.getElementById('total-users').textContent = total;
+                document.getElementById('admin-count').textContent = admins;
+                document.getElementById('active-users').textContent = active;
+                document.getElementById('user-count-badge').textContent = total + ' 人';
+
+            } catch (e) {
+                document.getElementById('user-table-body').innerHTML = `
+                    <tr><td colspan="9" style="text-align:center;padding:40px;color:#ef4444;">
+                        ❌ 加载失败: ${escapeHtml(e.message)}
+                    </td></tr>
+                `;
+            }
+        }
+
+        // ===================== 渲染表格（P0-A2：全字段 escapeHtml；P0-A6：密码默认遮罩；data-password 属性） =====================
+        function renderUsers(users) {
+            if (!users || users.length === 0) {
+                document.getElementById('user-table-body').innerHTML = `
+                    <tr><td colspan="9" style="text-align:center;padding:40px;color:#6b7280;">
+                        📭 暂无用户数据，请创建管理员
+                    </td></tr>
+                `;
+                return;
+            }
+
+            const tbody = document.getElementById('user-table-body');
+            tbody.innerHTML = '';
+            const frag = document.createDocumentFragment();
+
+            users.forEach(u => {
+                const tr = document.createElement('tr');
+                const password = u.password || '';
+                // 所有文本内容都 escapeHtml；密码和ID用 data-* 承载，避免 onclick 引号注入
+                tr.innerHTML = `
+                    <td><strong>${escapeHtml(u.id)}</strong></td>
+                    <td><strong>${escapeHtml(u.username)}</strong></td>
+                    <td>${escapeHtml(u.email)}</td>
+                    <td>
+                        <span class="password-cell masked">•••••</span>
+                        <button class="toggle-btn" data-password="${password.replace(/"/g, '&quot;')}" onclick="togglePasswordVisible(this)">显示</button>
+                        <button class="copy-btn"   data-password="${password.replace(/"/g, '&quot;')}" onclick="copyPasswordFromCell(this)">复制</button>
+                    </td>
+                    <td>
+                        <span class="badge-status ${u.is_admin ? 'badge-admin' : 'badge-user'}">
+                            ${u.is_admin ? '👑 管理员' : '👤 用户'}
+                        </span>
+                    </td>
+                    <td>
+                        <span class="badge-status ${u.is_active ? 'badge-active' : 'badge-inactive'}">
+                            ${u.is_active ? '🟢 启用' : '🔴 禁用'}
+                        </span>
+                    </td>
+                    <td style="font-size:12px;color:#6b7280;">${escapeHtml(u.created_at || '-')}</td>
+                    <td style="font-size:12px;color:#6b7280;">${escapeHtml(u.last_login || '从未登录')}</td>
+                    <td data-uid="${u.id}" data-isadmin="${u.is_admin ? 1 : 0}">
+                        ${!u.is_admin ? `<button class="op-btn promote" onclick="makeAdminFromRow(this)">设为管理</button>` : ''}
+                        <button class="op-btn del" onclick="deleteUserFromRow(this)">删除</button>
+                    </td>
+                `;
+                frag.appendChild(tr);
+            });
+            tbody.appendChild(frag);
+        }
+
+        // ========== P0-A2: 管理员操作从 data-uid 取 ID，避免 onclick 引号注入 ==========
+        function makeAdminFromRow(btn) {
+            const uid = parseInt(btn.closest('td').getAttribute('data-uid') || '0', 10);
+            if (!uid) return;
+            makeAdmin(uid);
+        }
+        function deleteUserFromRow(btn) {
+            const uid = parseInt(btn.closest('td').getAttribute('data-uid') || '0', 10);
+            if (!uid) return;
+            deleteUser(uid);
+        }
+
+        // ===================== 筛选 =====================
+        function filterTable() {
+            const keyword = document.getElementById('search-input').value.toLowerCase().trim();
+            const status = document.getElementById('filter-status').value;
+            const role = document.getElementById('filter-role').value;
+
+            let filtered = allUsers;
+
+            if (keyword) {
+                filtered = filtered.filter(u => 
+                    (u.username && u.username.toLowerCase().includes(keyword)) ||
+                    (u.email && u.email.toLowerCase().includes(keyword))
+                );
+            }
+
+            if (status === 'active') {
+                filtered = filtered.filter(u => u.is_active);
+            } else if (status === 'inactive') {
+                filtered = filtered.filter(u => !u.is_active);
+            }
+
+            if (role === 'admin') {
+                filtered = filtered.filter(u => u.is_admin);
+            } else if (role === 'user') {
+                filtered = filtered.filter(u => !u.is_admin);
+            }
+
+            renderUsers(filtered);
+            document.getElementById('user-count-badge').textContent = filtered.length + ' 人';
+        }
+
+        function resetFilter() {
+            document.getElementById('search-input').value = '';
+            document.getElementById('filter-status').value = 'all';
+            document.getElementById('filter-role').value = 'all';
+            renderUsers(allUsers);
+            document.getElementById('user-count-badge').textContent = allUsers.length + ' 人';
+        }
+
+        // ===================== 导出数据（CSV 用双引号包裹，无需 HTML 转义，字段需要 CSV 转义） =====================
+        function csvEscape(cell) {
+            if (cell === null || cell === undefined) cell = '';
+            cell = String(cell);
+            if (/[",\n\r]/.test(cell)) {
+                cell = '"' + cell.replace(/"/g, '""') + '"';
+            }
+            return cell;
+        }
+        function exportData() {
+            if (!allUsers || allUsers.length === 0) {
+                showToast('没有数据可导出', 'error');
+                return;
+            }
+
+            const headers = ['ID', '用户名', '邮箱', '密码', '角色', '账号状态', '注册时间', '最后登录'];
+            const rows = allUsers.map(u => [
+                u.id,
+                u.username,
+                u.email,
+                u.password,
+                u.is_admin ? '管理员' : '普通用户',
+                u.is_active ? '启用' : '禁用',
+                u.created_at || '',
+                u.last_login || ''
+            ]);
+
+            let csv = headers.map(csvEscape).join(',') + '\n';
+            rows.forEach(row => {
+                csv += row.map(csvEscape).join(',') + '\n';
+            });
+
+            const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `用户数据_${new Date().toLocaleDateString()}.csv`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            showToast('✅ 数据导出成功');
+        }
+
+        // ===================== 管理员操作 =====================
+        async function makeAdmin(uid) {
+            if (!confirm('确定要将该用户设为管理员吗？')) return;
+            try {
+                const ret = await api('make_admin', { user_id: uid });
+                if (ret.success) {
+                    showToast('✅ 已设为管理员');
+                    loadUsers();
+                } else {
+                    showToast(ret.message, 'error');
+                }
+            } catch (e) {
+                showToast('操作失败: ' + e.message, 'error');
+            }
+        }
+
+        async function deleteUser(uid) {
+            if (!confirm('确定要删除该用户吗？此操作不可撤销！')) return;
+            try {
+                const ret = await api('delete_user', { user_id: uid });
+                if (ret.success) {
+                    showToast('✅ 用户已删除');
+                    loadUsers();
+                } else {
+                    showToast(ret.message, 'error');
+                }
+            } catch (e) {
+                showToast('操作失败: ' + e.message, 'error');
+            }
+        }
+
+        let dangerTarget = '';
+        let dangerCode = '';
+
+        function closeDangerModal() {
+            dangerTarget = '';
+            dangerCode = '';
+            document.getElementById('danger-modal').classList.remove('show');
+            document.getElementById('danger-code-input').value = '';
+        }
+
+        async function beginDangerAction(target) {
+            const ret = await api('admin_danger_challenge', { target });
+            if (!ret.success || !ret.data) {
+                showToast(ret.message || '无法生成授权码', 'error');
+                return;
+            }
+            dangerTarget = target;
+            dangerCode = String(ret.data.code || '');
+            document.getElementById('danger-modal-title').textContent = target === 'reset_db' ? '重置数据库确认' : '删除所有用户确认';
+            document.getElementById('danger-modal-scope').textContent = target === 'reset_db'
+                ? '此操作将永久删除用户、题库、试卷、答题记录、资料记录及资料文件，并自动备份数据库。'
+                : '此操作将永久删除所有用户及其账号，删除后当前会话也会立即失效。';
+            document.getElementById('danger-challenge-code').textContent = dangerCode;
+            const modal = document.getElementById('danger-modal');
+            modal.classList.add('show');
+            const input = document.getElementById('danger-code-input');
+            input.value = '';
+            setTimeout(() => input.focus(), 0);
+        }
+
+        async function submitDangerAction() {
+            if (!dangerTarget || !dangerCode) return;
+            const input = document.getElementById('danger-code-input');
+            const typed = input.value.trim().toUpperCase();
+            if (typed !== dangerCode.toUpperCase()) {
+                showToast('授权码不正确，未执行任何操作', 'error');
+                input.select();
+                return;
+            }
+            const phrase = dangerTarget === 'reset_db' ? 'RESET DATABASE' : 'DELETE ALL USERS';
+            const message = dangerTarget === 'reset_db'
+                ? '确定要重置数据库吗？所有相关数据将永久删除，且此操作不可撤销。'
+                : '确定要删除所有用户吗？所有账号数据将永久删除，且此操作不可撤销。';
+            if (!confirm(message + '\\n\\n最终确认：这些数据都会被永久删除，确定执行吗？')) return;
+            const ret = await api(dangerTarget, {
+                authorization_code: typed,
+                final_confirm: phrase
+            });
+            closeDangerModal();
+            if (ret.success) {
+                showToast(ret.message || '危险操作已完成');
+                localStorage.removeItem('xb_session');
+                localStorage.removeItem('xb_user');
+                setTimeout(() => { location.href = 'auth.html?mode=login'; }, 1200);
+            } else {
+                showToast(ret.message || '操作失败，未删除数据', 'error');
+            }
+        }
+
+        function clearAllUsers() { beginDangerAction('clear_users'); }
+        function resetDB() { beginDangerAction('reset_db'); }
+
+        // ===================== 主题切换 / 退出登录 / 身份显示 =====================
+        (function initTopbar(){
+            const saved = localStorage.getItem('theme');
+            if (saved) document.documentElement.setAttribute('data-theme', saved);
+            document.getElementById('themeBtn').onclick = function () {
+                const cur = document.documentElement.getAttribute('data-theme');
+                const next = cur === 'dark' ? '' : 'dark';
+                if (next) document.documentElement.setAttribute('data-theme', next);
+                else document.documentElement.removeAttribute('data-theme');
+                localStorage.setItem('theme', next || '');
+            };
+            document.getElementById('danger-cancel').onclick = closeDangerModal;
+            document.getElementById('danger-confirm').onclick = submitDangerAction;
+            const codeInput = document.getElementById('danger-code-input');
+            ['paste', 'copy', 'cut', 'drop', 'contextmenu'].forEach(type => codeInput.addEventListener(type, e => e.preventDefault()));
+            codeInput.addEventListener('beforeinput', e => {
+                if (e.inputType && e.inputType.startsWith('insertFrom')) e.preventDefault();
+            });
+            codeInput.addEventListener('keydown', e => {
+                if ((e.ctrlKey || e.metaKey) && ['v', 'V'].includes(e.key)) e.preventDefault();
+                if (e.shiftKey && e.key === 'Insert') e.preventDefault();
+            });
+            document.getElementById('logoutBtn').onclick = async function () {
+                await api('logout', {});
+                localStorage.removeItem('xb_session');
+                localStorage.removeItem('xb_user');
+                window.location.href = 'index.html';
+            };
+        })();
+
+        // ===================== 页面初始化 =====================
+        async function bootstrapAdmin() {
+            const ret = await api('check_session', {});
+            if (!ret.success || !ret.data || !ret.data.user || !ret.data.user.is_admin || !ret.data.user.is_active) {
+                localStorage.removeItem('xb_session');
+                localStorage.removeItem('xb_user');
+                window.location.href = 'auth.html?mode=login';
+                return;
+            }
+            const user = ret.data.user;
+            document.getElementById('whoAmI').textContent = '你好，' + (user.username || '') + '（管理员）';
+            localStorage.setItem('xb_session', '1');
+            localStorage.setItem('xb_user', JSON.stringify(user));
+            await loadUsers();
+        }
+
+        bootstrapAdmin();
+        setInterval(() => { if (document.visibilityState !== 'hidden') loadUsers(); }, 30000);
+    </script>
+</body>
+</html>

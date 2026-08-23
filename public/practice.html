@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>自由刷题 - 学补刷题平台</title>
+    <link rel="stylesheet" href="assets/app.css">
+    <style>
+        .topbar {
+            position: sticky; top: 0; z-index: 50;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+        }
+        .topbar-inner {
+            max-width: 1200px; margin: 0 auto;
+            padding: 12px 20px; display: flex; align-items: center;
+            justify-content: space-between; gap: 12px;
+        }
+        .brand { font-size: var(--fs-title-2); font-weight: 600; display: flex; gap: 8px; align-items: center; color: var(--text); }
+        .nav { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .nav a {
+            padding: 6px 14px; border-radius: var(--radius); font-size: var(--fs-body);
+            color: var(--text-mute); text-decoration: none;
+        }
+        .nav a.active, .nav a:hover { background: var(--bg-soft); color: var(--text); }
+        .timer-bar {
+            background: var(--accent-soft); color: var(--accent);
+            padding: 8px 16px; border-radius: var(--radius);
+            font-weight: 600; display: inline-flex; align-items: center; gap: 8px;
+        }
+        .timer-bar.warn { background: var(--warn-bg); color: var(--warn); }
+        .timer-bar.danger { background: var(--danger-bg); color: var(--danger); animation: pulse 1s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+        .q-nav {
+            display: flex; flex-wrap: wrap; gap: 6px;
+            padding: 12px; background: var(--bg-muted);
+            border-radius: var(--radius-card);
+            position: sticky; top: 70px; align-self: flex-start;
+        }
+        .q-nav button {
+            width: 36px; height: 36px; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text); cursor: pointer; font-weight: 600;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .q-nav button.done { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-soft); }
+        .q-nav button.current { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .q-card {
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--radius-card); padding: 20px; margin-bottom: 20px;
+        }
+        .q-head {
+            display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+            margin-bottom: 12px; flex-wrap: wrap;
+        }
+        .q-index { font-weight: 700; font-size: 16px; }
+        .q-content {
+            font-size: 15px; line-height: 1.7; color: var(--text);
+            white-space: pre-wrap; margin-bottom: 16px;
+        }
+        .opt-list { display: flex; flex-direction: column; gap: 8px; }
+        .opt {
+            padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+            cursor: pointer; transition: all 0.15s; display: flex; align-items: flex-start; gap: 10px;
+        }
+        .opt:hover { border-color: var(--accent); background: var(--accent-soft); }
+        .opt.selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+        .opt input { margin-top: 4px; }
+        .opt .opt-letter { font-weight: 700; color: var(--text-mute); min-width: 20px; }
+        .bool-row { display: flex; gap: 16px; }
+        .bool-row label { padding: 10px 20px; border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+        .fill-row input, .multi-fill-row input, textarea.student {
+            width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+            font-family: inherit; font-size: 14px; background: var(--bg); color: var(--text);
+        }
+        .multi-fill-row { display: flex; flex-direction: column; gap: 8px; }
+        .blank-tag {
+            display: inline-block; padding: 2px 8px; background: var(--accent-soft); color: var(--accent);
+            border-radius: 6px; font-weight: 600; font-size: 12px; margin-right: 6px;
+        }
+        .two-col { display: grid; grid-template-columns: 220px 1fr; gap: 20px; }
+        @media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } .q-nav { position: static; } }
+        .result-row {
+            padding: 10px 12px; border-radius: var(--radius);
+            background: var(--bg-muted); border: 1px solid var(--border);
+            margin-bottom: 8px;
+        }
+        .grade-block {
+            display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center;
+            padding: 12px; background: var(--bg-soft); border-radius: var(--radius);
+            margin-top: 10px;
+        }
+        .grade-block select {
+            padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+            background: var(--bg); color: var(--text);
+        }
+        .grade-block input[type=number] {
+            width: 90px; padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+            background: var(--bg); color: var(--text);
+        }
+        .summary-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px;
+        }
+        .config-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px;
+        }
+    </style>
+</head>
+<body>
+<div class="topbar">
+    <div class="topbar-inner">
+        <div class="brand">🎯 自由刷题</div>
+        <div class="nav">
+            <a href="index.html">首页</a>
+            <a href="exam.html">组卷考试</a>
+            <a href="questions.html">题库</a>
+            <a href="#" id="goAdmin" style="display:none">管理员</a>
+            <button class="btn btn-ghost" id="themeBtn" title="切换主题">🌓</button>
+            <span id="whoAmI" style="font-size:12px;color:var(--text-mute)"></span>
+            <a id="logoutBtn" class="btn btn-danger btn-sm">退出</a>
+        </div>
+    </div>
+</div>
+
+<div class="container" style="margin-top:20px">
+
+    <!-- ============ VIEW 1：配置 + 我的历史 ============ -->
+    <div id="view-list">
+        <div class="card">
+            <div class="tabs">
+                <button class="tab active" data-tab="config">🎯 开始刷题</button>
+                <button class="tab" data-tab="history">📚 我的刷题历史</button>
+            </div>
+
+            <div id="tab-config">
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label>选择学段 <span class="form-required">*</span></label>
+                        <select id="cfg-level">
+                            <option value="">请选择学段</option>
+                            <option value="junior">初中</option>
+                            <option value="senior">高中</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>选择科目 <span class="form-required">*</span></label>
+                        <select id="cfg-subject"><option value="">请先选择学段</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>题目数量（1-50）</label>
+                        <input type="number" id="cfg-count" min="1" max="50" step="1" value="10">
+                    </div>
+                    <div class="form-group">
+                        <label>时长（分钟，0=不限时）</label>
+                        <input type="number" id="cfg-dur" min="0" max="240" step="5" value="0">
+                    </div>
+                </div>
+                <div style="display:flex;justify-content:flex-end;margin-top:16px">
+                    <button class="btn btn-primary" id="btnStartPractice">开始随机抽题 →</button>
+                </div>
+            </div>
+
+            <div id="tab-history" style="display:none">
+                <div class="table-wrapper">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>ID</th><th>科目</th><th>题数</th><th>时长</th>
+                                <th>开始时间</th><th>状态</th><th>自评得分</th><th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ VIEW 2：答题中 ============ -->
+    <div id="view-doing" style="display:none">
+        <div class="card" style="margin-bottom:20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+                <div>
+                    <div id="doing-title" style="font-size:18px;font-weight:600"></div>
+                    <div id="doing-sub" style="color:var(--text-mute);font-size:12px;margin-top:4px"></div>
+                </div>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                    <div id="timerBar" class="timer-bar">⏱ --:--</div>
+                    <button class="btn btn-ghost btn-sm" id="btnSaveDraft">暂存</button>
+                    <button class="btn btn-primary btn-sm" id="btnSubmit">提交</button>
+                </div>
+            </div>
+        </div>
+        <div class="two-col">
+            <div class="q-nav" id="qNav"></div>
+            <div id="doingQuestions"></div>
+        </div>
+    </div>
+
+    <!-- ============ VIEW 3：结果 + 自评 ============ -->
+    <div id="view-result" style="display:none">
+        <div class="card">
+            <h2 id="r-title" style="font-size:20px;margin:0 0 16px 0">自由刷题 · 结果与自评</h2>
+            <div class="summary-grid">
+                <div class="stat-card"><div class="stat-num" id="s-total"></div><div class="stat-label">总题数</div></div>
+                <div class="stat-card"><div class="stat-num" id="s-answered"></div><div class="stat-label">已作答</div></div>
+                <div class="stat-card"><div class="stat-num" id="s-graded"></div><div class="stat-label">已自评</div></div>
+                <div class="stat-card"><div class="stat-num" id="s-correct"></div><div class="stat-label">自评正确</div></div>
+                <div class="stat-card"><div class="stat-num" id="s-max"></div><div class="stat-label">满分（按每题1分）</div></div>
+                <div class="stat-card accent"><div class="stat-num" id="s-score">—</div><div class="stat-label">自评总分</div></div>
+            </div>
+            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
+                <button class="btn btn-ghost" onclick="go('list')">返回配置</button>
+                <button class="btn btn-primary" id="btnSaveGrade">保存自评</button>
+            </div>
+        </div>
+        <div id="resultQuestions"></div>
+    </div>
+
+</div>
+
+<script>
+const API = 'api.php';
+const escapeHtml = (s) => {
+    if (s === null || s === undefined) return '';
+    if (typeof s !== 'string') s = String(s);
+    const t = document.createElement('textarea');
+    t.textContent = s;
+    return t.innerHTML;
+};
+const fmt = (n) => {
+    if (n === null || n === undefined) return '—';
+    return Number.isInteger(n) ? n : Number(n).toFixed(1);
+};
+const LS = {
+    get k() { return localStorage.getItem('ss_theme') || 'light'; },
+    set k(v) { localStorage.setItem('ss_theme', v); applyTheme(); }
+};
+function applyTheme() { document.documentElement.setAttribute('data-theme', LS.k); }
+applyTheme();
+document.getElementById('themeBtn').onclick = () => { LS.k = LS.k === 'light' ? 'dark' : 'light'; };
+
+let STATE = { csrf: '', user: null, isAdmin: false,
+    educationLevel: '', attemptId: null, subject: '', questions: [],
+    durationMin: 0, startedAt: null, timerId: null,
+    draft: {}
+};
+
+async function req(action, params = {}) {
+    const fd = new FormData();
+    fd.append('action', action);
+    if (STATE.csrf) fd.append('csrf_token', STATE.csrf);
+    for (const k in params) {
+        if (params[k] === undefined || params[k] === null) continue;
+        fd.append(k, typeof params[k] === 'object' ? JSON.stringify(params[k]) : params[k]);
+    }
+    const res = await fetch(API, { method: 'POST', body: fd });
+    const j = await res.json();
+    if (j.message && !j.success) alert(j.message);
+    return j;
+}
+
+async function checkSessionAndRender() {
+    const j = await req('check_session');
+    if (!j.success || !j.data || !j.data.user) {
+        localStorage.removeItem('xb_session');
+        localStorage.removeItem('xb_user');
+        location.href = 'index.html';
+        return;
+    }
+    STATE.user = j.data.user;
+    STATE.isAdmin = !!STATE.user.is_admin;
+    STATE.csrf = j.csrf_token || '';
+    document.getElementById('whoAmI').textContent = `${STATE.user.username}（${STATE.isAdmin ? '管理员' : '学生'}）`;
+    document.getElementById('goAdmin').style.display = STATE.isAdmin ? '' : 'none';
+    document.getElementById('goAdmin').href = 'admin.html';
+    document.getElementById('logoutBtn').onclick = async () => {
+        await req('logout');
+        localStorage.removeItem('xb_session');
+        localStorage.removeItem('xb_user');
+        location.href = 'index.html';
+    };
+
+    document.querySelectorAll('#view-list .tabs .tab').forEach(t => {
+        t.onclick = () => {
+            document.querySelectorAll('#view-list .tabs .tab').forEach(x => x.classList.remove('active'));
+            t.classList.add('active');
+            document.getElementById('tab-config').style.display  = t.dataset.tab === 'config'  ? '' : 'none';
+            document.getElementById('tab-history').style.display = t.dataset.tab === 'history' ? '' : 'none';
+        };
+    });
+
+    const params = new URLSearchParams(location.search);
+    const a = params.get('attempt');
+    if (a) { return loadAndShowResult(+a); }
+    return loadConfigAndHistory();
+}
+
+const views = ['list','doing','result'];
+function go(v) {
+    views.forEach(x => { document.getElementById('view-' + x).style.display = (v === x ? '' : 'none'); });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function loadConfigAndHistory() {
+    const subSel = document.getElementById('cfg-subject');
+    const levelSel = document.getElementById('cfg-level');
+    subSel.innerHTML = '<option value="">请先选择学段</option>';
+    levelSel.onchange = async () => {
+        STATE.educationLevel = levelSel.value;
+        subSel.innerHTML = '<option value="">加载中...</option>';
+        const sjLevel = await req('practice_subjects', { education_level: STATE.educationLevel });
+        const levelSubs = sjLevel.success ? (sjLevel.data.subjects || []) : [];
+        subSel.innerHTML = levelSubs.length ? levelSubs.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('') : '<option value="">当前学段暂无题目</option>';
+        document.getElementById('btnStartPractice').disabled = levelSubs.length === 0;
+    };
+    const [h] = await Promise.all([req('attempt_list_mine')]);
+    document.getElementById('btnStartPractice').disabled = true;
+    document.getElementById('btnStartPractice').onclick = startPractice;
+    // 历史（仅 practice）
+    const tbody = document.getElementById('historyBody');
+    tbody.innerHTML = '';
+    const his = (h && h.success) ? (h.data.attempts || []) : [];
+    const list = his.filter(x => !x.paper_id);
+    if (list.length === 0) { tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无记录</td></tr>'; }
+    for (const a of list) {
+        const tr = document.createElement('tr');
+        const statusBadge = a.status === 'submitted'
+            ? '<span class="badge badge-success">已提交</span>'
+            : '<span class="badge badge-warn">进行中</span>';
+        tr.innerHTML = `
+            <td>${a.id}</td>
+            <td>${escapeHtml(a.subject || '综合')}</td>
+            <td>${a.question_count || 0}</td>
+            <td>${a.duration_minutes ? a.duration_minutes + '分钟' : '不限时'}</td>
+            <td style="white-space:nowrap">${escapeHtml(a.started_at || '')}</td>
+            <td>${statusBadge}</td>
+            <td>${a.self_score_total !== null ? a.self_score_total : '—'}</td>
+            <td style="white-space:nowrap"></td>`;
+        const btns = tr.querySelector('td:last-child');
+        if (a.status !== 'submitted') {
+            const b = document.createElement('button'); b.className = 'btn btn-primary btn-sm';
+            b.textContent = '继续作答'; b.onclick = () => resumeAttempt(a.id);
+            btns.appendChild(b);
+        } else {
+            const b = document.createElement('button'); b.className = 'btn btn-ghost btn-sm';
+            b.textContent = '查看结果 / 自评'; b.onclick = () => loadAndShowResult(a.id);
+            btns.appendChild(b);
+        }
+        tbody.appendChild(tr);
+    }
+    go('list');
+}
+
+/* ================ 开始/恢复 ================= */
+async function startPractice() {
+    const education_level = document.getElementById('cfg-level').value;
+    const subject = document.getElementById('cfg-subject').value;
+    const count   = +document.getElementById('cfg-count').value;
+    const dur     = +document.getElementById('cfg-dur').value;
+    if (!education_level) return alert('请先选择学段');
+    if (!subject) return alert('请先选择科目');
+    if (!(count >= 1 && count <= 50)) return alert('题目数量必须在1-50之间');
+    const j = await req('practice_start', { education_level, subject, count, duration_minutes: dur });
+    if (!j.success) return;
+    STATE.attemptId = j.data.attempt_id;
+    STATE.subject = subject;
+    STATE.questions = j.data.questions || [];
+    STATE.durationMin = (j.data.attempt && j.data.attempt.duration_minutes) || 0;
+    STATE.startedAt = j.data.attempt && j.data.attempt.started_at ? new Date(j.data.attempt.started_at.replace(' ', 'T')) : new Date();
+    STATE.draft = {};
+    for (const q of STATE.questions) STATE.draft[q.id] = normalizeAnswer(q, q.student_answer);
+    renderDoing(); startTimer(); go('doing');
+}
+
+async function resumeAttempt(aid) {
+    const j = await req('attempt_get', { attempt_id: aid });
+    if (!j.success) return;
+    if (j.data.attempt && j.data.attempt.status === 'submitted') return loadAndShowResultFromPayload(j.data);
+    STATE.attemptId = aid;
+    STATE.subject = '';
+    STATE.questions = j.data.questions || [];
+    STATE.durationMin = (j.data.attempt && j.data.attempt.duration_minutes) || 0;
+    STATE.startedAt = j.data.attempt && j.data.attempt.started_at ? new Date(j.data.attempt.started_at.replace(' ', 'T')) : new Date();
+    STATE.draft = {};
+    for (const q of STATE.questions) STATE.draft[q.id] = normalizeAnswer(q, q.student_answer);
+    renderDoing(); startTimer(); go('doing');
+}
+
+function normalizeAnswer(q, sa) {
+    if (sa === null || sa === undefined || sa === '') {
+        if (q.question_type === 'multi') return [];
+        if (q.question_type === 'multi_fill') return blankCountFor(q);
+        return '';
+    }
+    if (typeof sa === 'string' && (q.question_type === 'multi' || q.question_type === 'multi_fill' || q.question_type === 'fill')) {
+        try { const d = JSON.parse(sa); if (Array.isArray(d)) return d; } catch (_) {}
+    }
+    if (q.question_type === 'multi_fill' && !Array.isArray(sa)) return blankCountFor(q);
+    if (q.question_type === 'multi' && !Array.isArray(sa)) return [sa];
+    return sa;
+}
+function blankCountFor(q) {
+    if (!q.content) return [''];
+    const m = q.content.match(/\{\{\s*\d+\s*\}\}/g);
+    return Array.from({ length: m ? m.length : 1 }, () => '');
+}
+function qTypeName(t) {
+    return ({ single:'单选题', multi:'多选题', judge:'判断题', fill:'填空题', multi_fill:'多空填空题', short:'简答题' })[t] || t;
+}
+
+/* ================ 答题渲染（同 exam.html） ================= */
+function renderDoing() {
+    document.getElementById('doing-title').textContent = `自由刷题 · ${STATE.subject || '综合'}`;
+    document.getElementById('doing-sub').textContent = `共 ${STATE.questions.length} 题 · ${STATE.durationMin ? STATE.durationMin + ' 分钟' : '不限时'}`;
+    const nav = document.getElementById('qNav'); nav.innerHTML = '';
+    const box = document.getElementById('doingQuestions'); box.innerHTML = '';
+    STATE.questions.forEach((q, idx) => {
+        const navBtn = document.createElement('button');
+        navBtn.id = 'navq-' + q.id; navBtn.textContent = idx + 1;
+        navBtn.onclick = () => { document.getElementById('qcard-' + q.id).scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+        nav.appendChild(navBtn);
+
+        const card = document.createElement('div'); card.className = 'q-card'; card.id = 'qcard-' + q.id;
+        card.innerHTML = `
+            <div class="q-head">
+                <div class="q-index">第 ${idx+1} 题 <span class="badge badge-warn" style="margin-left:8px">${qTypeName(q.question_type)}</span></div>
+                <div style="color:var(--text-mute);font-size:12px">难度：${['','易','中','难'][q.difficulty||1] || '中'}</div>
+            </div>
+            <div class="q-content">${renderBlanks(q.content)}</div>
+            <div class="q-body">${renderAnswerArea(q)}</div>`;
+        box.appendChild(card);
+        bindAnswerEvents(card, q);
+    });
+    document.getElementById('btnSaveDraft').onclick = () => alert('草稿已在本地保存，你也可以直接提交。');
+    document.getElementById('btnSubmit').onclick = submitAnswers;
+    updateNavStates();
+}
+function renderBlanks(content) {
+    if (!content) return '';
+    return escapeHtml(content).replace(/\{\{\s*(\d+)\s*\}\}/g,
+        (_, n) => `<span class="blank-tag">第${n}空</span>`);
+}
+function stripOptionLetter(o) {
+    const s = String(o);
+    const m = s.match(/^\s*([A-Za-z])[.．、)）:：]\s*(.*)$/);
+    return m ? m[2] : s;
+}
+function renderAnswerArea(q) {
+    const id = q.id;
+    if (q.question_type === 'single' || q.question_type === 'multi') {
+        const opts = Array.isArray(q.options) ? q.options : [];
+        const type = q.question_type === 'single' ? 'radio' : 'checkbox';
+        return `<div class="opt-list">${opts.map((o, i) => {
+            const letter = String.fromCharCode(65 + i);
+            return `<label class="opt" data-opt="${letter}"><input type="${type}" name="q${id}" value="${letter}"><span class="opt-letter">${letter}.</span><span>${escapeHtml(stripOptionLetter(o))}</span></label>`;
+        }).join('')}</div>`;
+    }
+    if (q.question_type === 'judge') {
+        return `<div class="bool-row">
+            <label><input type="radio" name="qj${id}" value="T"> <b>对</b>（T）</label>
+            <label><input type="radio" name="qj${id}" value="F"> <b>错</b>（F）</label></div>`;
+    }
+    if (q.question_type === 'multi_fill') {
+        const blanks = blankCountFor(q);
+        return `<div class="multi-fill-row">${blanks.map((_, i) => `
+            <div><span class="blank-tag">第${i+1}空</span><input type="text" data-blank="${i}" placeholder="请输入"></div>`).join('')}</div>`;
+    }
+    if (q.question_type === 'fill') return `<div class="fill-row"><input type="text" placeholder="请输入答案"></div>`;
+    return `<textarea class="student" rows="4" placeholder="请输入答案"></textarea>`;
+}
+function bindAnswerEvents(card, q) {
+    const id = q.id;
+    const read = () => updateNavStates();
+    if (q.question_type === 'single') {
+        card.querySelectorAll('input[type=radio]').forEach(inp => {
+            inp.addEventListener('change', e => {
+                STATE.draft[id] = e.target.value;
+                card.querySelectorAll('.opt').forEach(o => o.classList.toggle('selected', o.dataset.opt === e.target.value));
+                read();
+            });
+        });
+        if (STATE.draft[id]) {
+            card.querySelectorAll('input[type=radio]').forEach(inp => { if (inp.value === STATE.draft[id]) inp.checked = true; });
+            card.querySelectorAll('.opt').forEach(o => o.classList.toggle('selected', o.dataset.opt === STATE.draft[id]));
+        }
+    } else if (q.question_type === 'multi') {
+        const collect = () => {
+            STATE.draft[id] = Array.from(card.querySelectorAll('input[type=checkbox]:checked')).map(x => x.value).sort();
+            card.querySelectorAll('.opt').forEach(o => o.classList.toggle('selected', STATE.draft[id].includes(o.dataset.opt)));
+            read();
+        };
+        card.querySelectorAll('input[type=checkbox]').forEach(inp => inp.addEventListener('change', collect));
+        if (Array.isArray(STATE.draft[id])) {
+            card.querySelectorAll('input[type=checkbox]').forEach(inp => { if (STATE.draft[id].includes(inp.value)) inp.checked = true; });
+            collect();
+        }
+    } else if (q.question_type === 'judge') {
+        card.querySelectorAll('input[type=radio]').forEach(inp => inp.addEventListener('change', e => { STATE.draft[id] = e.target.value; read(); }));
+        if (STATE.draft[id]) card.querySelectorAll('input[type=radio]').forEach(inp => { if (inp.value === STATE.draft[id]) inp.checked = true; });
+    } else if (q.question_type === 'multi_fill') {
+        const inputs = card.querySelectorAll('input[type=text][data-blank]');
+        inputs.forEach(inp => {
+            inp.addEventListener('input', () => { STATE.draft[id] = Array.from(inputs).map(x => x.value); read(); });
+            if (Array.isArray(STATE.draft[id])) inp.value = STATE.draft[id][+inp.dataset.blank] || '';
+        });
+    } else if (q.question_type === 'fill') {
+        const inp = card.querySelector('input[type=text]');
+        inp.addEventListener('input', () => { STATE.draft[id] = inp.value; read(); });
+        if (typeof STATE.draft[id] === 'string') inp.value = STATE.draft[id];
+    } else {
+        const ta = card.querySelector('textarea.student');
+        ta.addEventListener('input', () => { STATE.draft[id] = ta.value; read(); });
+        if (typeof STATE.draft[id] === 'string') ta.value = STATE.draft[id];
+    }
+}
+function isAnswerFilled(q) {
+    const v = STATE.draft[q.id];
+    if (v === null || v === undefined) return false;
+    if (Array.isArray(v)) {
+        if (q.question_type === 'multi_fill') return v.some(x => String(x).trim() !== '');
+        return v.length > 0;
+    }
+    return String(v).trim() !== '';
+}
+function updateNavStates() {
+    STATE.questions.forEach(q => {
+        const btn = document.getElementById('navq-' + q.id);
+        if (btn) btn.classList.toggle('done', isAnswerFilled(q));
+    });
+}
+function startTimer() {
+    if (STATE.timerId) clearInterval(STATE.timerId);
+    const bar = document.getElementById('timerBar');
+    const tick = () => {
+        if (STATE.durationMin <= 0) { bar.classList.remove('warn','danger'); bar.innerHTML = '⏱ 不限时'; return; }
+        const totalSec = STATE.durationMin * 60;
+        const elapsed = Math.floor((Date.now() - STATE.startedAt.getTime()) / 1000);
+        const remain = Math.max(0, totalSec - elapsed);
+        const mm = String(Math.floor(remain / 60)).padStart(2, '0');
+        const ss = String(remain % 60).padStart(2, '0');
+        bar.textContent = `⏱ ${mm}:${ss}`;
+        bar.classList.toggle('warn', remain <= 300 && remain > 60);
+        bar.classList.toggle('danger', remain <= 60);
+        if (remain === 0) { clearInterval(STATE.timerId); STATE.timerId = null; alert('时间到，系统自动提交'); submitAnswers(true); }
+    };
+    tick(); STATE.timerId = setInterval(tick, 1000);
+}
+async function submitAnswers(forced = false) {
+    const answered = STATE.questions.filter(q => isAnswerFilled(q)).length;
+    if (!forced && answered < STATE.questions.length) {
+        if (!confirm(`共 ${STATE.questions.length} 题，已作答 ${answered} 题，确认提交？`)) return;
+    }
+    if (STATE.timerId) { clearInterval(STATE.timerId); STATE.timerId = null; }
+    const answers = STATE.questions.map(q => {
+        let sa = STATE.draft[q.id];
+        if (q.question_type === 'multi_fill' || q.question_type === 'multi') {
+            if (!Array.isArray(sa)) sa = [];
+        } else {
+            sa = sa == null ? '' : String(sa);
+        }
+        return { question_id: q.id, student_answer: sa };
+    });
+    const j = await req('practice_submit', { attempt_id: STATE.attemptId, answers });
+    if (!j.success) { if (STATE.durationMin > 0) startTimer(); return; }
+    if (j.data && j.data.overdue) alert('已超时，系统强制提交');
+    loadAndShowResult(STATE.attemptId);
+}
+
+/* ================ 结果 + 自评 ================= */
+async function loadAndShowResult(aid) {
+    const j = await req('practice_result', { attempt_id: aid });
+    if (!j.success) return;
+    loadAndShowResultFromPayload(j.data);
+}
+function loadAndShowResultFromPayload(d) {
+    STATE.attemptId = d.attempt.id;
+    renderResult(d);
+    go('result');
+}
+function renderResult(d) {
+    const qs = d.questions || []; const s = d.summary || {};
+    document.getElementById('s-total').textContent = s.total_count || 0;
+    document.getElementById('s-answered').textContent = s.answered_count || 0;
+    document.getElementById('s-graded').textContent = s.graded_count || 0;
+    document.getElementById('s-correct').textContent = s.correct_count || 0;
+    document.getElementById('s-max').textContent = fmt(s.max_possible);
+    document.getElementById('s-score').textContent = s.self_score_total !== null && s.self_score_total !== undefined ? fmt(s.self_score_total) : '—';
+    const box = document.getElementById('resultQuestions');
+    box.innerHTML = '';
+    qs.forEach((q, i) => {
+        const card = document.createElement('div'); card.className = 'q-card';
+        const maxPts = q.max_points || (q.points ?? 1);
+        const statusBadge = q.self_correct === 1 ? '<span class="badge badge-success">自评：正确</span>'
+            : q.self_correct === 0 ? '<span class="badge badge-danger">自评：错误</span>'
+            : '<span class="badge badge-warn">未自评</span>';
+        card.innerHTML = `
+            <div class="q-head">
+                <div class="q-index">第 ${i+1} 题 <span class="badge badge-warn" style="margin-left:8px">${qTypeName(q.question_type)}</span> <span class="badge badge-success" style="margin-left:4px">${maxPts} 分</span></div>
+                <div>${statusBadge}</div>
+            </div>
+            <div class="q-content">${renderBlanks(q.content)}</div>
+            ${renderAnswerReview(q)}
+            <div class="result-row"><b>参考答案：</b><span class="answer-val">${formatAns(q, q.correct_answer)}</span></div>
+            <div class="grade-block">
+                <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+                    <div><label>是否正确：
+                        <select data-qid="${q.id}" data-k="self_correct">
+                            <option value="">未评</option>
+                            <option value="1" ${q.self_correct===1?'selected':''}>正确</option>
+                            <option value="0" ${q.self_correct===0?'selected':''}>错误</option>
+                        </select>
+                    </label></div>
+                    <div><label>本题得分：
+                        <input type="number" min="0" step="0.5" max="${maxPts}" value="${q.self_score!==null && q.self_score!==undefined ? q.self_score : ''}" placeholder="0~${maxPts}" data-qid="${q.id}" data-k="self_score">
+                        <span style="color:var(--text-mute);font-size:12px">/${maxPts}</span>
+                    </label></div>
+                </div>
+                <div style="color:var(--text-mute);font-size:12px;text-align:right">${q.judged_at ? '上次自评：' + escapeHtml(q.judged_at) : '暂未自评'}</div>
+            </div>`;
+        box.appendChild(card);
+    });
+    document.getElementById('btnSaveGrade').onclick = saveGrades;
+}
+function renderAnswerReview(q) {
+    const my = q.student_answer; const isArr = Array.isArray(my);
+    const emptyMark = (my === null || my === undefined || my === '' || (isArr && my.every(x => x === '' || x == null)))
+        ? '<span class="badge badge-danger">未作答</span>' : '';
+    let display = emptyMark;
+    if (!emptyMark) {
+        if (q.question_type === 'multi_fill' && isArr) {
+            display = `<div style="display:flex;flex-direction:column;gap:4px">${my.map((v, i) => `<div><span class="blank-tag">第${i+1}空</span>${escapeHtml(String(v||''))}</div>`).join('')}</div>`;
+        } else if (q.question_type === 'multi' && isArr) {
+            display = my.map(x => `<span class="badge badge-success" style="margin-right:4px">${escapeHtml(String(x))}</span>`).join('');
+        } else if (q.question_type === 'judge') {
+            display = String(my) === 'T' ? '对（T）' : (String(my) === 'F' ? '错（F）' : escapeHtml(String(my)));
+        } else if (isArr) {
+            display = my.map(x => escapeHtml(String(x))).join(' / ');
+        } else {
+            display = `<span style="white-space:pre-wrap">${escapeHtml(String(my))}</span>`;
+        }
+    }
+    return `<div class="result-row"><b>你的答案：</b><span class="answer-val">${display}</span></div>`;
+}
+function formatAns(q, ca) {
+    if (ca === null || ca === undefined || ca === '') return '<span style="color:var(--text-mute)">—</span>';
+    if (q.question_type === 'multi_fill' || q.question_type === 'fill' || q.question_type === 'multi') {
+        if (typeof ca === 'string') { try { const d = JSON.parse(ca); if (Array.isArray(d)) ca = d; } catch (_) {} }
+        if (Array.isArray(ca)) {
+            if (q.question_type === 'multi_fill') {
+                return `<div style="display:flex;flex-direction:column;gap:4px">${ca.map((v,i)=>`<div><span class="blank-tag">第${i+1}空</span>${escapeHtml(String(v||''))}</div>`).join('')}</div>`;
+            }
+            return ca.map(x => `<span class="badge badge-success" style="margin-right:4px">${escapeHtml(String(x))}</span>`).join('');
+        }
+    }
+    if (q.question_type === 'judge') return String(ca) === 'T' ? '对（T）' : (String(ca) === 'F' ? '错（F）' : escapeHtml(String(ca)));
+    return `<span style="white-space:pre-wrap">${escapeHtml(String(ca))}</span>`;
+}
+async function saveGrades() {
+    const grades = [];
+    document.querySelectorAll('[data-qid][data-k]').forEach(el => {
+        const qid = +el.dataset.qid; const k = el.dataset.k;
+        if (!grades.find(g => g.question_id === qid)) grades.push({ question_id: qid });
+        const g = grades.find(g => g.question_id === qid);
+        if (k === 'self_correct') g.self_correct = el.value === '' ? null : +el.value;
+        if (k === 'self_score') g.self_score = el.value === '' ? null : +el.value;
+    });
+    if (grades.length === 0) return;
+    const j = await req('practice_self_grade', { attempt_id: STATE.attemptId, grades });
+    if (!j.success) return;
+    alert('自评已保存');
+    loadAndShowResult(STATE.attemptId);
+}
+
+checkSessionAndRender();
+</script>
+</body>
+</html>

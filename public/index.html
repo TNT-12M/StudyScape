@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="">
+    <title>学补 · 在线刷题平台</title>
+    <link rel="stylesheet" href="assets/app.css">
+    <style>
+        body { display: flex; flex-direction: column; min-height: 100vh; }
+        .topbar {
+            position: sticky; top: 0; z-index: 50;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+        }
+        .topbar-inner {
+            max-width: 1200px; margin: 0 auto;
+            padding: 12px 20px; display: flex; align-items: center;
+            justify-content: space-between; gap: 12px;
+        }
+        .brand { font-size: var(--fs-title-2); font-weight: 600; display: flex; gap: 8px; align-items: center; color: var(--text); }
+        .nav { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .nav a {
+            padding: 6px 14px; border-radius: var(--radius); font-size: var(--fs-body);
+            color: var(--text-mute); text-decoration: none;
+        }
+        .nav a:hover { background: var(--bg-soft); color: var(--text); }
+        .nav .who { font-size: 12px; color: var(--text-mute); }
+
+        .page { flex: 1; display: flex; align-items: flex-start; justify-content: center; padding: 32px 20px 48px; }
+
+        /* ========== 公开区（未登录展示） ========== */
+        .public-wrapper {
+            max-width: 1200px; width: 100%;
+            display: flex; flex-direction: column; gap: 32px;
+        }
+        /* Hero */
+        .pub-hero {
+            text-align: center;
+            padding: 48px 24px 16px;
+        }
+        .pub-hero h1 {
+            font-size: 34px; font-weight: 700; color: var(--text); line-height: 1.25; margin-bottom: 12px;
+        }
+        .pub-hero h1 .accent { color: var(--accent); }
+        .pub-hero .subtitle {
+            color: var(--text-mute); font-size: 16px; margin-bottom: 18px;
+        }
+        .hero-tags { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 20px; }
+        .hero-tags span {
+            background: var(--bg-soft); color: var(--text-mute);
+            padding: 5px 12px; border-radius: 999px; font-size: 12px;
+        }
+        .hero-cta { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+
+        /* 统计卡 */
+        .pub-stats {
+            display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+        }
+        .pub-stat {
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--radius-card); padding: 20px; text-align: center;
+            transition: transform .18s, border-color .18s;
+        }
+        .pub-stat:hover { transform: translateY(-2px); border-color: var(--accent); }
+        .pub-stat .val {
+            font-size: 32px; font-weight: 700; color: var(--accent); line-height: 1.1;
+        }
+        .pub-stat .val small { font-size: 14px; color: var(--text-mute); font-weight: 500; margin-left: 2px; }
+        .pub-stat .lbl { color: var(--text-mute); font-size: 13px; margin-top: 6px; }
+        .pub-stat .ico { font-size: 20px; margin-bottom: 8px; }
+
+        /* 区块标题 */
+        .pub-block-head {
+            display: flex; justify-content: space-between; align-items: baseline;
+            margin-bottom: 16px; flex-wrap: wrap; gap: 8px;
+        }
+        .pub-block-head h2 {
+            font-size: 20px; font-weight: 700; color: var(--text);
+        }
+        .pub-block-head h2 .dot {
+            display: inline-block; width: 4px; height: 16px;
+            background: var(--accent); border-radius: 2px; margin-right: 8px; vertical-align: middle;
+        }
+        .pub-block-head .hint { color: var(--text-mute); font-size: 13px; }
+
+        /* 特色卡片 */
+        .pub-features {
+            display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+        }
+        .feature {
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--radius-card); padding: 20px;
+        }
+        .feature .ico {
+            width: 40px; height: 40px; border-radius: 10px;
+            background: var(--accent-soft); color: var(--accent);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px; margin-bottom: 12px;
+        }
+        .feature h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; color: var(--text); }
+        .feature p { color: var(--text-mute); font-size: 13px; line-height: 1.6; }
+
+        /* 最近发布试卷 */
+        .pub-papers {
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+        }
+        .paper-card {
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--radius-card); padding: 20px;
+            display: flex; flex-direction: column; gap: 12px;
+            transition: transform .18s, border-color .18s, box-shadow .18s;
+        }
+        .paper-card:hover {
+            transform: translateY(-2px); border-color: var(--accent);
+            box-shadow: var(--shadow-md);
+        }
+        .paper-card .pc-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+        .paper-card .pc-title { font-size: 16px; font-weight: 600; color: var(--text); line-height: 1.4; }
+        .paper-card .pc-desc { color: var(--text-mute); font-size: 13px; line-height: 1.6; min-height: 40px; }
+        .paper-card .pc-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+        .paper-card .chip {
+            background: var(--bg-soft); color: var(--text-mute);
+            padding: 3px 10px; border-radius: 999px; font-size: 12px;
+        }
+        .paper-card .pc-foot { display: flex; justify-content: space-between; align-items: center; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+        .paper-card .pc-date { color: var(--text-faint); font-size: 12px; }
+
+        /* 题型 + 资料统计 */
+        .pub-two {
+            display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 16px;
+        }
+        .pub-list-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 14px; border-radius: var(--radius); background: var(--bg-muted);
+            font-size: 14px;
+        }
+        .pub-list-item + .pub-list-item { margin-top: 8px; }
+        .pub-list-item .name { color: var(--text); font-weight: 500; }
+        .pub-list-item .count {
+            background: var(--accent-soft); color: var(--accent);
+            padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+        }
+        .bar-row { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+        .bar-row .bar-head { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-mute); }
+        .bar-row .bar {
+            height: 8px; background: var(--bg-soft); border-radius: 999px; overflow: hidden;
+        }
+        .bar-row .bar > i {
+            display: block; height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--info));
+            border-radius: 999px; width: 0;
+            transition: width .6s ease;
+        }
+
+        /* 首装说明卡片（底部提示：请在 auth.html 完成注册） */
+        .pub-first-install {
+            background: var(--accent-soft); border: 1px solid rgba(63,118,255,0.18);
+            border-radius: var(--radius-card); padding: 24px; color: var(--text);
+            display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 20px; align-items: center;
+        }
+        .pub-first-install h3 {
+            font-size: 17px; font-weight: 600; margin: 0 0 10px; color: var(--accent);
+        }
+        .pub-first-install ul { list-style: none; padding: 0; margin: 0; }
+        .pub-first-install li {
+            padding: 6px 0; font-size: 14px; line-height: 1.6;
+        }
+        .pub-first-install li::before { content: "✓ "; color: var(--accent); font-weight: 700; margin-right: 4px; }
+        .pub-first-install .cta {
+            display: flex; flex-direction: column; gap: 10px; align-items: stretch;
+        }
+        .card-header {
+            font-size: var(--fs-title-2); font-weight: 600; margin-bottom: 20px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+
+        /* 已登录 dash */
+        .dash-wrapper {
+            max-width: 1100px; width: 100%; display: flex; flex-direction: column; gap: 20px;
+        }
+        .alert {
+            padding: 12px 16px; border-radius: var(--radius); font-size: 14px;
+            border: 1px solid transparent;
+        }
+        .alert-success { background: var(--success-bg); color: var(--success); }
+        .alert-danger  { background: var(--danger-bg); color: var(--danger); }
+        .alert-info    { background: var(--accent-soft); color: var(--accent); }
+        .alert-warning { background: var(--warn-bg); color: var(--warn); }
+
+        .pre-wrap {
+            margin: 0; padding: 10px 14px; background: var(--bg-soft);
+            border-radius: var(--radius); max-height: 140px; overflow: auto;
+            font-size: 12px; font-family: var(--font-mono);
+        }
+        .section-title { font-size: 16px; font-weight: 600; margin: 6px 0 12px; color: var(--text); }
+
+        .text-center { text-align: center; }
+
+        .empty-tip {
+            text-align: center; padding: 40px 16px; color: var(--text-mute);
+            background: var(--bg); border: 1px dashed var(--border);
+            border-radius: var(--radius-card); font-size: 14px;
+        }
+
+        @media (max-width: 960px) {
+            .pub-stats { grid-template-columns: repeat(2, 1fr); }
+            .pub-features { grid-template-columns: repeat(2, 1fr); }
+            .pub-papers { grid-template-columns: 1fr; }
+            .pub-two { grid-template-columns: 1fr; }
+            .pub-first-install { grid-template-columns: 1fr; }
+            .pub-hero h1 { font-size: 26px; }
+        }
+        @media (max-width: 520px) {
+            .pub-stats { grid-template-columns: repeat(2, 1fr); }
+            .pub-features { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="topbar">
+    <div class="topbar-inner">
+        <a href="index.html" style="text-decoration:none;" class="brand">📚 学补 · 在线刷题</a>
+        <div class="nav" id="nav-bar">
+            <a href="exam.html">📘 组卷考试</a>
+            <a href="practice.html">🎯 自由刷题</a>
+            <a href="materials.html">📁 资料中心</a>
+            <button class="btn btn-ghost btn-sm" id="themeBtn" title="切换主题">🌓</button>
+            <a href="auth.html?mode=login" class="btn btn-primary btn-sm">登录</a>
+            <a href="auth.html?mode=register" class="btn btn-ghost btn-sm">注册</a>
+        </div>
+    </div>
+</div>
+
+<div class="page">
+
+    <!-- ============ 未登录：公开展示 + 登录/注册 ============ -->
+    <div class="public-wrapper hide" id="public-wrapper">
+
+        <!-- Hero -->
+        <section class="pub-hero">
+            <h1>📚 欢迎来到 <span class="accent">学补在线刷题平台</span></h1>
+            <p class="subtitle">组卷考试 · 自由刷题 · 学习资料一站式服务，为学习者提供完整的在线练习与评估体验</p>
+            <div class="hero-tags">
+                <span>✍️ 单选 / 多选 / 填空 / 简答</span>
+                <span>⏱️ 考试计时</span>
+                <span>📝 答案自评</span>
+                <span>📁 资料下载</span>
+                <span>🌙 暗色模式</span>
+            </div>
+            <div class="hero-cta">
+                <a href="auth.html?mode=login" class="btn btn-primary btn-lg">立即登录</a>
+                <a href="auth.html?mode=register" class="btn btn-ghost btn-lg">免费注册</a>
+                <a href="exam.html" class="btn btn-ghost btn-lg">浏览试卷 →</a>
+            </div>
+        </section>
+
+        <!-- 统计 -->
+        <section>
+            <div class="pub-block-head">
+                <h2><span class="dot"></span>平台数据</h2>
+                <div class="hint">实时统计 · 持续更新中</div>
+            </div>
+            <div class="pub-stats" id="pub-stats"></div>
+        </section>
+
+        <!-- 特色 -->
+        <section>
+            <div class="pub-block-head">
+                <h2><span class="dot"></span>平台特色</h2>
+                <div class="hint">围绕考试、练习、资料三大核心场景</div>
+            </div>
+            <div class="pub-features">
+                <div class="feature">
+                    <div class="ico">📘</div>
+                    <h3>组卷考试</h3>
+                    <p>管理员自定义组卷，支持分题型分题量、设置考试时长、发布后学生可限时答题并自评。</p>
+                </div>
+                <div class="feature">
+                    <div class="ico">🎯</div>
+                    <h3>自由刷题</h3>
+                    <p>学生自由选择科目、题型、题量，系统随机抽题即开即练，完成后即时对照参考答案。</p>
+                </div>
+                <div class="feature">
+                    <div class="ico">📁</div>
+                    <h3>资料中心</h3>
+                    <p>管理员上传 PDF/DOC/PPT/XLS 等学习资料，学生一键下载，按科目分类按关键字搜索。</p>
+                </div>
+                <div class="feature">
+                    <div class="ico">🧠</div>
+                    <h3>四题型全支持</h3>
+                    <p>单选题、多选题、填空题、简答题全覆盖，适合中小学及大学各学科日常练习与正式测验。</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 最近发布试卷 -->
+        <section>
+            <div class="pub-block-head">
+                <h2><span class="dot"></span>最近发布的考试</h2>
+                <div class="hint">登录后即可参加 → <a href="auth.html?mode=login" style="color:var(--accent)">去登录</a></div>
+            </div>
+            <div class="pub-papers" id="pub-papers"></div>
+        </section>
+
+        <!-- 题型分布 + 资料科目 -->
+        <section class="pub-two">
+            <div>
+                <div class="pub-block-head">
+                    <h2 style="font-size:18px;"><span class="dot"></span>题型分布</h2>
+                </div>
+                <div id="pub-types"></div>
+            </div>
+            <div>
+                <div class="pub-block-head">
+                    <h2 style="font-size:18px;"><span class="dot"></span>资料分类</h2>
+                </div>
+                <div id="pub-materials"></div>
+            </div>
+        </section>
+
+        <!-- 注册提示卡片（无登录态可见） -->
+        <section class="pub-first-install" id="pub-first-install" style="margin-top:8px;">
+            <div>
+                <h3>💡 注册提示：账号注册后即可登录</h3>
+                <ul>
+                    <li>系统检测到无管理员时，第一个注册的账号将自动成为首位管理员</li>
+                    <li>后续注册的账号创建成功后即可直接登录使用</li>
+                    <li>管理员可在 <b>管理后台</b> 启用或禁用账号</li>
+                    <li>所有操作均有审计日志，确保安全可追溯</li>
+                </ul>
+            </div>
+            <div class="cta">
+                <a href="auth.html?mode=register" class="btn btn-primary btn-lg" style="text-align:center;text-decoration:none;">免费注册</a>
+                <a href="auth.html?mode=login" class="btn btn-ghost btn-lg" style="text-align:center;text-decoration:none;">已有账号去登录</a>
+            </div>
+        </section>
+    </div>
+
+    <!-- ============ 已登录：dash / admin 控制台 ============ -->
+    <div class="dash-wrapper hide" id="dash-wrapper">
+        <div class="card hide" id="panel-dash">
+            <div class="card-header" style="border:none;padding:0;margin-bottom:0;">
+                <span>📊 用户控制台</span>
+            </div>
+            <div id="dash-content" style="margin-top:16px;">
+                <div class="alert alert-info">加载中...</div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+// ===================== 工具 =====================
+function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ===================== 主题切换 =====================
+(function () {
+    const saved = localStorage.getItem('theme');
+    if (saved) document.documentElement.setAttribute('data-theme', saved);
+    const btn = document.getElementById('themeBtn');
+    if (btn) {
+        btn.onclick = function () {
+            const cur = document.documentElement.getAttribute('data-theme');
+            const next = cur === 'dark' ? '' : 'dark';
+            if (next) document.documentElement.setAttribute('data-theme', next);
+            else document.documentElement.removeAttribute('data-theme');
+            localStorage.setItem('theme', next || '');
+        };
+    }
+})();
+
+// ===================== 配置 =====================
+const API_URL = 'api.php';
+let csrf = "";
+
+// ===================== API调用 =====================
+async function api(action, postData = {}) {
+    const fd = new FormData();
+    fd.set("action", action);
+    if (csrf) fd.set("csrf_token", csrf);
+    for (let k in postData) {
+        fd.set(k, postData[k]);
+    }
+    try {
+        const res = await fetch(API_URL, { method: "POST", body: fd });
+        const json = await res.json();
+        if (json.csrf_token) {
+            csrf = json.csrf_token;
+            const meta = document.querySelector('meta[name="csrf-token"]');
+            if (meta) meta.content = csrf;
+        }
+        return json;
+    } catch (e) {
+        console.error("API调用失败:", e);
+        return { success: false, message: "网络请求失败，请检查服务器" };
+    }
+}
+
+// ===================== 跳转到独立认证页 =====================
+// 旧函数名保留以兼容 renderPublic 中的旧模板引用（若有缓存）
+function focusAuth(which)  { location.href = 'auth.html?mode=' + (which || 'login'); }
+function showLogin()      { location.href = 'auth.html?mode=login'; }
+function showRegister()   { location.href = 'auth.html?mode=register'; }
+function doLogin()        { location.href = 'auth.html?mode=login'; }
+function doRegister()     { location.href = 'auth.html?mode=register'; }
+
+// 显/隐公开区 vs dash 区
+function showPublic(on) {
+    const pub  = document.getElementById('public-wrapper');
+    const dash = document.getElementById('dash-wrapper');
+    const hint = document.getElementById('pub-first-install');
+    if (on) {
+        pub.classList.remove('hide');  pub.style.display = '';
+        dash.classList.add('hide');    dash.style.display = 'none';
+        if (hint) { hint.style.display = ''; }
+    } else {
+        pub.classList.add('hide');     pub.style.display = 'none';
+        dash.classList.remove('hide'); dash.style.display = '';
+        if (hint) { hint.style.display = 'none'; }
+    }
+}
+
+// ===================== 用户操作 =====================
+async function logout() {
+    await api("logout", {});
+    localStorage.removeItem('xb_session');
+    localStorage.removeItem('xb_user');
+    // 退出后切回公开区 + 刷新公开数据
+    navBarLoggedOut();
+    showPublic(true);
+    bootstrap();
+}
+
+// ===================== 顶部导航栏（已登录态） =====================
+function navBarLoggedIn(user) {
+    const nav = document.getElementById("nav-bar");
+    nav.innerHTML = `
+        <a href="exam.html">📘 组卷考试</a>
+        <a href="practice.html">🎯 自由刷题</a>
+        <a href="materials.html">📁 资料中心</a>
+        <a href="questions.html">📚 题库中心</a>
+        <span class="who">你好，${escapeHtml(user.username)}${user.is_admin ? ' · 👑' : ''}</span>
+        <button class="btn btn-ghost btn-sm" id="themeBtn2" title="切换主题">🌓</button>
+        ${user.is_admin ? '<a href="admin.html" class="btn btn-ghost btn-sm">管理后台</a>' : ''}
+        <button class="btn btn-danger btn-sm" onclick="logout()">退出</button>
+    `;
+    const tb = document.getElementById('themeBtn2');
+    if (tb) {
+        tb.onclick = () => {
+            const cur = document.documentElement.getAttribute('data-theme');
+            const next = cur === 'dark' ? '' : 'dark';
+            if (next) document.documentElement.setAttribute('data-theme', next);
+            else document.documentElement.removeAttribute('data-theme');
+            localStorage.setItem('theme', next || '');
+        };
+    }
+}
+
+function navBarLoggedOut() {
+    const nav = document.getElementById("nav-bar");
+    nav.innerHTML = `
+        <a href="exam.html">📘 组卷考试</a>
+        <a href="practice.html">🎯 自由刷题</a>
+        <a href="materials.html">📁 资料中心</a>
+        <button class="btn btn-ghost btn-sm" id="themeBtn" title="切换主题">🌓</button>
+        <a href="auth.html?mode=login" class="btn btn-primary btn-sm">登录</a>
+        <a href="auth.html?mode=register" class="btn btn-ghost btn-sm">注册</a>
+    `;
+    const tb = document.getElementById('themeBtn');
+    if (tb) {
+        tb.onclick = () => {
+            const cur = document.documentElement.getAttribute('data-theme');
+            const next = cur === 'dark' ? '' : 'dark';
+            if (next) document.documentElement.setAttribute('data-theme', next);
+            else document.documentElement.removeAttribute('data-theme');
+            localStorage.setItem('theme', next || '');
+        };
+    }
+}
+
+// ===================== 登录后进入控制台 =====================
+function afterLogin(user) {
+    showPublic(false);
+    navBarLoggedIn(user);
+    if (user.is_admin) {
+        location.href = 'admin.html';
+        return;
+    }
+    openDash();
+}
+
+// ===================== 用户面板 =====================
+async function openDash() {
+    document.getElementById("panel-dash").classList.remove("hide");
+    document.getElementById("panel-dash").style.display = '';
+
+    const ret = await api("get_dashboard", {});
+    const content = document.getElementById("dash-content");
+
+    if (!ret.success) {
+        content.innerHTML = `<div class="alert alert-danger">${escapeHtml(ret.message)}</div>`;
+        return;
+    }
+
+    const data = ret.data;
+    const recent = JSON.stringify(data.recent_results, null, 2);
+    content.innerHTML = `
+        <div class="alert alert-success">✅ 欢迎回来，${escapeHtml(data.user.username)}！</div>
+        <div class="summary-grid">
+            <div class="stat-card">
+                <div class="stat-value" style="color:var(--accent)">${escapeHtml(String(data.stats.exam_count))}</div>
+                <div class="stat-label">📝 可用考试</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" style="color:var(--success)">${escapeHtml(String(data.stats.submitted_count))}</div>
+                <div class="stat-label">✅ 已提交</div>
+            </div>
+        </div>
+        <div class="card" style="border:1px solid var(--border);box-shadow:none;margin:0;margin-top:16px;">
+            <div class="section-title">📋 最近考试记录</div>
+            <pre class="pre-wrap">${escapeHtml(recent)}</pre>
+        </div>
+    `;
+}
+
+// ===================== 公开区渲染 =====================
+function renderPublic(d) {
+    const stats = d.stats || {};
+    const types = d.types || [];
+    const papers = d.published_papers || [];
+    const materials = d.materials || [];
+
+    // 1) 统计
+    const statList = [
+        { ico:'📝', val: stats.question_count || 0, lbl: '题目总数', unit: '题' },
+        { ico:'📚', val: stats.subject_count || 0,  lbl: '科目数量', unit: '门' },
+        { ico:'📘', val: stats.published_paper_count || 0, lbl: '已发布试卷', unit: '份' },
+        { ico:'📁', val: stats.material_count || 0, lbl: '学习资料', unit: '个' },
+    ];
+    document.getElementById('pub-stats').innerHTML = statList.map(s => `
+        <div class="pub-stat">
+            <div class="ico">${s.ico}</div>
+            <div class="val">${escapeHtml(String(s.val))}<small>${s.unit}</small></div>
+            <div class="lbl">${s.lbl}</div>
+        </div>
+    `).join('');
+
+    // 2) 已发布试卷卡
+    const papersHtml = papers.length === 0
+        ? `<div class="empty-tip" style="grid-column:1/-1">暂无已发布的试卷，登录后在题库中心组卷管理中发布</div>`
+        : papers.map(p => `
+            <div class="paper-card">
+                <div class="pc-head">
+                    <div class="pc-title">${escapeHtml(p.name)}</div>
+                    ${p.subject ? `<span class="badge badge-user">${escapeHtml(p.subject)}</span>` : ''}
+                </div>
+                <div class="pc-desc">${escapeHtml(p.description || '暂无描述')}</div>
+                <div class="pc-chips">
+                    <span class="chip">📝 ${p.question_count || 0} 题</span>
+                    <span class="chip">⏱️ ${p.duration_minutes || 0} 分钟</span>
+                    ${p.created_at ? `<span class="chip">📅 ${escapeHtml(String(p.created_at).slice(0,10))}</span>` : ''}
+                </div>
+                <div class="pc-foot">
+                    <span class="pc-date">管理员发布</span>
+                    <a href="auth.html?mode=login" class="btn btn-ghost btn-sm">登录考试 →</a>
+                </div>
+            </div>
+        `).join('');
+    document.getElementById('pub-papers').innerHTML = papersHtml;
+
+    // 3) 题型分布（带进度条）
+    const totalQ = types.reduce((acc, t) => acc + (t.count || 0), 0) || 1;
+    const typeColors = ['var(--accent)', 'var(--ok)', 'var(--warn)', 'var(--err)'];
+    const typesHtml = types.length ? types.map((t, i) => {
+        const pct = Math.round((t.count || 0) / totalQ * 100);
+        return `
+            <div class="bar-row">
+                <div class="bar-head">
+                    <span>${escapeHtml(t.label)}</span>
+                    <span>${t.count || 0} 题 · ${pct}%</span>
+                </div>
+                <div class="bar"><i style="width:${pct}%;background:${typeColors[i % typeColors.length]}"></i></div>
+            </div>
+        `;
+    }).join('') : `<div class="empty-tip">暂无题型数据</div>`;
+    document.getElementById('pub-types').innerHTML = typesHtml;
+
+    // 4) 资料按科目统计
+    const matHtml = materials.length
+        ? materials.map(m => `
+            <div class="pub-list-item">
+                <span class="name">${escapeHtml(m.subject)}</span>
+                <span class="count">${m.count} 个</span>
+            </div>
+        `).join('')
+        : `<div class="empty-tip">暂无资料，管理员上传后可见</div>`;
+    document.getElementById('pub-materials').innerHTML = matHtml;
+}
+
+// ===================== 启动：并行拉公开数据 + 检查登录态 =====================
+async function bootstrap() {
+    const [overview, session] = await Promise.all([
+        api('public_overview'),
+        api('check_session')
+    ]);
+
+    // 先渲染公开数据（无论是否登录都先准备好）
+    if (overview && overview.success && overview.data) {
+        renderPublic(overview.data);
+    } else {
+        renderPublic({ stats:{}, types:[], published_papers:[], materials:[] });
+    }
+
+    // 再按登录态切换
+    if (session && session.success && session.data && session.data.user) {
+        const user = session.data.user;
+        localStorage.setItem('xb_session', '1');
+        localStorage.setItem('xb_user', JSON.stringify(user));
+        afterLogin(user);
+    } else {
+        localStorage.removeItem('xb_session');
+        localStorage.removeItem('xb_user');
+        navBarLoggedOut();
+        showPublic(true);
+    }
+}
+
+bootstrap();
+</script>
+</body>
+</html>

@@ -14,6 +14,9 @@ exam.db-shm
 *.swp
 .DS_Store
 Thumbs.db
+data/logs/
+materials/mat_*
+test/
 
 # ===== 密码/密钥类临时脚本 =====
 *password*.php

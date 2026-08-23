@@ -6,17 +6,26 @@
     <title>题库中心 - 学补在线刷题平台</title>
     <style>
         :root {
-            --primary: #4f46e5;
-            --primary-dark: #4338ca;
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
             --success: #10b981;
             --danger: #ef4444;
             --warning: #f59e0b;
             --info: #3b82f6;
-            --bg: #f3f4f6;
+            --bg: #f8fafc;
             --card: #ffffff;
-            --text: #1f2937;
-            --text-light: #6b7280;
+            --text: #1a1a1a;
+            --text-light: #666666;
             --border: #e5e7eb;
+        }
+        html[data-theme="dark"] {
+            --primary: #3b82f6;
+            --primary-dark: #2563eb;
+            --bg: #0e0e10;
+            --card: #18181b;
+            --text: #f5f5f7;
+            --text-light: #a1a1aa;
+            --border: #27272a;
         }
         * { margin:0; padding:0; box-sizing:border-box; }
         body {
@@ -28,47 +37,59 @@
             flex-direction:column;
         }
         .navbar {
-            background: var(--primary);
-            color:white;
-            padding:1rem 2rem;
+            background: var(--card);
+            color: var(--text);
+            padding: 12px 24px;
             display:flex;
             justify-content:space-between;
             align-items:center;
-            box-shadow:0 2px 10px rgba(0,0,0,0.1);
+            border-bottom: 1px solid var(--border);
             position:sticky;
             top:0;
             z-index:1000;
+            flex-wrap: wrap;
+            gap: 10px;
         }
         .navbar-brand {
-            font-size:1.4rem;
-            font-weight:bold;
-            color:white;
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text);
             text-decoration:none;
             display:flex;
             align-items:center;
-            gap:0.5rem;
+            gap: 8px;
         }
         .navbar-menu {
             display:flex;
-            gap:0.6rem;
+            gap: 6px;
             align-items:center;
             flex-wrap:wrap;
         }
-        .navbar-menu span, .navbar-menu button {
-            color:white;
-            text-decoration:none;
-            padding:0.5rem 1rem;
-            border-radius:5px;
-            transition:all 0.3s;
-            background:none;
-            border:1px solid rgba(255,255,255,0.3);
-            cursor:pointer;
-            font-size:0.9rem;
+        .navbar-menu .q-link {
+            padding: 6px 12px;
+            border-radius: 6px;
+            color: var(--text-light);
+            text-decoration: none;
+            font-size: 14px;
         }
-        .navbar-menu span { border:none; cursor:default; }
+        .navbar-menu .q-link:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); color: var(--text); }
+        .navbar-menu span, .navbar-menu button {
+            color: var(--text);
+            text-decoration:none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            transition: background .15s;
+            background: transparent;
+            border: 1px solid var(--border);
+            cursor:pointer;
+            font-size: 13px;
+            font-family: inherit;
+        }
+        .navbar-menu span { border: none; cursor: default; color: var(--text-light); }
         .navbar-menu button:hover {
-            background:rgba(255,255,255,0.15);
-            border-color:white;
+            background: color-mix(in srgb, var(--primary) 8%, transparent);
+            border-color: var(--primary);
+            color: var(--primary);
         }
         .container {
             max-width:1280px;
@@ -211,7 +232,7 @@
         }
         .stats-label { color:var(--text-light); font-size:0.85rem; margin-top:0.25rem; }
 
-        .question-list { display:flex; flex-direction:column; gap:1rem; }
+        .question-list { display:flex; flex-direction:column; gap:1rem; overflow-anchor: none; }
         .question-card {
             background:var(--card);
             border-radius:8px;
@@ -474,8 +495,13 @@
 </head>
 <body>
 <nav class="navbar">
-    <a class="navbar-brand" href="index.html">📚 学补在线刷题平台</a>
+    <a class="navbar-brand" href="index.html">📚 学补 · 题库中心</a>
     <div class="navbar-menu" id="nav-bar">
+        <a href="exam.html" class="q-link">📘 组卷</a>
+        <a href="practice.html" class="q-link">🎯 刷题</a>
+        <a href="materials.html" class="q-link">📁 资料</a>
+        <a href="admin.html" class="q-link" id="admin-link" style="display:none">👑 管理</a>
+        <button id="themeBtn" title="切换主题">🌓</button>
         <span id="user-info">加载中...</span>
         <button onclick="goHome()">🏠 首页</button>
         <button onclick="doLogout()">退出</button>
@@ -514,6 +540,14 @@
                 <button class="btn btn-sm btn-secondary" onclick="resetFilters()">重置</button>
             </div>
             <div class="filters">
+                <div class="form-group">
+                    <label>学段</label>
+                    <select class="form-control" id="filter-level" onchange="browseFilterLevelChange()">
+                        <option value="">全部</option>
+                        <option value="junior">初中</option>
+                        <option value="senior">高中</option>
+                    </select>
+                </div>
                 <div class="form-group">
                     <label>科目</label>
                     <select class="form-control" id="filter-subject" onchange="reloadList(1)">
@@ -577,6 +611,20 @@
                         <option value="政治">
                         <option value="信息技术">
                     </datalist>
+                </div>
+                <div class="form-group">
+                    <label>所属学段 *</label>
+                    <select class="form-control" id="add-level">
+                        <option value="">请选择学段</option>
+                        <option value="junior">初中</option>
+                        <option value="senior">高中</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>分类 *</label>
+                    <select class="form-control" id="add-category">
+                        <option value="single">单选题</option><option value="multiple">多选题</option><option value="judge">判断题</option><option value="fill">填空题</option>
+                    </select>
                 </div>
                 <div class="form-group">
                     <label>题型 *</label>
@@ -689,6 +737,14 @@
                 2. 扁平数组：<code>[{"subject":"生物","question_type":"single","content":"...","options":["A. ...","B. ..."],"correct_answer":"A. ...","explanation":"..."}]</code>
             </div>
             <div class="form-group">
+                <label>所属学段 *</label>
+                <select class="form-control" id="import-level"><option value="">请选择学段</option><option value="junior">初中</option><option value="senior">高中</option></select>
+            </div>
+            <div class="form-group">
+                <label>分类覆盖</label>
+                <select class="form-control" id="import-category"><option value="">按题型</option><option value="single">单选题</option><option value="multiple">多选题</option><option value="judge">判断题</option><option value="fill">填空题</option><option value="multi_fill">多空填空题</option><option value="short">简答题</option></select>
+            </div>
+            <div class="form-group">
                 <label>科目覆盖（可选，留空自动识别）</label>
                 <input type="text" class="form-control" id="import-subject" placeholder="如: 生物（留空则从试卷名称自动识别）">
             </div>
@@ -708,10 +764,18 @@
         <div class="card">
             <div class="card-header">
                 <span>⚙️ 题目管理</span>
-                <button class="btn btn-sm btn-secondary" onclick="loadManageList(1)">🔄 刷新</button>
+                <div style="display:flex;gap:8px;align-items:center"><span id="manage-selected-count" class="badge badge-subject">已选 0</span><button class="btn btn-sm btn-secondary" onclick="loadManageList(1)">🔄 刷新</button></div>
             </div>
             <div id="manage-alert"></div>
             <div class="filters">
+                <div class="form-group">
+                    <label>学段 *</label>
+                    <select class="form-control" id="manage-level" onchange="loadManageList(1)">
+                        <option value="">请选择学段</option>
+                        <option value="junior">初中</option>
+                        <option value="senior">高中</option>
+                    </select>
+                </div>
                 <div class="form-group">
                     <label>科目</label>
                     <select class="form-control" id="manage-subject" onchange="loadManageList(1)">
@@ -736,10 +800,136 @@
                     <button class="btn btn-primary" onclick="loadManageList(1)">🔎 搜索</button>
                 </div>
             </div>
+            <div id="bulk-toolbar" class="actions-bar" style="display:none;gap:8px;align-items:center;flex-wrap:wrap">
+                <button class="btn btn-sm btn-secondary" onclick="toggleManageSelection(true)">全选本页</button>
+                <button class="btn btn-sm btn-secondary" onclick="toggleManageSelection(false)">取消全选</button>
+                <select class="form-control" id="bulk-level" style="width:auto"><option value="">移动到学段</option><option value="junior">初中</option><option value="senior">高中</option></select>
+                <select class="form-control" id="bulk-category" style="width:auto"><option value="">修改分类</option><option value="single">单选题</option><option value="multiple">多选题</option><option value="judge">判断题</option><option value="fill">填空题</option><option value="multi_fill">多空填空题</option><option value="short">简答题</option></select>
+                <button class="btn btn-sm btn-primary" onclick="bulkUpdateSelected()">应用修改</button>
+                <button class="btn btn-sm btn-danger" onclick="bulkDeleteSelected()">批量删除</button>
+            </div>
             <div class="question-list" id="manage-list">
-                <div class="loading"><div class="spinner"></div><div>加载中...</div></div>
+                <div class="loading"><div class="spinner"></div><div>请先选择学段</div></div>
             </div>
             <div class="pagination" id="manage-pagination"></div>
+        </div>
+    </div>
+
+    <!-- =================== 组卷管理（管理员） =================== -->
+    <div class="panel" id="panel-paper">
+        <div class="card">
+            <div class="card-header">
+                <span>📘 组卷管理</span>
+                <div style="display:flex;gap:8px">
+                    <button class="btn btn-sm btn-secondary" onclick="loadPaperList()">🔄 刷新</button>
+                    <button class="btn btn-sm btn-primary" onclick="openPaperEditor()">➕ 新建试卷</button>
+                </div>
+            </div>
+            <div id="paper-alert"></div>
+            <div class="table-wrapper">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>ID</th><th>试卷名称</th><th>题数</th><th>时长</th>
+                            <th>状态</th><th>创建/更新时间</th><th style="white-space:nowrap">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="paper-list-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 试卷编辑 / 选题弹窗 -->
+<div class="modal-overlay" id="paper-edit-modal" onclick="if(event.target.id==='paper-edit-modal')closeModal('paper-edit-modal')" style="z-index:80">
+    <div class="modal" style="width:min(1200px,95vw);height:88vh;display:flex;flex-direction:column">
+        <div class="modal-header">
+            <h3 id="paper-edit-title">📝 新建试卷</h3>
+            <button class="modal-close" onclick="closeModal('paper-edit-modal')">×</button>
+        </div>
+        <div id="paper-edit-alert"></div>
+        <div style="padding:0 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-bottom:12px">
+            <div class="form-group" style="margin:0">
+                <label>试卷名称 *</label>
+                <input type="text" class="form-control" id="pe-name" placeholder="如：高二生物 期中模拟卷">
+            </div>
+            <div class="form-group" style="margin:0">
+                <label>考试时长（分钟）*</label>
+                <input type="number" min="1" step="1" class="form-control" id="pe-duration" value="60">
+            </div>
+            <div class="form-group" style="margin:0;grid-column:1/-1">
+                <label>试卷介绍 / 说明</label>
+                <input type="text" class="form-control" id="pe-desc" placeholder="试卷简介，展示给学生">
+            </div>
+        </div>
+        <div style="padding:0 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:12px">
+            <div class="form-group" style="margin:0">
+                <label>筛选：学段</label>
+                <select class="form-control" id="paper-filter-level" onchange="loadPaperSubjects(); loadQuestionPoolPage(1)">
+                    <option value="">全部</option><option value="junior">初中</option><option value="senior">高中</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin:0">
+                <label>筛选：科目</label>
+                <select class="form-control" id="paper-filter-subject" onchange="loadQuestionPoolPage(1)">
+                    <option value="">全部</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin:0">
+                <label>筛选：题型</label>
+                <select class="form-control" id="paper-filter-type" onchange="loadQuestionPoolPage(1)">
+                    <option value="">全部</option>
+                    <option value="single">单选题</option>
+                    <option value="multiple">多选题</option>
+                    <option value="judge">判断题</option>
+                    <option value="fill">填空题</option>
+                    <option value="multi_fill">多空填空题</option>
+                    <option value="short">简答题</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin:0;grid-column:1/-1">
+                <label>筛选：关键词</label>
+                <input type="text" class="form-control" id="paper-filter-kw" placeholder="按题干搜索..." onkeydown="if(event.key==='Enter')loadQuestionPoolPage(1)">
+            </div>
+            <div class="actions" style="margin:0 0 8px 0;grid-column:1/-1">
+                <button class="btn btn-primary" onclick="loadQuestionPoolPage(1)">🔎 搜索</button>
+                <button class="btn btn-success" onclick="addCurrentPageToPaper()">➕ 将本页全部加入试卷</button>
+            </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 20px;flex:1;min-height:0">
+            <!-- 左：题库池 -->
+            <div class="card" style="margin:0;display:flex;flex-direction:column;overflow:hidden">
+                <div class="card-header" style="border:none;margin-bottom:6px">
+                    <span>📚 题库池</span>
+                    <span id="pool-count" style="font-size:12px;color:var(--text-light)"></span>
+                </div>
+                <div id="pool-list" style="overflow:auto;flex:1;padding-right:4px"></div>
+                <div class="pagination" id="pool-pagination" style="margin-top:8px"></div>
+            </div>
+            <!-- 右：已选题目（可排序/改分/删除） -->
+            <div class="card" style="margin:0;display:flex;flex-direction:column;overflow:hidden">
+                <div class="card-header" style="border:none;margin-bottom:6px">
+                    <span>📝 已选题目</span>
+                    <span id="paper-count" style="font-size:12px;color:var(--text-light)">共 0 题</span>
+                </div>
+                <div id="paper-questions" style="overflow:auto;flex:1;padding-right:4px">
+                    <div class="loading" style="justify-content:center">
+                        <div style="color:var(--text-light);font-size:13px;padding:20px;text-align:center">
+                            从左侧勾选题目，点击"+ 加入试卷"，或直接点题目卡片。
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="actions-bar" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="color:var(--text-light);font-size:12px">
+                💡 已选题目：按 id 去重；支持上下拖拽排序（点击"↑↓"按钮）；每题可单独设置分值。
+            </div>
+            <div style="display:flex;gap:8px">
+                <button class="btn btn-secondary" onclick="closeModal('paper-edit-modal')">取消</button>
+                <button class="btn btn-success" onclick="submitPaperSave()">💾 保存试卷</button>
+            </div>
         </div>
     </div>
 </div>
@@ -767,6 +957,14 @@
             <div class="form-group">
                 <label>科目 *</label>
                 <input type="text" class="form-control" id="edit-subject">
+            </div>
+            <div class="form-group">
+                <label>所属学段 *</label>
+                <select class="form-control" id="edit-level"><option value="">请选择学段</option><option value="junior">初中</option><option value="senior">高中</option></select>
+            </div>
+            <div class="form-group">
+                <label>分类 *</label>
+                <select class="form-control" id="edit-category"><option value="single">单选题</option><option value="multiple">多选题</option><option value="judge">判断题</option><option value="fill">填空题</option><option value="multi_fill">多空填空题</option><option value="short">简答题</option></select>
             </div>
             <div class="form-group">
                 <label>题型 *</label>
@@ -829,7 +1027,8 @@ let csrf = '';
 let currentUser = null;
 let browseState = { page:1, total:0, total_pages:0 };
 let manageState = { page:1, total:0, total_pages:0 };
-const TYPE_LABELS = { single:'单选题', multiple:'多选题', judge:'判断题', fill:'填空题' };
+let isLoading = false;
+const TYPE_LABELS = { single:'单选题', multiple:'多选题', multi:'多选题', judge:'判断题', fill:'填空题', multi_fill:'多空填空题', short:'简答题' };
 
 // ===================== API 调用 =====================
 // 超时控制：避免后端 hang 住时前端一直显示"加载中"
@@ -918,6 +1117,7 @@ function switchTab(name) {
     if (name === 'browse') reloadList(browseState.page);
     if (name === 'manage') loadManageList(manageState.page);
     if (name === 'add') resetAddForm();
+    if (name === 'paper') loadPaperList();
 }
 
 // ===================== 登录/导航 =====================
@@ -942,6 +1142,8 @@ async function bootstrap() {
     }
     currentUser = ret.data.user;
     document.getElementById('user-info').textContent = `👋 ${currentUser.username} (${currentUser.is_admin ? '管理员' : '学生'})`;
+    const adminLink = document.getElementById('admin-link');
+    if (adminLink) adminLink.style.display = currentUser.is_admin ? '' : 'none';
 
     if (currentUser.is_admin) {
         // 注入管理员 Tab
@@ -949,7 +1151,8 @@ async function bootstrap() {
         [
             { id:'add',    label:'➕ 新增题目' },
             { id:'import', label:'📥 批量导入' },
-            { id:'manage', label:'⚙️ 题目管理' }
+            { id:'manage', label:'⚙️ 题目管理' },
+            { id:'paper',  label:'📘 组卷管理' }
         ].forEach(t => {
             const btn = document.createElement('button');
             btn.className = 'tab';
@@ -998,10 +1201,11 @@ async function loadStats() {
 
 // ===================== 科目列表 =====================
 async function loadSubjects() {
-    const ret = await api('get_subjects', {});
+    const level = document.getElementById('filter-level')?.value || '';
+    const ret = await api('get_subjects', { education_level: level });
     if (!ret.success) return;
     const subjects = ret.data.subjects || [];
-    ['filter-subject', 'manage-subject'].forEach(id => {
+    ['filter-subject'].forEach(id => {
         const sel = document.getElementById(id);
         if (!sel) return;
         const cur = sel.value;
@@ -1010,20 +1214,52 @@ async function loadSubjects() {
         if (cur) sel.value = cur;
     });
 }
+async function loadPaperSubjects() {
+    const level = document.getElementById('paper-filter-level')?.value || '';
+    const ret = await api('get_subjects', { education_level: level });
+    if (!ret.success) return;
+    const subjects = ret.data.subjects || [];
+    const sel = document.getElementById('paper-filter-subject');
+    if (sel) {
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">全部</option>' +
+            subjects.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+        if (cur) sel.value = cur;
+    }
+}
+async function loadManageSubjects() {
+    const level = document.getElementById('manage-level')?.value || '';
+    const ret = await api('get_subjects', { education_level: level });
+    if (!ret.success) return;
+    const subjects = ret.data.subjects || [];
+    const sel = document.getElementById('manage-subject');
+    if (sel) {
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">全部</option>' +
+            subjects.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+        if (cur) sel.value = cur;
+    }
+}
 
 // ===================== 题库浏览 =====================
 async function reloadList(page) {
     browseState.page = page || 1;
     const listEl = document.getElementById('question-list');
+    const savedScroll = window.scrollY;
     listEl.innerHTML = '<div class="loading"><div class="spinner"></div><div>加载中...</div></div>';
+    // Use requestAnimationFrame to ensure scroll is restored after DOM paint
+    requestAnimationFrame(() => window.scrollTo(0, savedScroll));
 
     const ret = await api('list_questions', {
         page: browseState.page,
         page_size: 10,
         subject: document.getElementById('filter-subject').value,
+        education_level: document.getElementById('filter-level').value,
         qtype:    document.getElementById('filter-type').value,
+        question_type: document.getElementById('filter-type').value,
         keyword:  document.getElementById('filter-keyword').value.trim()
     });
+    isLoading = false;  // Reset loading state after API call
     if (!ret.success) {
         listEl.innerHTML = `<div class="alert alert-danger">
             <strong>加载失败：</strong>${escapeHtml(ret.message)}
@@ -1044,11 +1280,13 @@ async function reloadList(page) {
         return;
     }
     listEl.innerHTML = data.items.map(q => renderQuestionCard(q, false)).join('');
-    renderPagination('pagination', data, () => reloadList(browseState.page));
+    renderPagination('pagination', data, (p) => reloadList(p));
     // 绑定点击查看详情
     listEl.querySelectorAll('.question-card').forEach(c => {
         c.onclick = () => showDetail(c.dataset.qid);
     });
+    // Restore scroll position after DOM update using requestAnimationFrame
+    requestAnimationFrame(() => window.scrollTo(0, savedScroll));
 }
 
 function renderQuestionCard(q, isAdmin) {
@@ -1061,9 +1299,12 @@ function renderQuestionCard(q, isAdmin) {
         <div class="question-card" data-qid="${q.id}">
             <div class="q-header">
                 <div class="q-meta">
+                    ${isAdmin ? `<input type="checkbox" class="manage-check" value="${q.id}" onchange="updateManageSelection()" onclick="event.stopPropagation()">` : ''}
                     <span class="q-id">#${q.id}</span>
+                    <span class="badge badge-info">${q.education_level === 'senior' ? '高中' : '初中'}</span>
                     <span class="badge badge-subject">${escapeHtml(q.subject)}</span>
                     <span class="badge badge-type">${typeLabel}</span>
+                    <span class="badge badge-type">分类：${TYPE_LABELS[q.category] || q.category || typeLabel}</span>
                     <span class="badge badge-diff">难度 ${q.difficulty}</span>
                     <span class="badge badge-points">${q.points}分</span>
                 </div>
@@ -1086,30 +1327,43 @@ function renderPagination(containerId, data, onGoto) {
     const { total, page, total_pages } = data;
     if (total_pages <= 1) { el.innerHTML = ''; return; }
 
-    let html = `<button ${page === 1 ? 'disabled' : ''} data-p="${page-1}">‹ 上一页</button>`;
+    let html = `<button type="button" ${page === 1 ? 'disabled' : ''} data-p="${page-1}">‹ 上一页</button>`;
     // 显示页码：首末+当前±2
     const showPages = new Set([1, total_pages, page, page-1, page+1]);
     const sorted = [...showPages].filter(p => p >= 1 && p <= total_pages).sort((a,b)=>a-b);
     let prev = 0;
     sorted.forEach(p => {
-        if (p - prev > 1) html += `<button disabled style="background:transparent;border:none;">…</button>`;
-        html += `<button class="${p===page?'active':''}" data-p="${p}">${p}</button>`;
+        if (p - prev > 1) html += `<button type="button" disabled style="background:transparent;border:none;">…</button>`;
+        html += `<button type="button" class="${p===page?'active':''}" data-p="${p}">${p}</button>`;
         prev = p;
     });
-    html += `<button ${page === total_pages ? 'disabled' : ''} data-p="${page+1}">下一页 ›</button>`;
+    html += `<button type="button" ${page === total_pages ? 'disabled' : ''} data-p="${page+1}">下一页 ›</button>`;
     el.innerHTML = html;
     el.querySelectorAll('button[data-p]').forEach(b => {
-        b.onclick = () => {
+        b.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
             const p = parseInt(b.dataset.p);
-            if (p && p !== page) onGoto(p);
+            if (p && !isLoading && p !== page) {
+                isLoading = true;
+                // Visual feedback: disable all pagination buttons during loading
+                el.querySelectorAll('button').forEach(btn => btn.disabled = true);
+                onGoto(p);
+            }
         };
     });
 }
 
 function resetFilters() {
+    document.getElementById('filter-level').value = '';
     document.getElementById('filter-subject').value = '';
     document.getElementById('filter-type').value = '';
     document.getElementById('filter-keyword').value = '';
+    reloadList(1);
+}
+async function browseFilterLevelChange() {
+    // 学段变化：更新“科目”下拉，清空之前的科目再加载列表
+    await loadSubjects();
     reloadList(1);
 }
 
@@ -1139,6 +1393,7 @@ async function showDetail(qid) {
         <div class="q-header" style="margin-bottom:1rem;">
             <div class="q-meta">
                 <span class="q-id">#${q.id}</span>
+                <span class="badge badge-info">${q.education_level === 'senior' ? '高中' : '初中'}</span>
                 <span class="badge badge-subject">${escapeHtml(q.subject)}</span>
                 <span class="badge badge-type">${typeLabel}</span>
                 <span class="badge badge-diff">难度 ${q.difficulty}</span>
@@ -1150,11 +1405,13 @@ async function showDetail(qid) {
             <div class="content-box">${escapeHtml(q.content)}</div>
         </div>
         ${optsHtml ? `<div class="modal-section"><h4>选项</h4>${optsHtml}</div>` : ''}
-        <div class="modal-section">
-            <h4>参考答案</h4>
-            <div class="content-box" style="background:#dcfce7;color:#15803d;font-weight:bold;">${escapeHtml(q.correct_answer)}</div>
-        </div>
-        ${q.explanation ? `<div class="modal-section"><h4>解析</h4><div class="content-box">${escapeHtml(q.explanation)}</div></div>` : ''}
+        ${currentUser && currentUser.is_admin ? `
+            <div class="modal-section">
+                <h4>参考答案</h4>
+                <div class="content-box" style="background:#dcfce7;color:#15803d;font-weight:bold;">${escapeHtml(q.correct_answer || '')}</div>
+            </div>
+            ${q.explanation ? `<div class="modal-section"><h4>解析</h4><div class="content-box">${escapeHtml(q.explanation)}</div></div>` : ''}
+        ` : ''}
         <div class="modal-section" style="color:var(--text-light);font-size:0.8rem;text-align:right;">
             创建: ${q.created_at || '-'} · 更新: ${q.updated_at || '-'}
         </div>
@@ -1240,6 +1497,8 @@ function collectOptions(containerId) {
 
 function resetAddForm() {
     document.getElementById('add-subject').value = '';
+    document.getElementById('add-level').value = '';
+    document.getElementById('add-category').value = 'single';
     document.getElementById('add-type').value = 'single';
     document.getElementById('add-difficulty').value = '3';
     document.getElementById('add-points').value = '2';
@@ -1260,7 +1519,13 @@ async function submitAdd() {
     const explanation = document.getElementById('add-explanation').value.trim();
     const difficulty  = parseInt(document.getElementById('add-difficulty').value);
     const points      = parseFloat(document.getElementById('add-points').value) || 1.0;
+    const education_level = document.getElementById('add-level').value;
+    const category = document.getElementById('add-category').value;
 
+    if (!education_level) {
+        setAlert('add-alert', '请选择所属学段', 'danger');
+        return;
+    }
     if (!subject || !content || !answer) {
         setAlert('add-alert', '科目、题干、答案均不能为空', 'danger');
         return;
@@ -1276,7 +1541,7 @@ async function submitAdd() {
         options: JSON.stringify(options),
         correct_answer: answer,
         explanation,
-        difficulty, points
+        difficulty, points, education_level, category
     });
     if (!ret.success) {
         setAlert('add-alert', escapeHtml(ret.message), 'danger');
@@ -1345,9 +1610,16 @@ async function doImport() {
         setAlert('import-alert', 'JSON 格式错误: ' + e.message, 'danger');
         return;
     }
+    const education_level = document.getElementById('import-level').value;
+    if (!education_level) {
+        setAlert('import-alert', '请选择所属学段', 'danger');
+        return;
+    }
     setAlert('import-alert', '⏳ 正在导入...', 'info');
     const ret = await api('import_questions_json', {
         json_data: jsonStr,
+        education_level,
+        category: document.getElementById('import-category').value,
         subject: document.getElementById('import-subject').value.trim()
     });
     if (!ret.success) {
@@ -1356,6 +1628,8 @@ async function doImport() {
     }
     setAlert('import-alert', `✅ ${ret.message}（共解析 ${ret.data.parsed_count} 题，科目: ${escapeHtml(ret.data.subject)}）`, 'success');
     document.getElementById('import-json').value = '';
+    document.getElementById('import-level').value = '';
+    document.getElementById('import-category').value = '';
     document.getElementById('import-subject').value = '';
     await loadStats();
     await loadSubjects();
@@ -1422,6 +1696,8 @@ async function doExtract() {
     fd.set('action', 'extract_document');
     fd.set('document', pickedFile);
     fd.set('subject', document.getElementById('import-subject').value.trim());
+    fd.set('education_level', document.getElementById('import-level').value);
+    fd.set('category', document.getElementById('import-category').value);
     if (csrf) fd.set('csrf_token', csrf);
 
     // UI: 显示进度条
@@ -1505,17 +1781,30 @@ async function doExtract() {
 // ===================== 管理：列表 =====================
 async function loadManageList(page) {
     if (!currentUser || !currentUser.is_admin) return;
+    const level = document.getElementById('manage-level').value;
+    if (!level) {
+        document.getElementById('manage-list').innerHTML = '<div class="empty-state"><div class="icon">🎓</div><div>请先选择学段</div></div>';
+        document.getElementById('manage-pagination').innerHTML = '';
+        manageState.selected.clear();
+        updateManageSelection();
+        return;
+    }
+    await loadManageSubjects();
     manageState.page = page || 1;
     const listEl = document.getElementById('manage-list');
+    const savedScroll = window.scrollY;
     listEl.innerHTML = '<div class="loading"><div class="spinner"></div><div>加载中...</div></div>';
+    requestAnimationFrame(() => window.scrollTo(0, savedScroll));
 
     const ret = await api('list_questions', {
         page: manageState.page,
         page_size: 10,
         subject: document.getElementById('manage-subject').value,
+        education_level: level,
         qtype:    document.getElementById('manage-type').value,
         keyword:  document.getElementById('manage-keyword').value.trim()
     });
+    isLoading = false;  // Reset loading state after API call
     if (!ret.success) {
         listEl.innerHTML = `<div class="alert alert-danger">
             <strong>加载失败：</strong>${escapeHtml(ret.message)}
@@ -1527,13 +1816,18 @@ async function loadManageList(page) {
     const data = ret.data;
     manageState.total = data.total;
     manageState.total_pages = data.total_pages;
+    // 刷新列表后清空当前页的批量选择状态，避免前后页 ID 错乱
+    manageState.selected.clear();
+    updateManageSelection();
     if (!data.items || data.items.length === 0) {
         listEl.innerHTML = '<div class="empty-state"><div class="icon">📭</div><div>暂无题目</div></div>';
         document.getElementById('manage-pagination').innerHTML = '';
         return;
     }
     listEl.innerHTML = data.items.map(q => renderQuestionCard(q, true)).join('');
-    renderPagination('manage-pagination', data, () => loadManageList(manageState.page));
+    updateManageSelection();
+    renderPagination('manage-pagination', data, (p) => loadManageList(p));
+    requestAnimationFrame(() => window.scrollTo(0, savedScroll));
 }
 
 // ===================== 编辑 =====================
@@ -1550,6 +1844,8 @@ async function openEdit(qid) {
     const q = ret.data.question;
     currentEditId = qid;
     document.getElementById('edit-subject').value = q.subject || '';
+    document.getElementById('edit-level').value = q.education_level || 'junior';
+    document.getElementById('edit-category').value = q.category || q.question_type || 'single';
     document.getElementById('edit-type').value = q.question_type || 'single';
     document.getElementById('edit-difficulty').value = q.difficulty || 3;
     document.getElementById('edit-points').value = q.points || 1;
@@ -1618,7 +1914,13 @@ async function submitEdit() {
     const explanation = document.getElementById('edit-explanation').value.trim();
     const difficulty  = parseInt(document.getElementById('edit-difficulty').value);
     const points      = parseFloat(document.getElementById('edit-points').value) || 1.0;
+    const education_level = document.getElementById('edit-level').value;
+    const category = document.getElementById('edit-category').value;
 
+    if (!education_level) {
+        setAlert('edit-alert', '请选择所属学段', 'danger');
+        return;
+    }
     if (!subject || !content || !answer) {
         setAlert('edit-alert', '科目、题干、答案均不能为空', 'danger');
         return;
@@ -1634,7 +1936,7 @@ async function submitEdit() {
         options: JSON.stringify(options),
         correct_answer: answer,
         explanation,
-        difficulty, points
+        difficulty, points, education_level, category
     });
     if (!ret.success) {
         setAlert('edit-alert', escapeHtml(ret.message), 'danger');
@@ -1647,12 +1949,305 @@ async function submitEdit() {
 }
 
 async function deleteQuestion(qid) {
-    if (!confirm('确定删除该题目？此操作不可撤销！')) return;
+    if (!confirm('确定删除该题目？其组卷和作答关联也会同步删除，此操作不可撤销！')) return;
     const ret = await api('delete_question', { id: qid });
     if (!ret.success) { toast(ret.message, 'error'); return; }
     toast('✅ 已删除');
     await loadManageList(manageState.page);
     await loadStats();
+}
+
+function selectedManageIds() {
+    return [...document.querySelectorAll('#manage-list .manage-check:checked')].map(x => parseInt(x.value, 10)).filter(Boolean);
+}
+function updateManageSelection() {
+    const ids = selectedManageIds();
+    const count = document.getElementById('manage-selected-count');
+    const toolbar = document.getElementById('bulk-toolbar');
+    if (count) count.textContent = `已选 ${ids.length}`;
+    if (toolbar) toolbar.style.display = ids.length ? 'flex' : 'none';
+}
+function toggleManageSelection(checked) {
+    document.querySelectorAll('#manage-list .manage-check').forEach(x => { x.checked = checked; });
+    updateManageSelection();
+}
+async function bulkUpdateSelected() {
+    const ids = selectedManageIds();
+    if (!ids.length) return toast('请先选择题目', 'error');
+    const level = document.getElementById('bulk-level').value;
+    const category = document.getElementById('bulk-category').value;
+    if (!level && !category) return toast('请选择要修改的学段或分类', 'error');
+    if (level) {
+        const r = await api('bulk_move_questions', { ids: JSON.stringify(ids), education_level: level });
+        if (!r.success) return toast(r.message, 'error');
+    }
+    if (category) {
+        const r = await api('bulk_update_question_category', { ids: JSON.stringify(ids), category });
+        if (!r.success) return toast(r.message, 'error');
+    }
+    toast('批量修改成功');
+    await loadManageList(manageState.page);
+}
+async function bulkDeleteSelected() {
+    const ids = selectedManageIds();
+    if (!ids.length) return toast('请先选择题目', 'error');
+    if (!confirm(`确定删除选中的 ${ids.length} 道题目吗？关联组卷和作答记录也会同步删除。`)) return;
+    const r = await api('bulk_delete_questions', { ids: JSON.stringify(ids) });
+    if (!r.success) return toast(r.message, 'error');
+    toast('批量删除成功');
+    await loadManageList(manageState.page);
+    await loadStats();
+}
+
+// ==========================================================
+// ====== 组卷管理（P1-B1：管理员组卷 Tab 的全部 JS） =======
+// ==========================================================
+const PE_TYPE_LABELS = { single:'单选题', multiple:'多选题', multi:'多选题', judge:'判断题', fill:'填空题', multi_fill:'多空填空题', short:'简答题' };
+let paperEditor = {
+    editingId: null,
+    selected: [],          // [{id, points}]
+    poolPage: 1, poolTotal: 0, poolTotalPages: 0,
+    poolCurrentPageIds: [],
+    lastPoolQuery: null
+};
+
+async function loadPaperList() {
+    const tbody = document.getElementById('paper-list-body');
+    tbody.innerHTML = '<tr><td colspan="7"><div class="loading"><div class="spinner"></div><div>加载中...</div></div></td></tr>';
+    const ret = await api('paper_list', {});
+    tbody.innerHTML = '';
+    if (!ret.success) {
+        tbody.innerHTML = `<tr><td colspan="7"><div class="alert alert-danger">${escapeHtml(ret.message)}</div></td></tr>`;
+        return;
+    }
+    const list = ret.data.papers || [];
+    if (list.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无试卷，点击右上角"新建试卷"</td></tr>'; return; }
+    for (const p of list) {
+        const tr = document.createElement('tr');
+        const statusBadge = p.is_published
+            ? '<span class="badge badge-type" style="background:#dcfce7;color:#15803d">已发布</span>'
+            : '<span class="badge badge-type" style="background:#fef3c7;color:#92400e">草稿</span>';
+        tr.innerHTML = `
+            <td>${p.id}</td>
+            <td><b>${escapeHtml(p.name)}</b><div style="color:var(--text-light);font-size:12px;margin-top:4px">${escapeHtml(p.description || '')}</div></td>
+            <td>${p.question_count || 0}</td>
+            <td>${p.duration_minutes} 分钟</td>
+            <td>${statusBadge}</td>
+            <td style="white-space:nowrap;font-size:12px;color:var(--text-light)">创建：${escapeHtml(p.created_at||'')}<br>更新：${escapeHtml(p.updated_at||'')}</td>
+            <td style="white-space:nowrap"></td>`;
+        const op = tr.querySelector('td:last-child');
+        const mk = (txt, cls, fn) => {
+            const b = document.createElement('button');
+            b.className = 'btn btn-sm ' + cls;
+            b.textContent = txt;
+            b.style.marginRight = '6px';
+            b.onclick = fn;
+            op.appendChild(b);
+        };
+        mk('编辑', 'btn-secondary', () => openPaperEditor(p.id));
+        mk('预览', 'btn-secondary', () => { location.href = `exam.html?paper=${p.id}`; });
+        if (!p.is_published) {
+            mk('发布', 'btn-success', async () => {
+                if (!confirm('确认发布此试卷？发布后学生可参与考试。')) return;
+                const r = await api('paper_publish', { paper_id: p.id });
+                if (r.success) { toast('✅ 已发布'); loadPaperList(); } else toast(r.message, 'error');
+            });
+        } else {
+            mk('下架', 'btn-secondary', async () => {
+                if (!confirm('确认下架此试卷？（已有完成记录的试卷不允许下架）')) return;
+                const r = await api('paper_unpublish', { paper_id: p.id });
+                if (r.success) { toast('已下架'); loadPaperList(); } else toast(r.message, 'error');
+            });
+        }
+        mk('删除', 'btn-secondary', async () => {
+            if (!confirm('删除后无法恢复。确认删除此试卷？（有作答记录的试卷不允许删除）')) return;
+            const r = await api('paper_delete', { paper_id: p.id });
+            if (r.success) { toast('已删除'); loadPaperList(); } else toast(r.message, 'error');
+        });
+        tbody.appendChild(tr);
+    }
+}
+
+async function openPaperEditor(paperId) {
+    paperEditor.editingId = paperId || null;
+    paperEditor.selected = [];
+    paperEditor.poolPage = 1;
+    document.getElementById('paper-edit-title').textContent = paperId ? '✏️ 编辑试卷（ID: ' + paperId + '）' : '📝 新建试卷';
+    document.getElementById('pe-name').value = '';
+    document.getElementById('pe-duration').value = 60;
+    document.getElementById('pe-desc').value = '';
+    document.getElementById('paper-filter-kw').value = '';
+    const tSel = document.getElementById('paper-filter-type');
+    if (tSel) tSel.value = '';
+    setAlert('paper-edit-alert', '');
+    renderPaperQuestions();
+    openModal('paper-edit-modal');
+    // 加载已有内容
+    if (paperId) {
+        const r = await api('paper_get', { id: paperId });
+        if (!r.success) { toast(r.message, 'error'); closeModal('paper-edit-modal'); return; }
+        const pa = r.data.paper; const qs = r.data.questions || [];
+        document.getElementById('pe-name').value = pa.name || '';
+        document.getElementById('pe-duration').value = pa.duration_minutes || 60;
+        document.getElementById('pe-desc').value = pa.description || '';
+        paperEditor.selected = qs.map(q => ({ id: +q.id, points: +(q.paper_points ?? q.points ?? 1) }));
+        renderPaperQuestions();
+    }
+    await loadPaperSubjects();
+    await loadQuestionPoolPage(1);
+}
+
+async function loadQuestionPoolPage(page) {
+    paperEditor.poolPage = page || 1;
+    const listEl = document.getElementById('pool-list');
+    listEl.innerHTML = '<div class="loading"><div class="spinner"></div><div>加载中...</div></div>';
+    const sub = document.getElementById('paper-filter-subject')?.value || '';
+    const typ = document.getElementById('paper-filter-type')?.value || '';
+    const kw  = document.getElementById('paper-filter-kw')?.value || '';
+    const lv  = document.getElementById('paper-filter-level')?.value || '';
+    paperEditor.lastPoolQuery = { subject: sub, question_type: typ, keyword: kw, education_level: lv };
+    const ret = await api('list_questions', {
+        page: paperEditor.poolPage, page_size: 15,
+        subject: sub, question_type: typ, keyword: kw, education_level: lv
+    });
+    isLoading = false;  // Reset loading state after API call
+    if (!ret.success) {
+        listEl.innerHTML = `<div class="alert alert-danger" style="margin:12px">${escapeHtml(ret.message)}</div>`;
+        return;
+    }
+    const d = ret.data;
+    paperEditor.poolTotal = +d.total || 0;
+    paperEditor.poolTotalPages = +d.total_pages || 1;
+    paperEditor.poolCurrentPageIds = [];
+    document.getElementById('pool-count').textContent = `共 ${paperEditor.poolTotal} 题`;
+    const qs = d.items || [];
+    listEl.innerHTML = '';
+    if (qs.length === 0) {
+        listEl.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text-light);font-size:13px">该条件下暂无题目</div>`;
+    }
+    for (const q of qs) {
+        paperEditor.poolCurrentPageIds.push(q.id);
+        const typeStr = PE_TYPE_LABELS[q.question_type] || q.question_type;
+        const chosen = paperEditor.selected.some(s => s.id === q.id);
+        const card = document.createElement('div');
+        card.style.cssText = 'padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;cursor:pointer;background:' + (chosen ? 'var(--accent-soft)' : 'var(--card)');
+        card.innerHTML = `
+            <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px">
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                    <span class="badge badge-type">#${q.id}</span>
+                    <span class="badge badge-type" style="background:#eef2ff;color:#3730a3">${escapeHtml(typeStr)}</span>
+                    <span class="badge badge-type">${escapeHtml(q.subject)}</span>
+                    <span style="font-size:12px;color:var(--text-light)">难度 ${q.difficulty||1}</span>
+                </div>
+                <span style="font-size:12px;color:${chosen ? 'var(--primary)':'var(--text-light)'}">${chosen ? '✅ 已加入' : '点击加入 →'}</span>
+            </div>
+            <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(q.content||'')}</div>`;
+        card.onclick = () => {
+            if (paperEditor.selected.some(s => s.id === q.id)) {
+                paperEditor.selected = paperEditor.selected.filter(s => s.id !== q.id);
+            } else {
+                paperEditor.selected.push({ id: q.id, points: +(q.points || 1) });
+            }
+            renderPaperQuestions();
+            loadQuestionPoolPage(paperEditor.poolPage); // 仅重绘当前页选中状态
+        };
+        listEl.appendChild(card);
+    }
+    renderPagination('pool-pagination', { total: paperEditor.poolTotal, page: paperEditor.poolPage, total_pages: paperEditor.poolTotalPages }, (p) => loadQuestionPoolPage(p));
+}
+
+function addCurrentPageToPaper() {
+    const ids = paperEditor.poolCurrentPageIds || [];
+    let added = 0;
+    for (const id of ids) {
+        if (paperEditor.selected.some(s => s.id === id)) continue;
+        paperEditor.selected.push({ id: id, points: 1 });
+        added++;
+    }
+    renderPaperQuestions();
+    loadQuestionPoolPage(paperEditor.poolPage);
+    toast(`本页已加入 ${added} 题（重复题已自动去重）`);
+}
+
+function renderPaperQuestions() {
+    const list = paperEditor.selected;
+    document.getElementById('paper-count').textContent = `共 ${list.length} 题`;
+    const box = document.getElementById('paper-questions');
+    if (list.length === 0) {
+        box.innerHTML = `<div style="color:var(--text-light);font-size:13px;padding:20px;text-align:center">从左侧勾选题目，点击"+ 加入试卷"，或直接点题目卡片。</div>`;
+        return;
+    }
+    box.innerHTML = '';
+    list.forEach((s, i) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;background:var(--card)';
+        row.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                    <b>#${i+1}</b>
+                    <span class="badge badge-type">QID ${s.id}</span>
+                    <span style="display:inline-flex;align-items:center;gap:4px;font-size:12px">
+                        <label>分值：</label>
+                        <input type="number" min="0" step="0.5" value="${s.points}" data-idx="${i}" style="width:72px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)">
+                    </span>
+                </div>
+                <div style="display:flex;gap:4px;flex-wrap:wrap">
+                    <button class="btn btn-sm btn-secondary" data-up="${i}" ${i===0?'disabled':''} title="上移">↑</button>
+                    <button class="btn btn-sm btn-secondary" data-dn="${i}" ${i===list.length-1?'disabled':''} title="下移">↓</button>
+                    <button class="btn btn-sm btn-secondary" data-rm="${i}" title="移除">✕</button>
+                </div>
+            </div>
+            <div class="pq-question-summary" data-qid="${s.id}" style="font-size:12px;color:var(--text-light);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">加载题目信息…</div>`;
+        row.querySelector('input[type=number]').addEventListener('input', (e) => {
+            paperEditor.selected[+e.target.dataset.idx].points = Number(e.target.value) || 0;
+        });
+        row.querySelector('[data-up]')?.addEventListener('click', () => {
+            const i2 = +row.querySelector('[data-up]').dataset.up;
+            if (i2 <= 0) return;
+            const t = paperEditor.selected[i2 - 1]; paperEditor.selected[i2 - 1] = paperEditor.selected[i2]; paperEditor.selected[i2] = t;
+            renderPaperQuestions();
+        });
+        row.querySelector('[data-dn]')?.addEventListener('click', () => {
+            const i2 = +row.querySelector('[data-dn]').dataset.dn;
+            if (i2 >= paperEditor.selected.length - 1) return;
+            const t = paperEditor.selected[i2 + 1]; paperEditor.selected[i2 + 1] = paperEditor.selected[i2]; paperEditor.selected[i2] = t;
+            renderPaperQuestions();
+        });
+        row.querySelector('[data-rm]')?.addEventListener('click', () => {
+            const i2 = +row.querySelector('[data-rm]').dataset.rm;
+            paperEditor.selected.splice(i2, 1); renderPaperQuestions();
+            if (paperEditor.poolCurrentPageIds.includes(s.id)) loadQuestionPoolPage(paperEditor.poolPage);
+        });
+        box.appendChild(row);
+        // 异步加载题目的简略信息（题干预览）
+        (async () => {
+            const r = await api('get_question', { id: s.id });
+            const node = row.querySelector(`.pq-question-summary[data-qid="${s.id}"]`);
+            if (!node || !r.success) { if (node) node.textContent = ''; return; }
+            const q = r.data.question;
+            const ty = PE_TYPE_LABELS[q.question_type] || q.question_type;
+            node.innerHTML = `<b style="color:var(--text)">${escapeHtml(q.subject)} · ${escapeHtml(ty)}</b>：${escapeHtml(q.content||'')}`;
+        })();
+    });
+}
+
+async function submitPaperSave() {
+    const name = document.getElementById('pe-name').value.trim();
+    const desc = document.getElementById('pe-desc').value;
+    const dur = +document.getElementById('pe-duration').value;
+    if (!name) { setAlert('paper-edit-alert', '请填写试卷名称', 'danger'); return; }
+    if (!(dur >= 1)) { setAlert('paper-edit-alert', '考试时长必须大于0分钟', 'danger'); return; }
+    if (paperEditor.selected.length === 0) { setAlert('paper-edit-alert', '请至少选择一道题目', 'danger'); return; }
+    const question_ids = paperEditor.selected.map(s => ({ id: s.id, points: s.points }));
+    const ret = await api('paper_save', {
+        paper_id: paperEditor.editingId || 0,
+        name, description: desc, duration_minutes: dur,
+        question_ids
+    });
+    if (!ret.success) { setAlert('paper-edit-alert', ret.message, 'danger'); return; }
+    setAlert('paper-edit-alert', '✅ 保存成功，试卷ID：' + ret.data.paper_id, 'success');
+    toast('✅ 试卷已保存');
+    setTimeout(() => { closeModal('paper-edit-modal'); loadPaperList(); }, 600);
 }
 
 // ===================== 工具 =====================
@@ -1677,6 +2272,24 @@ document.addEventListener('keydown', e => {
 });
 
 // ===================== 启动 =====================
+(function initTheme(){
+    const saved = localStorage.getItem('theme');
+    if (saved) document.documentElement.setAttribute('data-theme', saved);
+    const tb = document.getElementById('themeBtn');
+    if (tb) {
+        tb.onclick = function () {
+            const cur = document.documentElement.getAttribute('data-theme');
+            const next = cur === 'dark' ? '' : 'dark';
+            if (next) document.documentElement.setAttribute('data-theme', next);
+            else document.documentElement.removeAttribute('data-theme');
+            localStorage.setItem('theme', next || '');
+        };
+    }
+    // 暗色模式下修正 json-editor 背景
+    const style = document.createElement('style');
+    style.textContent = `html[data-theme="dark"] .json-editor { background:#0f172a; color:#e5e7eb; }`;
+    document.head.appendChild(style);
+})();
 resetAddForm();
 bootstrap();
 </script>

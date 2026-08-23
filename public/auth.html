@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="">
+    <title>登录 / 注册 · 学补在线刷题平台</title>
+    <link rel="stylesheet" href="assets/app.css">
+    <style>
+        html, body { height: 100%; }
+        body {
+            display: flex; flex-direction: column; min-height: 100vh;
+            background:
+                radial-gradient(1200px 600px at 10% -10%, rgba(63,118,255,0.12), transparent 60%),
+                radial-gradient(900px 500px at 110% 10%, rgba(16,185,129,0.10), transparent 60%),
+                var(--bg);
+        }
+        .topbar {
+            position: sticky; top: 0; z-index: 50;
+            background: rgba(255,255,255,0.85);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border);
+        }
+        [data-theme="dark"] .topbar { background: rgba(20,22,28,0.75); }
+        .topbar-inner {
+            max-width: 1200px; margin: 0 auto;
+            padding: 12px 20px; display: flex; align-items: center;
+            justify-content: space-between; gap: 12px;
+        }
+        .brand { font-size: var(--fs-title-2); font-weight: 600; display: flex; gap: 8px; align-items: center; color: var(--text); text-decoration: none; }
+        .brand:hover { color: var(--accent); }
+        .main-wrap {
+            flex: 1; width: 100%;
+            max-width: 1200px; margin: 0 auto;
+            padding: 40px 20px 60px;
+            display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 30px;
+            align-items: start;
+        }
+        .brand-tip {
+            background: linear-gradient(135deg, var(--accent-soft), rgba(16,185,129,0.12));
+            border: 1px solid transparent;
+            border-radius: var(--radius-card);
+            padding: 28px;
+            position: sticky; top: 90px;
+        }
+        .brand-tip h2 {
+            font-size: 22px; font-weight: 700; margin: 0 0 8px;
+            color: var(--text);
+        }
+        .brand-tip .subtitle {
+            font-size: 14px; color: var(--text-mute); margin-bottom: 22px; line-height: 1.6;
+        }
+        .feature-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 22px;
+        }
+        .feature-grid div {
+            padding: 10px 12px; border-radius: var(--radius);
+            background: rgba(255,255,255,0.55);
+            border: 1px solid rgba(0,0,0,0.04);
+            font-size: 13px; color: var(--text);
+        }
+        [data-theme="dark"] .feature-grid div { background: rgba(30,32,40,0.55); border-color: rgba(255,255,255,0.06); }
+        .notice {
+            background: var(--accent-soft); border-radius: var(--radius); padding: 16px 18px;
+            border: 1px solid rgba(63,118,255,0.18);
+        }
+        .notice h3 { font-size: 15px; font-weight: 600; margin: 0 0 10px; color: var(--accent); }
+        .notice ul { list-style: none; padding: 0; margin: 0; }
+        .notice li { padding: 5px 0; font-size: 13px; color: var(--text); line-height: 1.6; }
+        .notice li::before { content: "✓ "; color: var(--accent); font-weight: 700; margin-right: 4px; }
+        .back-link {
+            display: inline-flex; align-items: center; gap: 6px;
+            color: var(--text-mute); text-decoration: none; font-size: 13px;
+            padding: 5px 10px; border-radius: var(--radius);
+        }
+        .back-link:hover { background: var(--bg-soft); color: var(--accent); }
+
+        .auth-side { width: 100%; max-width: 480px; margin: 0 auto; }
+        .tabs-row {
+            display: inline-flex; padding: 4px; gap: 4px;
+            background: var(--bg-soft); border-radius: 999px; margin-bottom: 20px;
+            border: 1px solid var(--border);
+        }
+        .tabs-row .tab {
+            padding: 7px 18px; font-size: 14px;
+            color: var(--text-mute); cursor: pointer;
+            border-radius: 999px;
+            transition: all .2s ease;
+        }
+        .tabs-row .tab.active {
+            background: var(--accent); color: #fff; font-weight: 600;
+            box-shadow: 0 4px 10px rgba(63,118,255,0.25);
+        }
+        .form-group { margin-bottom: 16px; }
+        .form-group label {
+            display: block; margin-bottom: 6px; font-size: 13px; color: var(--text);
+            font-weight: 500;
+        }
+        .form-control {
+            width: 100%; padding: 10px 14px; font-size: 14px;
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--radius); color: var(--text);
+            transition: border-color .15s ease, box-shadow .15s ease;
+            box-sizing: border-box;
+        }
+        .form-control:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(63,118,255,0.15);
+        }
+        .captcha-row { display: flex; gap: 10px; align-items: stretch; }
+        .captcha-row input { flex: 1; }
+        #captcha-img {
+            cursor: pointer; border: 1px solid var(--border);
+            border-radius: var(--radius); height: 40px; background: var(--bg-soft);
+        }
+        .btn-block { width: 100%; padding: 11px 16px; font-size: 15px; font-weight: 600; }
+        .switch-tip {
+            text-align: center; margin-top: 14px;
+            font-size: 13px; color: var(--text-mute);
+        }
+        .switch-tip a { color: var(--accent); text-decoration: none; font-weight: 500; }
+        .switch-tip a:hover { text-decoration: underline; }
+        .msg-box { min-height: 26px; margin-bottom: 10px; }
+        .alert {
+            padding: 10px 14px; border-radius: var(--radius); font-size: 13px;
+            border: 1px solid transparent;
+        }
+        .alert-success { background: var(--success-bg); color: var(--success); }
+        .alert-danger  { background: var(--danger-bg); color: var(--danger); }
+
+        @media (max-width: 960px) {
+            .main-wrap { grid-template-columns: 1fr; padding: 24px 16px 40px; }
+            .brand-tip { position: static; order: 2; }
+            .auth-side { order: 1; max-width: 100%; }
+            .feature-grid { grid-template-columns: 1fr 1fr; }
+        }
+        @media (max-width: 520px) {
+            .feature-grid { grid-template-columns: 1fr; }
+            .tabs-row { width: 100%; display: flex; }
+            .tabs-row .tab { flex: 1; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="topbar">
+    <div class="topbar-inner">
+        <a href="index.html" class="brand">📚 学补 · 在线刷题</a>
+        <div>
+            <button class="btn btn-ghost btn-sm" id="themeBtn" title="切换主题">🌓</button>
+            <a href="index.html" class="back-link">← 返回首页</a>
+        </div>
+    </div>
+</div>
+
+<div class="main-wrap">
+    <!-- 左侧：品牌介绍 + 首装提示 -->
+    <aside class="brand-tip">
+        <h2>欢迎来到学补在线刷题平台</h2>
+        <div class="subtitle">组卷考试 · 自由刷题 · 学习资料一站式服务，为学习者提供完整的在线练习与评估体验。</div>
+        <div class="feature-grid">
+            <div>✍️ 单选 / 多选 / 填空 / 简答</div>
+            <div>⏱️ 考试限时与计时</div>
+            <div>📝 答案自评</div>
+            <div>📁 资料分类下载</div>
+            <div>🌙 暗色模式</div>
+            <div>🔐 审计日志</div>
+        </div>
+        <div class="notice">
+            <h3>💡 注册提示：账号注册后即可登录</h3>
+            <ul>
+                <li>系统检测到无管理员时，第一个注册的账号将自动成为首位管理员</li>
+                <li>后续注册的账号创建成功后即可直接登录使用</li>
+                <li>管理员可在 <b>管理后台</b> 启用或禁用账号</li>
+                <li>所有操作均有审计日志，确保安全可追溯</li>
+            </ul>
+        </div>
+    </aside>
+
+    <!-- 右侧：登录/注册面板 -->
+    <section class="auth-side">
+        <div class="tabs-row">
+            <div class="tab" id="tab-login" onclick="setMode('login')">登录</div>
+            <div class="tab" id="tab-register" onclick="setMode('register')">注册</div>
+        </div>
+
+        <!-- 登录 -->
+        <div class="card" id="panel-login">
+            <div class="form-group">
+                <label>用户名</label>
+                <input class="form-control" id="login-user" placeholder="请输入用户名" autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <input type="password" class="form-control" id="login-pwd" placeholder="请输入密码" autocomplete="current-password">
+            </div>
+            <div class="msg-box" id="login-msg"></div>
+            <button class="btn btn-primary btn-block" onclick="doLogin()">登录</button>
+            <div class="switch-tip">
+                还没有账号？<a href="#" onclick="setMode('register');return false;">立即注册</a>
+            </div>
+        </div>
+
+        <!-- 注册 -->
+        <div class="card hide" id="panel-register">
+            <div class="form-group">
+                <label>用户名</label>
+                <input class="form-control" id="reg-user" placeholder="请输入用户名" autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label>邮箱</label>
+                <input class="form-control" id="reg-email" placeholder="请输入邮箱地址" autocomplete="email">
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <input type="password" class="form-control" id="reg-pwd" placeholder="请设置密码（≥6位，建议包含大小写字母与数字）" autocomplete="new-password">
+            </div>
+            <div class="form-group">
+                <label>验证码</label>
+                <div class="captcha-row">
+                    <input class="form-control" id="reg-captcha" placeholder="输入4位验证码" maxlength="4">
+                    <img id="captcha-img" src="api.php?action=captcha" title="点击刷新验证码">
+                </div>
+                <small style="color:var(--text-mute);font-size:12px;">点击图片刷新验证码</small>
+            </div>
+            <div class="msg-box" id="reg-msg"></div>
+            <button class="btn btn-primary btn-block" onclick="doRegister()">注册</button>
+            <div class="switch-tip">
+                已有账号？<a href="#" onclick="setMode('login');return false;">去登录</a>
+            </div>
+        </div>
+    </section>
+</div>
+
+<script>
+const API_URL = 'api.php';
+let csrf = "";
+
+// ===== 工具 =====
+function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ===== 主题切换 =====
+(function () {
+    const saved = localStorage.getItem('theme');
+    if (saved) document.documentElement.setAttribute('data-theme', saved);
+    const btn = document.getElementById('themeBtn');
+    if (btn) {
+        btn.onclick = function () {
+            const cur = document.documentElement.getAttribute('data-theme');
+            const next = cur === 'dark' ? '' : 'dark';
+            if (next) document.documentElement.setAttribute('data-theme', next);
+            else document.documentElement.removeAttribute('data-theme');
+            localStorage.setItem('theme', next || '');
+        };
+    }
+})();
+
+// ===== API =====
+async function api(action, postData = {}) {
+    const fd = new FormData();
+    fd.set("action", action);
+    if (csrf) fd.set("csrf_token", csrf);
+    for (let k in postData) fd.set(k, postData[k]);
+    try {
+        const res = await fetch(API_URL, { method: "POST", body: fd });
+        const json = await res.json();
+        if (json.csrf_token) {
+            csrf = json.csrf_token;
+            const meta = document.querySelector('meta[name="csrf-token"]');
+            if (meta) meta.content = csrf;
+        }
+        return json;
+    } catch (e) {
+        console.error("API调用失败:", e);
+        return { success: false, message: "网络请求失败，请检查服务器" };
+    }
+}
+
+// ===== 模式切换 =====
+function setMode(which) {
+    const tabL = document.getElementById('tab-login');
+    const tabR = document.getElementById('tab-register');
+    const pL = document.getElementById('panel-login');
+    const pR = document.getElementById('panel-register');
+    if (which === 'register') {
+        tabL.classList.remove('active'); tabR.classList.add('active');
+        pL.classList.add('hide'); pL.style.display = 'none';
+        pR.classList.remove('hide'); pR.style.display = '';
+        const img = document.getElementById('captcha-img');
+        if (img) img.src = API_URL + "?action=captcha&t=" + Date.now();
+        setTimeout(() => document.getElementById('reg-user')?.focus(), 120);
+    } else {
+        tabR.classList.remove('active'); tabL.classList.add('active');
+        pR.classList.add('hide'); pR.style.display = 'none';
+        pL.classList.remove('hide'); pL.style.display = '';
+        setTimeout(() => document.getElementById('login-user')?.focus(), 120);
+    }
+    history.replaceState(null, '', location.pathname + '?mode=' + which);
+}
+
+// 初始化：从 ?mode=register 切换
+document.addEventListener('DOMContentLoaded', function () {
+    const params = new URLSearchParams(location.search);
+    const mode = params.get('mode');
+    setMode(mode === 'register' ? 'register' : 'login');
+
+    const captchaImg = document.querySelector("#captcha-img");
+    if (captchaImg) captchaImg.addEventListener('click', function() {
+        this.src = API_URL + "?action=captcha&t=" + Date.now();
+    });
+
+    // 回车提交
+    document.getElementById('login-pwd')?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+    document.getElementById('reg-captcha')?.addEventListener('keydown', e => { if (e.key === 'Enter') doRegister(); });
+});
+
+// ===== 登录 =====
+async function doLogin() {
+    const user = document.getElementById("login-user").value.trim();
+    const pwd = document.getElementById("login-pwd").value;
+    const box = document.getElementById("login-msg");
+
+    if (!user || !pwd) {
+        box.innerHTML = `<div class="alert alert-danger">请输入用户名和密码</div>`;
+        return;
+    }
+
+    const ret = await api("login", { username: user, password: pwd });
+    if (!ret.success) {
+        box.innerHTML = `<div class="alert alert-danger">${escapeHtml(ret.message)}</div>`;
+        return;
+    }
+    box.innerHTML = `<div class="alert alert-success">${escapeHtml(ret.message)}，正在跳转…</div>`;
+    localStorage.setItem('xb_session', '1');
+    localStorage.setItem('xb_user', JSON.stringify(ret.data.user));
+    // 管理员进入唯一管理后台，普通用户进入首页
+    setTimeout(() => {
+        location.href = ret.data && ret.data.user && ret.data.user.is_admin ? 'admin.html' : 'index.html';
+    }, 500);
+}
+
+// ===== 注册 =====
+async function doRegister() {
+    const username = document.getElementById("reg-user").value.trim();
+    const email = document.getElementById("reg-email").value.trim();
+    const password = document.getElementById("reg-pwd").value;
+    const captcha = document.getElementById("reg-captcha").value.trim();
+    const box = document.getElementById("reg-msg");
+
+    if (!username || !email || !password || !captcha) {
+        box.innerHTML = `<div class="alert alert-danger">请完整填写所有信息</div>`;
+        return;
+    }
+    if (password.length < 6) {
+        box.innerHTML = `<div class="alert alert-danger">密码至少 6 位</div>`;
+        return;
+    }
+
+    const ret = await api("register", { username, email, password, captcha });
+    if (!ret.success) {
+        box.innerHTML = `<div class="alert alert-danger">${escapeHtml(ret.message)}</div>`;
+        const img = document.getElementById('captcha-img');
+        if (img) img.src = API_URL + "?action=captcha&t=" + Date.now();
+        document.getElementById('reg-captcha').value = '';
+        return;
+    }
+    box.innerHTML = `<div class="alert alert-success">${escapeHtml(ret.message)}，正在切到登录页…</div>`;
+    setTimeout(() => {
+        setMode('login');
+        document.getElementById("login-user").value = username;
+        document.getElementById("login-pwd").value = '';
+        document.getElementById("reg-msg").innerHTML = '';
+        document.getElementById("login-pwd").focus();
+    }, 1200);
+}
+</script>
+
+</body>
+</html>

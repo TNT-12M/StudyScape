@@ -7,23 +7,25 @@
  */
 
 // ==================== 邮件API配置 ====================
+// 注意：本模块为遗留代码，使用 MySQL+Bcrypt，与主项目（SQLite+明文密码）不兼容。
+// 已移动到 legacy/ 目录，实际未启用。部署前请填充以下环境变量，不要在代码中硬编码密钥。
 if (!defined('MAIL_API_URL')) {
-    define('MAIL_API_URL', 'https://luckycola.com.cn/tools/customMail');
+    define('MAIL_API_URL', getenv('MAIL_API_URL') ?: 'https://luckycola.com.cn/tools/customMail');
 }
 if (!defined('COLA_KEY')) {
-    define('COLA_KEY', 'Y0AZMPJuwbbqQc1786950761792HgRlFwHrdu');
+    define('COLA_KEY', getenv('MAIL_COLA_KEY') ?: 'PLACEHOLDER_SET_ENV_MAIL_COLA_KEY');
 }
 if (!defined('SMTP_EMAIL')) {
-    define('SMTP_EMAIL', '3905262296@qq.com');
+    define('SMTP_EMAIL', getenv('MAIL_SMTP_EMAIL') ?: 'PLACEHOLDER_SET_ENV_MAIL_SMTP_EMAIL');
 }
 if (!defined('SMTP_CODE')) {
-    define('SMTP_CODE', 'tmlxmuukqdoxccaj');
+    define('SMTP_CODE', getenv('MAIL_SMTP_CODE')  ?: 'PLACEHOLDER_SET_ENV_MAIL_SMTP_CODE');
 }
 if (!defined('SMTP_TYPE')) {
-    define('SMTP_TYPE', 'qq');
+    define('SMTP_TYPE', getenv('MAIL_SMTP_TYPE')  ?: 'qq');
 }
 if (!defined('MAIL_FROM_TITLE')) {
-    define('MAIL_FROM_TITLE', '在线考试系统');
+    define('MAIL_FROM_TITLE', getenv('MAIL_FROM_TITLE') ?: '在线考试系统');
 }
 
 /**

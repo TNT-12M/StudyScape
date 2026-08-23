@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>资料中心 - 学补刷题平台</title>
+    <link rel="stylesheet" href="assets/app.css">
+    <style>
+        .topbar {
+            position: sticky; top: 0; z-index: 50;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+        }
+        .topbar-inner {
+            max-width: 1200px; margin: 0 auto;
+            padding: 12px 20px; display: flex; align-items: center;
+            justify-content: space-between; gap: 12px;
+        }
+        .brand { font-size: var(--fs-title-2); font-weight: 600; display: flex; gap: 8px; align-items: center; color: var(--text); }
+        .nav { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .nav a {
+            padding: 6px 14px; border-radius: var(--radius); font-size: var(--fs-body);
+            color: var(--text-mute); text-decoration: none;
+        }
+        .nav a.active, .nav a:hover { background: var(--bg-soft); color: var(--text); }
+        .file-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px;
+        }
+        .file-card {
+            background: var(--bg); border: 1px solid var(--border);
+            border-radius: var(--radius-card); padding: 16px;
+            display: flex; flex-direction: column; gap: 10px;
+            transition: border-color 0.15s;
+        }
+        .file-card:hover { border-color: var(--accent); }
+        .file-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+        .file-icon {
+            width: 48px; height: 48px; border-radius: var(--radius);
+            background: var(--accent-soft); color: var(--accent);
+            display: inline-flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 14px; flex-shrink: 0;
+            letter-spacing: -0.5px;
+        }
+        .file-title {
+            font-weight: 600; font-size: 15px; color: var(--text);
+            word-break: break-word; line-height: 1.4;
+        }
+        .file-meta {
+            display: flex; gap: 10px; flex-wrap: wrap;
+            color: var(--text-mute); font-size: 12px;
+        }
+        .file-desc {
+            font-size: 13px; color: var(--text-mute); line-height: 1.5;
+            min-height: 38px;
+        }
+        .file-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; flex-wrap: wrap; }
+        .upload-card {
+            border: 2px dashed var(--border);
+            background: var(--bg-soft);
+        }
+        .upload-card.drop { border-color: var(--accent); background: var(--accent-soft); }
+    </style>
+</head>
+<body>
+<div class="topbar">
+    <div class="topbar-inner">
+        <div class="brand">📁 资料中心</div>
+        <div class="nav">
+            <a href="index.html">首页</a>
+            <a href="exam.html">组卷考试</a>
+            <a href="practice.html">自由刷题</a>
+            <a href="questions.html">题库</a>
+            <a href="#" id="goAdmin" style="display:none">管理员</a>
+            <button class="btn btn-ghost" id="themeBtn" title="切换主题">🌓</button>
+            <span id="whoAmI" style="font-size:12px;color:var(--text-mute)"></span>
+            <a id="logoutBtn" class="btn btn-danger btn-sm">退出</a>
+        </div>
+    </div>
+</div>
+
+<div class="container" style="margin-top:20px">
+
+    <!-- ========= 过滤 + 管理员上传入口 ========= -->
+    <div class="card">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+            <span class="badge badge-info" id="stage-tab-all" onclick="setStage('')" style="cursor:pointer;padding:6px 14px;font-size:13px">全部学段</span>
+            <span class="badge badge-info" id="stage-tab-junior" onclick="setStage('junior')" style="cursor:pointer;padding:6px 14px;font-size:13px">初中资料</span>
+            <span class="badge badge-info" id="stage-tab-senior" onclick="setStage('senior')" style="cursor:pointer;padding:6px 14px;font-size:13px">高中资料</span>
+        </div>
+        <div class="filters">
+            <div class="form-group">
+                <label>学段</label>
+                <select class="form-control" id="f-level" onchange="loadList()">
+                    <option value="">全部学段</option>
+                    <option value="junior">初中</option>
+                    <option value="senior">高中</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>科目分类</label>
+                <select class="form-control" id="f-subject" onchange="loadList()"></select>
+            </div>
+            <div class="form-group">
+                <label>关键词</label>
+                <input type="text" class="form-control" id="f-kw" placeholder="文件名 / 介绍搜索" onkeydown="if(event.key==='Enter')loadList()">
+            </div>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="loadList()">🔎 搜索</button>
+                <button class="btn btn-ghost" id="btnShowUpload" style="display:none" onclick="toggleUpload()">⬆️ 上传资料</button>
+            </div>
+        </div>
+
+        <!-- 管理员上传面板（默认收起） -->
+        <div id="uploadPanel" class="card upload-card" style="display:none;margin-top:16px;margin-bottom:0">
+            <div class="card-title"><div>⬆️ 上传资料</div><div style="font-size:12px;color:var(--text-mute)">单文件最大 50MB；仅允许：PDF / DOC / DOCX / TXT / MD / XLS / XLSX / PPT / PPTX</div></div>
+            <div id="dropZone" style="padding:22px;border:2px dashed var(--border);border-radius:var(--radius-card);text-align:center;color:var(--text-mute);cursor:pointer;background:var(--bg)">
+                <div style="font-size:28px;margin-bottom:6px">📥</div>
+                <div style="font-weight:600;color:var(--text);margin-bottom:4px">点击选择文件 或 把文件拖到此处</div>
+                <div style="font-size:12px">支持批量选择；按上面的扩展名白名单</div>
+                <input type="file" id="fileInput" multiple style="display:none">
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-top:14px">
+                <div class="form-group" style="margin:0">
+                    <label>所属学段 *</label>
+                    <select class="form-control" id="u-level">
+                        <option value="">请选择学段</option>
+                        <option value="junior">初中</option>
+                        <option value="senior">高中</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin:0">
+                    <label>分类（科目/资料组）</label>
+                    <input type="text" class="form-control" id="u-subject" placeholder="如：数学 / 期中试卷">
+                </div>
+                <div class="form-group" style="margin:0;grid-column:1/-1">
+                    <label>资料说明（同一批次文件共享此描述；留空则使用文件名）</label>
+                    <input type="text" class="form-control" id="u-desc" placeholder="简介/用途/章节">
+                </div>
+            </div>
+            <div id="uploadQueue" style="margin-top:12px"></div>
+            <div class="actions" style="justify-content:flex-end;margin-top:14px">
+                <button class="btn btn-ghost" onclick="toggleUpload()">取消</button>
+                <button class="btn btn-primary" id="btnDoUpload" onclick="doUpload()">💾 开始上传</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========= 资料列表 ========= -->
+    <div class="card">
+        <div class="card-title">
+            <div>📚 资料列表</div>
+            <div id="listSummary" style="font-size:12px;color:var(--text-mute)"></div>
+        </div>
+        <div id="matGrid" class="file-grid"></div>
+    </div>
+</div>
+
+<div id="material-edit-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.45);align-items:center;justify-content:center;padding:20px">
+    <div class="card" style="width:min(520px,100%);max-height:90vh;overflow:auto">
+        <div class="card-title"><span>✏️ 编辑资料信息</span><button class="btn btn-ghost btn-sm" onclick="closeMaterialEdit()">关闭</button></div>
+        <div class="form-group"><label>文件名 *</label><input class="form-control" id="edit-m-filename"></div>
+        <div class="form-group"><label>所属学段 *</label><select class="form-control" id="edit-m-level"><option value="">请选择学段</option><option value="junior">初中</option><option value="senior">高中</option></select></div>
+        <div class="form-group"><label>科目/分类</label><input class="form-control" id="edit-m-subject"></div>
+        <div class="form-group"><label>资料说明</label><input class="form-control" id="edit-m-desc"></div>
+        <div class="actions" style="justify-content:flex-end"><button class="btn btn-primary" onclick="saveMaterialEdit()">保存修改</button></div>
+    </div>
+</div>
+
+<script>
+const API = 'api.php';
+const escapeHtml = (s) => {
+    if (s === null || s === undefined) return '';
+    if (typeof s !== 'string') s = String(s);
+    const t = document.createElement('textarea'); t.textContent = s; return t.innerHTML;
+};
+const LS = {
+    get k() { return localStorage.getItem('ss_theme') || 'light'; },
+    set k(v) { localStorage.setItem('ss_theme', v); applyTheme(); }
+};
+function applyTheme() { document.documentElement.setAttribute('data-theme', LS.k); }
+applyTheme();
+document.getElementById('themeBtn').onclick = () => { LS.k = LS.k === 'light' ? 'dark' : 'light'; };
+
+let STATE = { csrf: '', user: null, isAdmin: false };
+let uploadQueue = []; // [{file, status}]
+
+async function req(action, params = {}) {
+    const fd = new FormData();
+    fd.append('action', action);
+    if (STATE.csrf) fd.append('csrf_token', STATE.csrf);
+    for (const k in params) {
+        if (params[k] === undefined || params[k] === null) continue;
+        if (params[k] instanceof File) fd.append(k, params[k]);
+        else if (typeof params[k] === 'object') fd.append(k, JSON.stringify(params[k]));
+        else fd.append(k, params[k]);
+    }
+    const res = await fetch(API, { method: 'POST', body: fd });
+    const j = await res.json();
+    if (j.message && !j.success) alert(j.message);
+    return j;
+}
+
+/* ============ 启动 ============ */
+async function bootstrap() {
+    const j = await req('check_session');
+    if (!j.success || !j.data || !j.data.user) {
+        localStorage.removeItem('xb_session');
+        localStorage.removeItem('xb_user');
+        location.href = 'index.html';
+        return;
+    }
+    STATE.user = j.data.user;
+    STATE.isAdmin = !!STATE.user.is_admin;
+    STATE.csrf = j.csrf_token || '';
+    document.getElementById('whoAmI').textContent = `${STATE.user.username}（${STATE.isAdmin ? '管理员' : '学生'}）`;
+    document.getElementById('goAdmin').style.display = STATE.isAdmin ? '' : 'none';
+    document.getElementById('goAdmin').href = 'admin.html';
+    document.getElementById('logoutBtn').onclick = async () => {
+        await req('logout');
+        localStorage.removeItem('xb_session');
+        localStorage.removeItem('xb_user');
+        location.href = 'index.html';
+    };
+    document.getElementById('btnShowUpload').style.display = STATE.isAdmin ? '' : 'none';
+    bindDropZone();
+    // 管理员进入后仅做 UI 初始化，不加载列表；选择学段后再触发加载
+    // 普通用户默认为“全部学段”并立即加载
+    if (STATE.isAdmin) {
+        setStage('');
+        document.getElementById('listSummary').textContent = '请选择学段后查看资料';
+        document.getElementById('matGrid').innerHTML = '<div class="empty" style="grid-column:1/-1">管理员请先选择初中或高中</div>';
+    } else {
+        setStage('');
+    }
+}
+
+/* ============ 列表渲染 ============ */
+function setStage(level) {
+    const sel = document.getElementById('f-level');
+    if (sel) sel.value = level || '';
+    ['stage-tab-all','stage-tab-junior','stage-tab-senior'].forEach(id => {
+        const el = document.getElementById(id); if (!el) return;
+        const match = (id === 'stage-tab-all' && !level) ||
+                      (id === 'stage-tab-junior' && level === 'junior') ||
+                      (id === 'stage-tab-senior' && level === 'senior');
+        el.style.background = match ? '#2563eb' : '#ffffff';
+        el.style.color = match ? '#fff' : '#1f2937';
+        el.style.border = match ? '1px solid #2563eb' : '1px solid #e5e7eb';
+    });
+    loadList();
+}
+async function loadList() {
+    const sub = document.getElementById('f-subject')?.value || '';
+    const level = document.getElementById('f-level')?.value || '';
+    const kw = document.getElementById('f-kw').value || '';
+    const ret = await req('material_list', { education_level: level, subject: sub, keyword: kw });
+    if (!ret.success) return;
+    const data = ret.data || {};
+    const subs = data.subjects || [];
+    const old = document.getElementById('f-subject').value;
+    document.getElementById('f-subject').innerHTML =
+        '<option value="">全部分类</option>' +
+        subs.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+    if (old) document.getElementById('f-subject').value = old;
+    else document.getElementById('f-subject').value = sub || '';
+
+    const list = data.materials || [];
+    document.getElementById('listSummary').textContent = `共 ${list.length} 份资料`;
+
+    const grid = document.getElementById('matGrid');
+    grid.innerHTML = '';
+    if (list.length === 0) {
+        grid.innerHTML = `<div class="empty" style="grid-column:1/-1">暂无资料${STATE.isAdmin ? '，点击右上角"上传资料"添加' : ''}</div>`;
+        return;
+    }
+    for (const m of list) {
+        const card = document.createElement('div'); card.className = 'file-card';
+        const ext = (m.filename.split('.').pop() || '').toUpperCase().slice(0, 6);
+        const sizeStr = formatSize(m.file_size);
+        const subjectChip = m.subject ? `<span class="badge badge-success">${escapeHtml(m.subject)}</span>` : '';
+        const levelLabel = m.education_level === 'senior' ? '高中' : '初中';
+        const levelChip = `<span class="badge badge-info">${levelLabel}</span>`;
+        card.innerHTML = `
+            <div class="file-head">
+                <div style="display:flex;gap:12px;min-width:0">
+                    <div class="file-icon">${escapeHtml(ext || '📄')}</div>
+                    <div style="min-width:0">
+                        <div class="file-title">${escapeHtml(m.filename)}</div>
+                        <div class="file-meta">${levelChip} ${subjectChip} <span>ID ${m.id}</span></div>
+                    </div>
+                </div>
+            </div>
+            <div class="file-desc">${escapeHtml(m.description || '（暂无描述）')}</div>
+            <div class="file-meta" style="justify-content:space-between;gap:10px;flex-wrap:wrap">
+                <div>📦 ${sizeStr}</div>
+                <div>⬇️ ${m.downloads || 0} 次</div>
+                <div>📅 上传 ${escapeHtml((m.uploaded_at || '').slice(0,16).replace('T',' '))}</div>
+                <div>🔄 更新 ${escapeHtml((m.updated_at || m.uploaded_at || '').slice(0,16).replace('T',' '))}</div>
+            </div>
+            <div class="file-actions"></div>`;
+        const acts = card.querySelector('.file-actions');
+        const dl = document.createElement('button');
+        dl.className = 'btn btn-primary btn-sm'; dl.textContent = '⬇️ 下载';
+        dl.onclick = () => downloadMat(m.id, m.filename);
+        acts.appendChild(dl);
+        if (STATE.isAdmin) {
+            const edit = document.createElement('button');
+            edit.className = 'btn btn-ghost btn-sm'; edit.textContent = '✏️ 编辑';
+            edit.onclick = () => openMaterialEdit(m);
+            acts.appendChild(edit);
+            const del = document.createElement('button');
+            del.className = 'btn btn-ghost btn-sm'; del.textContent = '✕ 删除';
+            del.onclick = async () => {
+                if (!confirm(`确认删除资料「${m.filename}」？`)) return;
+                const r = await req('material_delete', { id: m.id });
+                if (r.success) { toast('已删除'); loadList(); }
+            };
+            acts.appendChild(del);
+        }
+        grid.appendChild(card);
+    }
+}
+let editingMaterialId = null;
+function openMaterialEdit(m) {
+    editingMaterialId = m.id;
+    document.getElementById('edit-m-filename').value = m.filename || '';
+    document.getElementById('edit-m-level').value = m.education_level || 'junior';
+    document.getElementById('edit-m-subject').value = m.subject || '';
+    document.getElementById('edit-m-desc').value = m.description || '';
+    document.getElementById('material-edit-modal').style.display = 'flex';
+}
+function closeMaterialEdit() {
+    editingMaterialId = null;
+    document.getElementById('material-edit-modal').style.display = 'none';
+}
+async function saveMaterialEdit() {
+    if (!editingMaterialId) return;
+    const filename = document.getElementById('edit-m-filename').value.trim();
+    const education_level = document.getElementById('edit-m-level').value;
+    if (!filename || !education_level) return toast('文件名和学段不能为空', 'error');
+    const ret = await req('material_update', {
+        id: editingMaterialId,
+        filename,
+        education_level,
+        subject: document.getElementById('edit-m-subject').value.trim(),
+        description: document.getElementById('edit-m-desc').value.trim()
+    });
+    if (!ret.success) return;
+    closeMaterialEdit();
+    toast('资料信息已更新');
+    await loadList();
+}
+
+function formatSize(b) {
+    b = +b || 0;
+    const u = ['B','KB','MB','GB']; let i = 0;
+    while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+    return b.toFixed(i === 0 ? 0 : 1) + ' ' + u[i];
+}
+
+/* ============ 下载流程：先申请 token → 再 GET 直链 ============ */
+async function downloadMat(id, name) {
+    const j = await req('material_get_token', { id });
+    if (!j.success) return;
+    const token = j.data.download_token;
+    // 为了让浏览器正确弹窗另存为，用 <a download> 触发
+    const url = `api.php?action=material_download&token=${encodeURIComponent(token)}`;
+    const a = document.createElement('a');
+    a.href = url; a.rel = 'noopener'; a.target = '_blank';
+    // 尝试触发点击，失败则 window.open
+    try { document.body.appendChild(a); a.click(); setTimeout(() => a.remove(), 0); }
+    catch (_) { window.open(url, '_blank'); }
+}
+
+/* ============ 上传 ============ */
+function toggleUpload() {
+    const el = document.getElementById('uploadPanel');
+    el.style.display = (el.style.display === 'none') ? '' : 'none';
+    uploadQueue = [];
+    renderQueue();
+}
+function bindDropZone() {
+    const dz = document.getElementById('dropZone');
+    const fi = document.getElementById('fileInput');
+    dz.onclick = () => fi.click();
+    fi.addEventListener('change', (e) => {
+        pushFiles(Array.from(e.target.files || []));
+        fi.value = '';
+    });
+    ['dragenter','dragover'].forEach(ev => {
+        dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('drop'); });
+    });
+    ['dragleave','drop'].forEach(ev => {
+        dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('drop'); });
+    });
+    dz.addEventListener('drop', (e) => {
+        if (e.dataTransfer && e.dataTransfer.files) pushFiles(Array.from(e.dataTransfer.files));
+    });
+}
+function pushFiles(files) {
+    const allowed = {pdf:1,doc:1,docx:1,txt:1,md:1,xls:1,xlsx:1,ppt:1,pptx:1};
+    for (const f of files) {
+        const ext = (f.name.split('.').pop() || '').toLowerCase();
+        let status = 'pending'; let msg = '';
+        if ((+f.size) > 50 * 1024 * 1024) { status = 'err'; msg = '超过 50MB'; }
+        else if (!allowed[ext]) { status = 'err'; msg = '扩展名不在白名单'; }
+        uploadQueue.push({ file: f, status, msg });
+    }
+    renderQueue();
+}
+function renderQueue() {
+    const box = document.getElementById('uploadQueue');
+    if (uploadQueue.length === 0) { box.innerHTML = ''; return; }
+    box.innerHTML = '';
+    uploadQueue.forEach((item, i) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap';
+        const badge = item.status === 'err'
+            ? `<span class="badge badge-danger">${escapeHtml(item.msg)}</span>`
+            : (item.status === 'uploading'
+                ? `<span class="badge badge-warn">上传中… ${escapeHtml(item.msg)}</span>`
+                : (item.status === 'done'
+                    ? `<span class="badge badge-success">✅ 成功</span>`
+                    : `<span class="badge badge-warn">待上传</span>`));
+        row.innerHTML = `
+            <div style="min-width:0;flex:1">
+                <div style="font-weight:600">${escapeHtml(item.file.name)}</div>
+                <div style="color:var(--text-mute);font-size:12px">${formatSize(item.file.size)}</div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+                ${badge}
+                <button class="btn btn-ghost btn-sm">移除</button>
+            </div>`;
+        row.querySelector('button').onclick = () => { uploadQueue.splice(i, 1); renderQueue(); };
+        box.appendChild(row);
+    });
+}
+async function doUpload() {
+    const level = document.getElementById('u-level').value;
+    const subject = document.getElementById('u-subject').value.trim();
+    const desc = document.getElementById('u-desc').value.trim();
+    if (!level) return alert('请选择所属学段');
+    const todo = uploadQueue.filter(x => x.status === 'pending' || x.status === 'err');
+    if (todo.length === 0) return alert('没有可上传的文件，请先添加（请检查扩展名与大小）');
+    let ok = 0, fail = 0;
+    for (let i = 0; i < todo.length; i++) {
+        const it = todo[i];
+        it.status = 'uploading'; it.msg = `${i+1}/${todo.length}`; renderQueue();
+        try {
+            const fd = new FormData();
+            fd.append('action', 'material_upload');
+            if (STATE.csrf) fd.append('csrf_token', STATE.csrf);
+            fd.append('file', it.file);
+            fd.append('subject', subject);
+            fd.append('description', desc);
+            fd.append('education_level', level);
+            const res = await fetch(API, { method: 'POST', body: fd });
+            const j = await res.json();
+            if (j.success) { it.status = 'done'; ok++; }
+            else { it.status = 'err'; it.msg = j.message || '上传失败'; fail++; }
+        } catch (e) {
+            it.status = 'err'; it.msg = String(e && e.message ? e.message : e); fail++;
+        }
+        renderQueue();
+    }
+    alert(`上传完成：成功 ${ok}，失败 ${fail}`);
+    // 清理成功项
+    uploadQueue = uploadQueue.filter(x => x.status !== 'done');
+    renderQueue();
+    await loadList();
+}
+
+function toast(msg, type='success') {
+    const el = document.createElement('div');
+    el.style.cssText = `position:fixed;right:20px;bottom:20px;z-index:9999;padding:10px 16px;border-radius:8px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.12);background:${type==='success' ? '#15803d' : '#b91c1c'};color:#fff`;
+    el.textContent = msg; document.body.appendChild(el);
+    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, 2500);
+}
+
+bootstrap();
+</script>
+</body>
+</html>
