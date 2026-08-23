@@ -983,7 +983,12 @@ if ($action) {
                 $qtype     = isset($_GET['qtype'])     ? sanitizeInput($_GET['qtype'])     : (isset($_POST['qtype'])     ? sanitizeInput($_POST['qtype'])     : '');
                 $keyword   = isset($_GET['keyword'])   ? sanitizeInput($_GET['keyword'])   : (isset($_POST['keyword'])   ? sanitizeInput($_POST['keyword'])   : '');
                 $educationLevel = validateEducationLevel($_GET['education_level'] ?? $_POST['education_level'] ?? '', '');
-                if (isAdmin() && $educationLevel === '') jsonOut(false, '管理员查看题库前请选择学段');
+                // 仅在“题目管理”范围（scope=manage_all）要求管理员必须选定学段；
+                // 浏览 Tab 中管理员也允许“全部”跨学段查看，避免下拉“全部”直接报错。
+                $scope = isset($_GET['scope']) ? (string)$_GET['scope'] : (isset($_POST['scope']) ? (string)$_POST['scope'] : '');
+                if (isAdmin() && $scope === 'manage_all' && $educationLevel === '') {
+                    jsonOut(false, '管理员查看题库前请选择学段');
+                }
                 $category  = validateQuestionCategory($_GET['category'] ?? $_POST['category'] ?? '', '');
                 $page      = max(1, (int)($_GET['page']   ?? $_POST['page']   ?? 1));
                 $page_size = max(1, min(100, (int)($_GET['page_size'] ?? $_POST['page_size'] ?? 10)));

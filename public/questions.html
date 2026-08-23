@@ -1230,14 +1230,23 @@ async function loadPaperSubjects() {
 async function loadManageSubjects() {
     const level = document.getElementById('manage-level')?.value || '';
     const ret = await api('get_subjects', { education_level: level });
-    if (!ret.success) return;
+    if (!ret.success) {
+        // 失败不阻塞后续列表加载，但toast提示
+        toast('加载管理区科目失败：' + (ret.message || ''), 'error');
+        return;
+    }
     const subjects = ret.data.subjects || [];
     const sel = document.getElementById('manage-subject');
     if (sel) {
-        const cur = sel.value;
+        // 临时禁用 onchange，避免再次触发 loadManageList 导致并发/重复请求
+        const prevOnChange = sel.onchange;
+        const prev = sel.value;
+        sel.onchange = null;
         sel.innerHTML = '<option value="">全部</option>' +
             subjects.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
-        if (cur) sel.value = cur;
+        // 之前选过的科目仍在新集合内则保留，否则回到“全部”
+        if (prev && subjects.indexOf(prev) >= 0) sel.value = prev; else sel.value = '';
+        sel.onchange = prevOnChange;
     }
 }
 
@@ -1267,6 +1276,8 @@ async function reloadList(page) {
             <button class="btn btn-sm btn-primary" onclick="reloadList(${browseState.page})">🔄 重试</button>
             <button class="btn btn-sm btn-secondary" onclick="resetFilters();reloadList(1)">重置筛选</button>
         </div>`;
+        document.getElementById('pagination').innerHTML = '';
+        document.getElementById('result-count').textContent = '0 题';
         return;
     }
     const data = ret.data;
@@ -1779,8 +1790,11 @@ async function doExtract() {
 }
 
 // ===================== 管理：列表 =====================
+// 防止切换学段/科目时多次触发 loadManageList，导致一直转圈。
+let _manageLoading = false;
 async function loadManageList(page) {
     if (!currentUser || !currentUser.is_admin) return;
+    if (_manageLoading) return;
     const level = document.getElementById('manage-level').value;
     if (!level) {
         document.getElementById('manage-list').innerHTML = '<div class="empty-state"><div class="icon">🎓</div><div>请先选择学段</div></div>';
@@ -1789,45 +1803,56 @@ async function loadManageList(page) {
         updateManageSelection();
         return;
     }
-    await loadManageSubjects();
-    manageState.page = page || 1;
     const listEl = document.getElementById('manage-list');
     const savedScroll = window.scrollY;
-    listEl.innerHTML = '<div class="loading"><div class="spinner"></div><div>加载中...</div></div>';
-    requestAnimationFrame(() => window.scrollTo(0, savedScroll));
-
-    const ret = await api('list_questions', {
-        page: manageState.page,
-        page_size: 10,
-        subject: document.getElementById('manage-subject').value,
-        education_level: level,
-        qtype:    document.getElementById('manage-type').value,
-        keyword:  document.getElementById('manage-keyword').value.trim()
-    });
-    isLoading = false;  // Reset loading state after API call
-    if (!ret.success) {
-        listEl.innerHTML = `<div class="alert alert-danger">
-            <strong>加载失败：</strong>${escapeHtml(ret.message)}
-            <br><br>
-            <button class="btn btn-sm btn-primary" onclick="loadManageList(${manageState.page})">🔄 重试</button>
+    // 先显示“加载中”，再做任何异步请求，保证请求未回来前 UI 至少可取消重试
+    listEl.innerHTML = `<div class="loading"><div class="spinner"></div><div>加载中...</div></div>
+        <div style="text-align:center;margin-top:8px">
+            <button class="btn btn-sm btn-secondary" onclick="_cancelManageLoading()">⏹ 取消/重试</button>
         </div>`;
-        return;
-    }
-    const data = ret.data;
-    manageState.total = data.total;
-    manageState.total_pages = data.total_pages;
-    // 刷新列表后清空当前页的批量选择状态，避免前后页 ID 错乱
-    manageState.selected.clear();
-    updateManageSelection();
-    if (!data.items || data.items.length === 0) {
-        listEl.innerHTML = '<div class="empty-state"><div class="icon">📭</div><div>暂无题目</div></div>';
-        document.getElementById('manage-pagination').innerHTML = '';
-        return;
-    }
-    listEl.innerHTML = data.items.map(q => renderQuestionCard(q, true)).join('');
-    updateManageSelection();
-    renderPagination('manage-pagination', data, (p) => loadManageList(p));
     requestAnimationFrame(() => window.scrollTo(0, savedScroll));
+    _manageLoading = true;
+    try {
+        await loadManageSubjects();
+        manageState.page = page || 1;
+        const ret = await api('list_questions', {
+            scope: 'manage_all',
+            page: manageState.page,
+            page_size: 10,
+            subject: document.getElementById('manage-subject').value,
+            education_level: level,
+            qtype:    document.getElementById('manage-type').value,
+            keyword:  document.getElementById('manage-keyword').value.trim()
+        }, 20000);
+        if (!ret.success) {
+            listEl.innerHTML = `<div class="alert alert-danger">
+                <strong>加载失败：</strong>${escapeHtml(ret.message)}
+                <br><br>
+                <button class="btn btn-sm btn-primary" onclick="loadManageList(${manageState.page})">🔄 重试</button>
+            </div>`;
+            return;
+        }
+        const data = ret.data;
+        manageState.total = data.total;
+        manageState.total_pages = data.total_pages;
+        manageState.selected.clear();
+        updateManageSelection();
+        if (!data.items || data.items.length === 0) {
+            listEl.innerHTML = '<div class="empty-state"><div class="icon">📭</div><div>暂无题目</div></div>';
+            document.getElementById('manage-pagination').innerHTML = '';
+            return;
+        }
+        listEl.innerHTML = data.items.map(q => renderQuestionCard(q, true)).join('');
+        updateManageSelection();
+        renderPagination('manage-pagination', data, (p) => loadManageList(p));
+        requestAnimationFrame(() => window.scrollTo(0, savedScroll));
+    } finally {
+        _manageLoading = false;
+    }
+}
+function _cancelManageLoading() {
+    _manageLoading = false;
+    loadManageList(manageState.page || 1);
 }
 
 // ===================== 编辑 =====================
