@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>自由刷题 - 学补刷题平台</title>
     <link rel="stylesheet" href="assets/app.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+            onload="window.__katexReady = true;"></script>
     <style>
         .topbar {
             position: sticky; top: 0; z-index: 50;
@@ -105,7 +109,65 @@
             display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px;
         }
     </style>
-<style>.q-content.q-html img{max-width:100%;height:auto;display:block;margin:.5rem auto}.q-content.q-html table{max-width:100%;overflow-x:auto;display:block}</style>
+<style>
+.q-content.q-html img,
+.opt-list img,
+.answer-val img,
+.result-row img,
+.explanation img,
+.q-html-content img {
+    max-width: 100%;
+    max-height: 360px;
+    height: auto;
+    width: auto;
+    display: block;
+    margin: .6rem auto;
+    object-fit: contain;
+    border-radius: 6px;
+    cursor: zoom-in;
+    transition: transform .2s ease;
+}
+.q-content.q-html img:hover,
+.opt-list img:hover,
+.answer-val img:hover,
+.result-row img:hover,
+.explanation img:hover,
+.q-html-content img:hover {
+    transform: scale(1.02);
+}
+.q-content.q-html table,
+.opt-list table,
+.answer-val table,
+.q-html-content table {
+    max-width: 100%;
+    overflow-x: auto;
+    display: block;
+}
+.opt-list { display: flex; flex-direction: column; gap: 8px; }
+.opt-list .opt { display: flex; align-items: flex-start; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; transition: border-color .15s, background .15s; }
+.opt-list .opt:hover { border-color: var(--primary); background: var(--hover-bg); }
+.opt-list .opt input { margin-top: 4px; flex-shrink: 0; }
+.opt-list .opt-letter { font-weight: bold; color: var(--primary); flex-shrink: 0; min-width: 24px; }
+.opt-list .opt > span:last-child { flex: 1; line-height: 1.7; }
+
+/* 图片放大查看弹层 */
+.img-lightbox {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.85);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    cursor: zoom-out;
+}
+.img-lightbox.active { display: flex; }
+.img-lightbox img {
+    max-width: 95vw;
+    max-height: 95vh;
+    object-fit: contain;
+    border-radius: 4px;
+}
+</style>
 </head>
 <body>
 <div class="topbar">
@@ -229,10 +291,88 @@ const escapeHtml = (s) => {
     t.textContent = s;
     return t.innerHTML;
 };
+// 安全的富文本渲染：过滤危险标签，保留 img/table/span/div 等安全标签
+function sanitizeHtml(html) {
+    if (html === null || html === undefined) return '';
+    if (typeof html !== 'string') html = String(html);
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    const dangerousTags = ['script', 'style', 'iframe', 'form', 'input', 'button', 'object', 'embed', 'link', 'meta', 'base'];
+    dangerousTags.forEach(tag => {
+        div.querySelectorAll(tag).forEach(el => el.remove());
+    });
+    const allEls = div.querySelectorAll('*');
+    allEls.forEach(el => {
+        Array.from(el.attributes).forEach(attr => {
+            const name = attr.name.toLowerCase();
+            if (name.startsWith('on')) el.removeAttribute(attr.name);
+            if (name === 'href' || name === 'src') {
+                const val = attr.value.toLowerCase().trim();
+                if (val.startsWith('javascript:') || val.startsWith('data:text/html')) {
+                    el.removeAttribute(attr.name);
+                }
+            }
+        });
+    });
+    return div.innerHTML;
+}
 const fmt = (n) => {
     if (n === null || n === undefined) return '—';
     return Number.isInteger(n) ? n : Number(n).toFixed(1);
 };
+
+/* =========================================================
+ * LaTeX 公式渲染（KaTeX）
+ * ========================================================= */
+function renderMath(el) {
+    if (!el) return;
+    const tryRender = () => {
+        if (window.renderMathInElement && typeof window.renderMathInElement === 'function') {
+            try {
+                window.renderMathInElement(el, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '$',  right: '$',  display: false},
+                        {left: '\\(', right: '\\)', display: false},
+                        {left: '\\[', right: '\\]', display: true}
+                    ],
+                    throwOnError: false,
+                    strict: false,
+                    trust: true
+                });
+            } catch (e) {
+                console.warn('KaTeX 渲染失败:', e);
+            }
+        } else if (window.__katexReady && window.katex && window.katex.renderToString) {
+            renderMathManual(el);
+        } else {
+            setTimeout(tryRender, 100);
+        }
+    };
+    tryRender();
+}
+function renderMathManual(el) {
+    if (!window.katex || !window.katex.renderToString) return;
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+    textNodes.forEach(node => {
+        const text = node.textContent;
+        if (!text || text.indexOf('$') === -1) return;
+        const html = text.replace(/\$\$(.+?)\$\$/g, (_, m) => {
+            try { return window.katex.renderToString(m, {displayMode: true, throwOnError: false, strict: false, trust: true}); }
+            catch (e) { return '$$' + m + '$$'; }
+        }).replace(/\$(.+?)\$/g, (_, m) => {
+            try { return window.katex.renderToString(m, {displayMode: false, throwOnError: false, strict: false, trust: true}); }
+            catch (e) { return '$' + m + '$'; }
+        });
+        if (html !== text) {
+            const span = document.createElement('span');
+            span.innerHTML = html;
+            node.parentNode.replaceChild(span, node);
+        }
+    });
+}
 const LS = {
     get k() { return localStorage.getItem('ss_theme') || 'light'; },
     set k(v) { localStorage.setItem('ss_theme', v); applyTheme(); }
@@ -436,6 +576,8 @@ function renderDoing() {
     document.getElementById('btnSaveDraft').onclick = () => alert('草稿已在本地保存，你也可以直接提交。');
     document.getElementById('btnSubmit').onclick = submitAnswers;
     updateNavStates();
+    // 渲染 LaTeX 公式
+    renderMath(box);
 }
 function renderBlanks(content, isHtml) {
     if (!content) return '';
@@ -454,12 +596,14 @@ function stripOptionLetter(o) {
 }
 function renderAnswerArea(q) {
     const id = q.id;
+    const useHtml = !!q.is_html;
+    const renderOpt = (text) => useHtml ? sanitizeHtml(text) : escapeHtml(text);
     if (q.question_type === 'single' || q.question_type === 'multi') {
         const opts = Array.isArray(q.options) ? q.options : [];
         const type = q.question_type === 'single' ? 'radio' : 'checkbox';
         return `<div class="opt-list">${opts.map((o, i) => {
             const letter = String.fromCharCode(65 + i);
-            return `<label class="opt" data-opt="${letter}"><input type="${type}" name="q${id}" value="${letter}"><span class="opt-letter">${letter}.</span><span>${escapeHtml(stripOptionLetter(o))}</span></label>`;
+            return `<label class="opt" data-opt="${letter}"><input type="${type}" name="q${id}" value="${letter}"><span class="opt-letter">${letter}.</span><span>${renderOpt(stripOptionLetter(o))}</span></label>`;
         }).join('')}</div>`;
     }
     if (q.question_type === 'judge') {
@@ -626,6 +770,8 @@ function renderResult(d) {
             </div>`;
         box.appendChild(card);
     });
+    // 渲染 LaTeX 公式
+    renderMath(box);
     document.getElementById('btnSaveGrade').onclick = saveGrades;
 }
 function renderAnswerReview(q) {
@@ -678,6 +824,36 @@ async function saveGrades() {
     loadAndShowResult(STATE.attemptId);
 }
 
+/* =========================================================
+ * 图片点击放大查看
+ * ========================================================= */
+function initImageLightbox() {
+    let lb = document.getElementById('imgLightbox');
+    if (!lb) {
+        lb = document.createElement('div');
+        lb.id = 'imgLightbox';
+        lb.className = 'img-lightbox';
+        lb.innerHTML = '<img alt="">';
+        document.body.appendChild(lb);
+    }
+    const lbImg = lb.querySelector('img');
+    lb.addEventListener('click', () => lb.classList.remove('active'));
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') lb.classList.remove('active');
+    });
+    document.addEventListener('click', (e) => {
+        const target = e.target;
+        if (target.tagName === 'IMG' &&
+            target.closest('.q-content, .opt-list, .answer-val, .result-row, .explanation, .q-html-content') &&
+            !target.closest('.img-lightbox')) {
+            e.stopPropagation();
+            lbImg.src = target.src;
+            lb.classList.add('active');
+        }
+    });
+}
+
+initImageLightbox();
 checkSessionAndRender();
 </script>
 </body>
