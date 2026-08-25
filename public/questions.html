@@ -1338,11 +1338,23 @@ async function reloadList(page) {
 }
 
 function renderQuestionCard(q, isAdmin) {
-    const preview = (q.content || '').slice(0, 200);
-    const more = (q.content || '').length > 200 ? '...' : '';
+    const content = q.content || '';
+    const isHtml = !!q.is_html;
     const typeLabel = TYPE_LABELS[q.question_type] || q.question_type;
     const opts = q.options ? (Array.isArray(q.options) ? q.options : Object.values(q.options)) : [];
     const optsPreview = opts.length ? `<div style="margin-top:0.4rem;font-size:0.82rem;color:var(--text-light);">共 ${opts.length} 个选项</div>` : '';
+    // HTML 题干：预览用纯文本摘要（剥掉 HTML 标签），避免长图把列表撑爆
+    let previewHtml;
+    if (isHtml) {
+        const plain = content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        const preview = plain.slice(0, 120);
+        const more = plain.length > 120 ? '...' : '';
+        previewHtml = `${escapeHtml(preview)}${more} <span style="color:#0ea5e9;font-size:11px;">[含图片/表格]</span>`;
+    } else {
+        const preview = content.slice(0, 200);
+        const more = content.length > 200 ? '...' : '';
+        previewHtml = `${escapeHtml(preview)}${more}`;
+    }
     return `
         <div class="question-card" data-qid="${q.id}">
             <div class="q-header">
@@ -1355,6 +1367,7 @@ function renderQuestionCard(q, isAdmin) {
                     <span class="badge badge-type">分类：${TYPE_LABELS[q.category] || q.category || typeLabel}</span>
                     <span class="badge badge-diff">难度 ${q.difficulty}</span>
                     <span class="badge badge-points">${q.points}分</span>
+                    ${isHtml ? '<span class="badge" style="background:#e0f2fe;color:#0369a1;">富文本</span>' : ''}
                 </div>
                 ${isAdmin ? `
                     <div class="actions" onclick="event.stopPropagation();">
@@ -1362,7 +1375,7 @@ function renderQuestionCard(q, isAdmin) {
                         <button class="btn btn-sm btn-danger" onclick="deleteQuestion(${q.id})">🗑️ 删除</button>
                     </div>` : ''}
             </div>
-            <div class="q-content collapsed">${escapeHtml(preview)}${more}</div>
+            <div class="q-content collapsed">${previewHtml}</div>
             ${optsPreview}
         </div>
     `;
@@ -1446,11 +1459,14 @@ async function showDetail(qid) {
                 <span class="badge badge-type">${typeLabel}</span>
                 <span class="badge badge-diff">难度 ${q.difficulty}</span>
                 <span class="badge badge-points">${q.points}分</span>
+                ${q.is_html ? '<span class="badge" style="background:#e0f2fe;color:#0369a1;">富文本（含图片/表格）</span>' : ''}
             </div>
         </div>
         <div class="modal-section">
             <h4>题干</h4>
-            <div class="content-box">${escapeHtml(q.content)}</div>
+            ${q.is_html
+                ? `<div class="content-box q-html-content" style="line-height:1.8;"></div>`
+                : `<div class="content-box">${escapeHtml(q.content)}</div>`}
         </div>
         ${optsHtml ? `<div class="modal-section"><h4>选项</h4>${optsHtml}</div>` : ''}
         ${currentUser && currentUser.is_admin ? `
@@ -1464,6 +1480,25 @@ async function showDetail(qid) {
             创建: ${q.created_at || '-'} · 更新: ${q.updated_at || '-'}
         </div>
     `;
+    // HTML 题干：innerHTML 方式填充，保留 base64 图片/表格等富媒体
+    if (q.is_html) {
+        const el = body.querySelector('.q-html-content');
+        if (el) {
+            el.innerHTML = q.content || '';
+            // 自适应：max-width 限 100% 避免图把弹窗撑爆
+            el.querySelectorAll('img').forEach(img => {
+                img.style.maxWidth = '100%';
+                img.style.height = 'auto';
+                img.style.display = 'block';
+                img.style.margin = '0.5rem auto';
+            });
+            el.querySelectorAll('table').forEach(t => {
+                t.style.maxWidth = '100%';
+                t.style.overflowX = 'auto';
+                t.style.display = 'block';
+            });
+        }
+    }
 }
 
 function parseCorrectLetters(answer) {

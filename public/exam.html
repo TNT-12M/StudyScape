@@ -106,6 +106,7 @@
             display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px;
         }
     </style>
+<style>.q-content.q-html img{max-width:100%;height:auto;display:block;margin:.5rem auto}.q-content.q-html table{max-width:100%;overflow-x:auto;display:block}</style>
 </head>
 <body>
 <div class="topbar">
@@ -518,7 +519,7 @@ function renderDoing() {
                 <div class="q-index">第 ${idx+1} 题 <span class="badge badge-warn" style="margin-left:8px">${qTypeName(q.question_type)}</span> <span class="badge badge-success" style="margin-left:4px">${q.paper_points || q.points || 1} 分</span></div>
                 <div style="color:var(--text-mute);font-size:12px">难度：${['','易','中','难'][q.difficulty||1] || '中'}</div>
             </div>
-            <div class="q-content">${renderBlanks(q.content)}</div>
+            <div class="q-content ${q.is_html ? 'q-html' : ''}">${renderBlanks(q.content, q.is_html)}</div>
             <div class="q-body">${renderAnswerArea(q)}</div>
         `;
         box.appendChild(card);
@@ -529,13 +530,19 @@ function renderDoing() {
     document.getElementById('btnSubmit').onclick = submitAnswers;
     updateNavStates();
 }
-function renderBlanks(content) {
+function renderBlanks(content, isHtml) {
     if (!content) return '';
+    if (isHtml) {
+        return content.replace(/{{\s*(\d+)\s*}}/g,
+            (_, n) => `<span class="blank-tag">第${n}空</span>`
+        );
+    }
     const html = escapeHtml(content);
-    return html.replace(/\{\{\s*(\d+)\s*\}\}/g,
+    return html.replace(/{{\s*(\d+)\s*}}/g,
         (_, n) => `<span class="blank-tag">第${n}空</span>`
     );
 }
+
 function stripOptionLetter(o) {
     const s = String(o);
     const m = s.match(/^\s*([A-Za-z])[.．、)）:：]\s*(.*)$/);
@@ -729,7 +736,7 @@ function renderResult(d) {
                 <div class="q-index">第 ${i+1} 题 <span class="badge badge-warn" style="margin-left:8px">${qTypeName(q.question_type)}</span> <span class="badge badge-success" style="margin-left:4px">${maxPts} 分</span></div>
                 <div>${statusBadge}</div>
             </div>
-            <div class="q-content">${renderBlanks(q.content)}</div>
+            <div class="q-content ${q.is_html ? 'q-html' : ''}">${renderBlanks(q.content, q.is_html)}</div>
             ${renderAnswerReview(q)}
             <div class="result-row"><b>参考答案：</b><span class="answer-val">${formatAns(q, q.correct_answer, 'correct')}</span></div>
             <div class="grade-block">
