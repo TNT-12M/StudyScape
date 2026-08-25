@@ -2860,22 +2860,33 @@ function pcvlConvertPaperCutterVL(array $data, string $subject, array &$question
                 }
             }
         }
-        // 把 question_images / analysis_images 里独立的 base64 图追成 <img> 插到末尾
-        $appendImgs = function (array $imgs) use (&$content, &$isHtml) {
+        // 图片去重：记录已出现过的 base64 摘要（前 64 字符），避免同一张图重复插入
+        $seenImgHash = [];
+
+        // 把题目图片追加到题干 content；解析图片追加到 explanation
+        $appendImgs = function (array $imgs, string &$target, bool &$htmlFlag) use (&$seenImgHash) {
             foreach ($imgs as $b64) {
                 if (!is_string($b64) || trim($b64) === '') continue;
-                // 若已经带 data: 前缀，直接用；否则补全
-                if (preg_match('/^data:/i', $b64)) {
-                    $src = $b64;
-                } else {
-                    $src = 'data:image/jpeg;base64,' . ltrim($b64);
-                }
-                $content .= "\n\n<div style=\"text-align:center\"><img src=\"" . htmlspecialchars($src, ENT_QUOTES) . "\" alt=\"图片\" style=\"max-width:100%;height:auto;\"></div>";
-                $isHtml = true;
+                // 归一化：去掉 data: 前缀，只取 base64 部分做去重
+                $pure = preg_replace('/^data:image\/[a-z]+;base64,/i', '', $b64);
+                $pure = ltrim($pure);
+                // 用前 80 字符做指纹去重（足够区分不同图，又不会太慢）
+                $fingerprint = substr($pure, 0, 80);
+                if ($fingerprint === '' || isset($seenImgHash[$fingerprint])) continue;
+                $seenImgHash[$fingerprint] = true;
+
+                // 检查 target 中是否已内嵌了这张图（PaperCutter-VL 有时 content 里已有 <img src="data:..."> 又在 images 数组里重复列）
+                if (strpos($target, $fingerprint) !== false) continue;
+
+                $src = 'data:image/jpeg;base64,' . $pure;
+                $target .= "\n\n<div style=\"text-align:center\"><img src=\"" . htmlspecialchars($src, ENT_QUOTES) . "\" alt=\"图片\" style=\"max-width:100%;height:auto;\"></div>";
+                $htmlFlag = true;
             }
         };
-        $appendImgs($qImages);
-        $appendImgs($aImages);
+        // 题目图片 → 题干
+        $appendImgs($qImages, $content, $isHtml);
+        // 解析图片 → 解析（不是题干！）
+        $appendImgs($aImages, $explanation, $isHtml);
 
         // 推断难度
         $diff = intval($q['difficulty'] ?? 0);
