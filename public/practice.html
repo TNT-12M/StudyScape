@@ -316,6 +316,31 @@ function sanitizeHtml(html) {
     });
     return div.innerHTML;
 }
+// 智能检测内容中是否含有 HTML 标签（img/table/div/span/p 等）
+function looksLikeHtml(text) {
+    if (!text || typeof text !== 'string') return false;
+    return /<[a-zA-Z][^>]*>/.test(text);
+}
+
+/* =========================================================
+ * 图片加载错误处理
+ * ========================================================= */
+function fixImagesIn(container) {
+    if (!container) return;
+    const imgs = container.querySelectorAll('img');
+    imgs.forEach(img => {
+        if (img.dataset.imgFixed) return;
+        img.dataset.imgFixed = '1';
+        img.addEventListener('error', function onErr() {
+            img.removeEventListener('error', onErr);
+            img.outerHTML = `<div style="display:inline-flex;align-items:center;justify-content:center;max-width:200px;max-height:120px;width:200px;height:120px;background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:6px;color:#94a3b8;font-size:12px;margin:.5rem auto;">🖼️ 图片加载失败</div>`;
+        });
+        if (img.complete && img.naturalWidth === 0 && img.src) {
+            img.dispatchEvent(new Event('error'));
+        }
+    });
+}
+
 const fmt = (n) => {
     if (n === null || n === undefined) return '—';
     return Number.isInteger(n) ? n : Number(n).toFixed(1);
@@ -578,11 +603,14 @@ function renderDoing() {
     updateNavStates();
     // 渲染 LaTeX 公式
     renderMath(box);
+    // 修复图片加载失败
+    fixImagesIn(box);
 }
 function renderBlanks(content, isHtml) {
     if (!content) return '';
-    if (isHtml) {
-        return content.replace(/{{\s*(\d+)\s*}}/g,
+    const useHtml = isHtml || looksLikeHtml(content);
+    if (useHtml) {
+        return sanitizeHtml(content).replace(/{{\s*(\d+)\s*}}/g,
             (_, n) => `<span class="blank-tag">第${n}空</span>`);
     }
     return escapeHtml(content).replace(/{{\s*(\d+)\s*}}/g,
@@ -596,14 +624,14 @@ function stripOptionLetter(o) {
 }
 function renderAnswerArea(q) {
     const id = q.id;
-    const useHtml = !!q.is_html;
-    const renderOpt = (text) => useHtml ? sanitizeHtml(text) : escapeHtml(text);
     if (q.question_type === 'single' || q.question_type === 'multi') {
         const opts = Array.isArray(q.options) ? q.options : [];
         const type = q.question_type === 'single' ? 'radio' : 'checkbox';
         return `<div class="opt-list">${opts.map((o, i) => {
             const letter = String.fromCharCode(65 + i);
-            return `<label class="opt" data-opt="${letter}"><input type="${type}" name="q${id}" value="${letter}"><span class="opt-letter">${letter}.</span><span>${renderOpt(stripOptionLetter(o))}</span></label>`;
+            const optText = stripOptionLetter(o);
+            const renderOpt = looksLikeHtml(optText) ? sanitizeHtml(optText) : escapeHtml(optText);
+            return `<label class="opt" data-opt="${letter}"><input type="${type}" name="q${id}" value="${letter}"><span class="opt-letter">${letter}.</span><span>${renderOpt}</span></label>`;
         }).join('')}</div>`;
     }
     if (q.question_type === 'judge') {
@@ -772,6 +800,8 @@ function renderResult(d) {
     });
     // 渲染 LaTeX 公式
     renderMath(box);
+    // 修复图片加载失败
+    fixImagesIn(box);
     document.getElementById('btnSaveGrade').onclick = saveGrades;
 }
 function renderAnswerReview(q) {

@@ -319,6 +319,11 @@ function sanitizeHtml(html) {
     });
     return div.innerHTML;
 }
+// 智能检测内容中是否含有 HTML 标签（img/table/div/span/p 等）
+function looksLikeHtml(text) {
+    if (!text || typeof text !== 'string') return false;
+    return /<[a-zA-Z][^>]*>/.test(text);
+}
 const fmt = (n) => {
     if (n === null || n === undefined) return '—';
     return Number.isInteger(n) ? n : Number(n).toFixed(1);
@@ -379,6 +384,40 @@ function renderMathManual(el) {
         }
     });
 }
+
+/* =========================================================
+ * 图片加载错误处理 + 懒加载优化
+ * ========================================================= */
+function fixImagesIn(container) {
+    if (!container) return;
+    const imgs = container.querySelectorAll('img');
+    imgs.forEach(img => {
+        // 跳过已处理的
+        if (img.dataset.imgFixed) return;
+        img.dataset.imgFixed = '1';
+        // 加载失败时显示占位
+        img.addEventListener('error', function onErr() {
+            img.removeEventListener('error', onErr);
+            // 检查是否是 base64 图片且数据损坏
+            const src = img.getAttribute('src') || '';
+            if (src.startsWith('data:image')) {
+                // base64 损坏，用占位图替换
+                img.style.cssText = 'display:inline-block;max-width:200px;max-height:120px;width:200px;height:120px;background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:6px;';
+                img.outerHTML = `<div style="display:inline-flex;align-items:center;justify-content:center;max-width:200px;max-height:120px;width:200px;height:120px;background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:6px;color:#94a3b8;font-size:12px;margin:.5rem auto;">🖼️ 图片加载失败</div>`;
+            } else {
+                // 普通图片失败，显示占位
+                img.style.cssText = 'display:inline-block;max-width:200px;max-height:120px;width:200px;height:120px;background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:6px;';
+                img.outerHTML = `<div style="display:inline-flex;align-items:center;justify-content:center;max-width:200px;max-height:120px;width:200px;height:120px;background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:6px;color:#94a3b8;font-size:12px;margin:.5rem auto;">🖼️ 图片加载失败</div>`;
+            }
+        });
+        // 如果图片已经加载失败（complete 且 naturalWidth === 0）
+        if (img.complete && img.naturalWidth === 0 && img.src) {
+            // 手动触发 error
+            img.dispatchEvent(new Event('error'));
+        }
+    });
+}
+
 const LS = {
     get k() { return localStorage.getItem('ss_theme') || 'light'; },
     set k(v) { localStorage.setItem('ss_theme', v); applyTheme(); }
@@ -676,11 +715,15 @@ function renderDoing() {
     updateNavStates();
     // 渲染 LaTeX 公式
     renderMath(box);
+    // 修复图片加载失败
+    fixImagesIn(box);
 }
 function renderBlanks(content, isHtml) {
     if (!content) return '';
-    if (isHtml) {
-        return content.replace(/{{\s*(\d+)\s*}}/g,
+    // 智能检测：即使 is_html=0，如果内容含 HTML 标签也用 HTML 渲染
+    const useHtml = isHtml || looksLikeHtml(content);
+    if (useHtml) {
+        return sanitizeHtml(content).replace(/{{\s*(\d+)\s*}}/g,
             (_, n) => `<span class="blank-tag">第${n}空</span>`
         );
     }
@@ -697,14 +740,15 @@ function stripOptionLetter(o) {
 }
 function renderAnswerArea(q) {
     const id = q.id;
-    const useHtml = !!q.is_html;
-    const renderOpt = (text) => useHtml ? sanitizeHtml(text) : escapeHtml(text);
     if (q.question_type === 'single' || q.question_type === 'multi') {
         const opts = Array.isArray(q.options) ? q.options : [];
         return `<div class="opt-list">${opts.map((o, i) => {
             const letter = String.fromCharCode(65 + i);
             const type = q.question_type === 'single' ? 'radio' : 'checkbox';
-            return `<label class="opt" data-opt="${letter}"><input type="${type}" name="q${id}" value="${letter}"><span class="opt-letter">${letter}.</span><span>${renderOpt(stripOptionLetter(o))}</span></label>`;
+            const optText = stripOptionLetter(o);
+            // 智能判断：如果选项本身含有 HTML 标签，就用 HTML 渲染
+            const renderOpt = looksLikeHtml(optText) ? sanitizeHtml(optText) : escapeHtml(optText);
+            return `<label class="opt" data-opt="${letter}"><input type="${type}" name="q${id}" value="${letter}"><span class="opt-letter">${letter}.</span><span>${renderOpt}</span></label>`;
         }).join('')}</div>`;
     }
     if (q.question_type === 'judge') {
@@ -909,6 +953,8 @@ function renderResult(d) {
     });
     // 渲染 LaTeX 公式
     renderMath(box);
+    // 修复图片加载失败
+    fixImagesIn(box);
     document.getElementById('btnSaveGrade').onclick = saveGrades;
 }
 function renderAnswerReview(q) {

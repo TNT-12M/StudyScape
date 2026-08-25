@@ -2842,6 +2842,15 @@ function pcvlConvertPaperCutterVL(array $data, string $subject, array &$question
         if (preg_match('/<[a-zA-Z][^>]*>/', $content)) {
             $isHtml = true;
         }
+        // 若选项中含有 HTML 标签，也标记为富文本
+        if (!empty($options)) {
+            foreach ($options as $opt) {
+                if (is_string($opt) && preg_match('/<[a-zA-Z][^>]*>/', $opt)) {
+                    $isHtml = true;
+                    break;
+                }
+            }
+        }
         // 把附加表格追加到 content
         if (is_array($tables) && !empty($tables)) {
             foreach ($tables as $t) {

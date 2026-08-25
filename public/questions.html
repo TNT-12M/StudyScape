@@ -1489,16 +1489,19 @@ async function showDetail(qid) {
     }
     const q = ret.data.question;
     const typeLabel = TYPE_LABELS[q.question_type] || q.question_type;
-    const useHtml = !!q.is_html;
-    const renderHtml = (text) => useHtml ? sanitizeHtml(text) : escapeHtml(text);
+    // 智能检测：题干或选项含 HTML 就算富文本
+    const contentHasHtml = looksLikeHtml(q.content);
+    const optsHasHtml = q.options && Array.isArray(q.options) && q.options.some(o => looksLikeHtml(o));
+    const useHtml = !!q.is_html || contentHasHtml || optsHasHtml;
     let optsHtml = '';
     if (q.options && Array.isArray(q.options) && q.options.length) {
-        // 答案匹配：判断哪些选项是正确答案
         const correctSet = parseCorrectLetters(q.correct_answer);
         optsHtml = `<ul>${q.options.map(opt => {
             const letter = opt.split('.')[0].trim();
             const isCorrect = correctSet.has(letter);
-            return `<li class="${isCorrect?'correct':''}">${renderHtml(opt)}</li>`;
+            // 每个选项单独判断是否需要 HTML 渲染
+            const optHtml = looksLikeHtml(opt) ? sanitizeHtml(opt) : escapeHtml(opt);
+            return `<li class="${isCorrect?'correct':''}">${optHtml}</li>`;
         }).join('')}</ul>`;
     }
     body.innerHTML = `
@@ -1510,12 +1513,12 @@ async function showDetail(qid) {
                 <span class="badge badge-type">${typeLabel}</span>
                 <span class="badge badge-diff">难度 ${q.difficulty}</span>
                 <span class="badge badge-points">${q.points}分</span>
-                ${q.is_html ? '<span class="badge" style="background:#e0f2fe;color:#0369a1;">富文本（含图片/表格）</span>' : ''}
+                ${useHtml ? '<span class="badge" style="background:#e0f2fe;color:#0369a1;">富文本（含图片/表格）</span>' : ''}
             </div>
         </div>
         <div class="modal-section">
             <h4>题干</h4>
-            ${q.is_html
+            ${contentHasHtml || q.is_html
                 ? `<div class="content-box q-html-content" style="line-height:1.8;">${sanitizeHtml(q.content || '')}</div>`
                 : `<div class="content-box">${escapeHtml(q.content)}</div>`}
         </div>
@@ -1523,9 +1526,9 @@ async function showDetail(qid) {
         ${currentUser && currentUser.is_admin ? `
             <div class="modal-section">
                 <h4>参考答案</h4>
-                <div class="content-box" style="background:#dcfce7;color:#15803d;font-weight:bold;">${renderHtml(q.correct_answer || '')}</div>
+                <div class="content-box" style="background:#dcfce7;color:#15803d;font-weight:bold;">${looksLikeHtml(q.correct_answer) ? sanitizeHtml(q.correct_answer || '') : escapeHtml(q.correct_answer || '')}</div>
             </div>
-            ${q.explanation ? `<div class="modal-section"><h4>解析</h4><div class="content-box explanation">${renderHtml(q.explanation)}</div></div>` : ''}
+            ${q.explanation ? `<div class="modal-section"><h4>解析</h4><div class="content-box explanation">${looksLikeHtml(q.explanation) ? sanitizeHtml(q.explanation) : escapeHtml(q.explanation)}</div></div>` : ''}
         ` : ''}
         <div class="modal-section" style="color:var(--text-light);font-size:0.8rem;text-align:right;">
             创建: ${q.created_at || '-'} · 更新: ${q.updated_at || '-'}
@@ -1533,6 +1536,8 @@ async function showDetail(qid) {
     `;
     // 渲染 LaTeX 公式（题干、选项、答案、解析中的 $...$）
     renderMath(body);
+    // 修复图片加载失败
+    fixImagesIn(body);
 }
 
 function parseCorrectLetters(answer) {
@@ -2371,6 +2376,31 @@ function sanitizeHtml(html) {
         });
     });
     return div.innerHTML;
+}
+
+// 智能检测内容中是否含有 HTML 标签
+function looksLikeHtml(text) {
+    if (!text || typeof text !== 'string') return false;
+    return /<[a-zA-Z][^>]*>/.test(text);
+}
+
+/* =========================================================
+ * 图片加载错误处理
+ * ========================================================= */
+function fixImagesIn(container) {
+    if (!container) return;
+    const imgs = container.querySelectorAll('img');
+    imgs.forEach(img => {
+        if (img.dataset.imgFixed) return;
+        img.dataset.imgFixed = '1';
+        img.addEventListener('error', function onErr() {
+            img.removeEventListener('error', onErr);
+            img.outerHTML = `<div style="display:inline-flex;align-items:center;justify-content:center;max-width:200px;max-height:120px;width:200px;height:120px;background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:6px;color:#94a3b8;font-size:12px;margin:.5rem auto;">🖼️ 图片加载失败</div>`;
+        });
+        if (img.complete && img.naturalWidth === 0 && img.src) {
+            img.dispatchEvent(new Event('error'));
+        }
+    });
 }
 
 /* =========================================================
