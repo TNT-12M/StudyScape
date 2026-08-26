@@ -227,6 +227,115 @@ try {
     die(json_encode(['success' => false, 'message' => '学段字段迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
 
+// ==========================================================
+// import_batches 表：导入批次暂存（用于题目-答案自动匹配）
+// ==========================================================
+try {
+    $db->exec("CREATE TABLE IF NOT EXISTS import_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_key TEXT NOT NULL DEFAULT '',
+        batch_type TEXT NOT NULL DEFAULT 'questions',
+        file_name TEXT NOT NULL DEFAULT '',
+        subject TEXT NOT NULL DEFAULT '',
+        education_level TEXT NOT NULL DEFAULT 'junior',
+        question_count INTEGER NOT NULL DEFAULT 0,
+        answer_count INTEGER NOT NULL DEFAULT 0,
+        questions_json TEXT,
+        answers_json TEXT,
+        matched_batch_id INTEGER DEFAULT NULL,
+        match_status TEXT NOT NULL DEFAULT 'pending',
+        created_by INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_import_batches_match_key ON import_batches(match_key)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_import_batches_status ON import_batches(match_status)");
+} catch (Exception $e) {
+    error_log('import_batches table init failed: ' . $e->getMessage());
+}
+
+// 生成匹配码：从文件名中提取核心标识
+function generateMatchKey(string $fileName, string $extraHint = ''): string {
+    $name = pathinfo($fileName, PATHINFO_FILENAME);
+    $removeWords = [
+        '试卷', '试题', '考题', '题目', '练习', '训练',
+        '答案', '解析', '解答', '参考答案', '答案及解析', '真题及答案', '真题答案',
+        '真题', '模拟卷', '模拟题', '冲刺卷', '预测卷', '押题卷',
+        '及答案', '及解析', '含答案', '含解析',
+        'PDF', 'pdf',
+    ];
+    foreach ($removeWords as $w) {
+        $name = str_replace($w, '', $name);
+    }
+    $name = preg_replace('/[\s\-_—–·.()（）【】\[\]【】]+/u', '', $name);
+    $name = mb_strtolower($name);
+    if ($name === '') {
+        $name = substr(md5($extraHint), 0, 16);
+    }
+    return $name;
+}
+
+// 解析答案文本，返回 {题号 => 答案}
+function parseAnswerText(string $text): array {
+    $answers = [];
+    // 模式1：区间格式 "1-5: DBCCB"
+    preg_match_all('/(\d{1,3})\s*[-~—]\s*(\d{1,3})\s*[:：]\s*([A-Za-z]+)/', $text, $rangeMatches, PREG_SET_ORDER);
+    foreach ($rangeMatches as $m) {
+        $start = (int)$m[1];
+        $end = (int)$m[2];
+        $letters = strtoupper($m[3]);
+        $len = strlen($letters);
+        for ($i = 0; $i < $len && $start + $i <= $end; $i++) {
+            $answers[$start + $i] = $letters[$i];
+        }
+    }
+    // 模式2：单行 "1. A"
+    preg_match_all('/^\s*(\d{1,3})\s*[.、)）:：]\s*([A-Za-z]+)\s*$/m', $text, $singleMatches, PREG_SET_ORDER);
+    foreach ($singleMatches as $m) {
+        $num = (int)$m[1];
+        $ans = strtoupper($m[2]);
+        if (!isset($answers[$num])) $answers[$num] = $ans;
+    }
+    // 模式3：内联 "1 A 2 B"
+    preg_match_all('/(\d{1,3})\s+([A-Za-z])/', $text, $inlineMatches, PREG_SET_ORDER);
+    foreach ($inlineMatches as $m) {
+        $num = (int)$m[1];
+        $ans = strtoupper($m[2]);
+        if (!isset($answers[$num]) && $num > 0 && $num <= 200) {
+            $answers[$num] = $ans;
+        }
+    }
+    ksort($answers);
+    return $answers;
+}
+
+// 将答案回填到题目数组中（按题号匹配）
+function applyAnswersToQuestions(array $questions, array $answers): array {
+    $result = $questions;
+    $filled = 0;
+    foreach ($result as &$q) {
+        $qNum = $q['number'] ?? $q['question_id'] ?? 0;
+        if ($qNum > 0 && isset($answers[$qNum])) {
+            $ansLetter = $answers[$qNum];
+            if (!empty($q['options']) && is_array($q['options'])) {
+                foreach ($q['options'] as $opt) {
+                    if (preg_match('/^\s*' . preg_quote($ansLetter, '/') . '\s*[.、)）:：]\s*/i', $opt)) {
+                        $q['correct_answer'] = $opt;
+                        $filled++;
+                        break;
+                    }
+                }
+            }
+            if (empty($q['correct_answer'])) {
+                $q['correct_answer'] = $ansLetter;
+                $filled++;
+            }
+        }
+    }
+    unset($q);
+    return ['questions' => $result, 'filled_count' => $filled];
+}
+
 // CSRF token
 if (!isset($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
@@ -1267,13 +1376,48 @@ if ($action) {
                 }
                 unset($importQuestion);
 
-                $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0];
+                $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0, 'updated' => 0];
                 foreach ($questions as $q) {
                     try {
-                        // 查重：相同题干 + 答案 + 科目 + 学段
-                        $dup = dbFetchOne($db, "SELECT id FROM questions WHERE content=? AND correct_answer=? AND subject=? AND education_level=? LIMIT 1",
-                            [$q['content'], $q['correct_answer'], $q['subject'], $q['education_level']]);
-                        if ($dup) { $stats['skipped']++; continue; }
+                        // 跳过空题干（答案文件的条目可能 content 为空）
+                        if (trim($q['content'] ?? '') === '') { $stats['skipped']++; continue; }
+                        // 查重：相同题干 + 科目 + 学段
+                        $dup = dbFetchOne($db, "SELECT id, correct_answer, explanation FROM questions WHERE content=? AND subject=? AND education_level=? LIMIT 1",
+                            [$q['content'], $q['subject'], $q['education_level']]);
+                        if ($dup) {
+                            // 如果新导入的数据有答案而旧数据没有，更新答案
+                            $needUpdate = false;
+                            $newAns = $q['correct_answer'] ?? '';
+                            $newExp = $q['explanation'] ?? '';
+                            if ($newAns !== '' && trim($dup['correct_answer'] ?? '') === '') {
+                                $needUpdate = true;
+                            }
+                            if ($newExp && trim($dup['explanation'] ?? '') === '') {
+                                $needUpdate = true;
+                            }
+                            if ($needUpdate) {
+                                $updParts = [];
+                                $updArgs = [];
+                                if ($newAns !== '' && trim($dup['correct_answer'] ?? '') === '') {
+                                    $updParts[] = 'correct_answer = ?';
+                                    $updArgs[] = $newAns;
+                                }
+                                if ($newExp && trim($dup['explanation'] ?? '') === '') {
+                                    $updParts[] = 'explanation = ?';
+                                    $updArgs[] = $newExp;
+                                }
+                                if (!empty($updParts)) {
+                                    $updArgs[] = (int)$dup['id'];
+                                    dbQuery($db, "UPDATE questions SET " . implode(', ', $updParts) . " WHERE id = ?", $updArgs);
+                                    $stats['updated']++;
+                                } else {
+                                    $stats['skipped']++;
+                                }
+                            } else {
+                                $stats['skipped']++;
+                            }
+                            continue;
+                        }
                         $optionsJson = !empty($q['options']) ? json_encode($q['options'], JSON_UNESCAPED_UNICODE) : null;
                         $isHtml = !empty($q['is_html']) ? 1 : 0;
                         dbQuery($db, "INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1283,144 +1427,13 @@ if ($action) {
                         $stats['errors']++;
                     }
                 }
-                jsonOut(true, "导入完成: 新增 {$stats['inserted']} / 跳过重复 {$stats['skipped']} / 失败 {$stats['errors']}", [
+                jsonOut(true, "导入完成: 新增 {$stats['inserted']} / 更新 {$stats['updated']} / 跳过 {$stats['skipped']} / 失败 {$stats['errors']}", [
                     'stats' => $stats,
                     'subject' => $detectedSubject,
                     'parsed_count' => count($questions)
                 ]);
                 break;
 
-            // ---------- 文档智能导入（解析阶段，不写库） ----------
-            case 'extract_document':
-                if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
-
-                // 1. 文件存在性校验
-                if (!isset($_FILES['document']) || $_FILES['document']['error'] !== UPLOAD_ERR_OK) {
-                    jsonOut(false, "未收到文件或上传失败（错误码: " . ($_FILES['document']['error'] ?? -1) . "）");
-                }
-
-                $file = $_FILES['document'];
-                $ext  = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-
-                // 2. 解析器注册表：扩展名 → 处理器
-                $parsers = getParsers();
-                if (!isset($parsers[$ext])) {
-                    jsonOut(false, "不支持的文件类型: .$ext，当前支持: " . implode('/', array_keys($parsers)));
-                }
-
-                // 3. 大小校验（60MB，覆盖扫描 PDF OCR 场景）
-                if ($file['size'] > 60 * 1024 * 1024) {
-                    jsonOut(false, "文件过大（" . round($file['size']/1024/1024, 2) . "MB），最大支持 60MB");
-                }
-
-                // 4. MIME 简单校验（防伪造扩展名）
-                $allowedMime = [
-                    'pdf'  => ['application/pdf', 'application/x-pdf'],
-                    'doc'  => ['application/msword'],
-                    'docx' => ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-                    'txt'  => ['text/plain', 'application/octet-stream'],
-                    'md'   => ['text/plain', 'text/markdown', 'application/octet-stream'],
-                ];
-                $mime = '';
-                if (function_exists('finfo_open')) {
-                    $finfo = @finfo_open(FILEINFO_MIME_TYPE);
-                    if ($finfo) {
-                        $mime = @finfo_file($finfo, $file['tmp_name']);
-                        @finfo_close($finfo);
-                    }
-                }
-                if (!$mime && function_exists('mime_content_type')) {
-                    $mime = @mime_content_type($file['tmp_name']);
-                }
-                if (!$mime) {
-                    // 终极降级：用 file 命令（系统始终可用）
-                    $cmd = sprintf('file --mime-type -b %s', escapeshellarg($file['tmp_name']));
-                    $mime = trim((string)@shell_exec($cmd));
-                }
-                if (!empty($allowedMime[$ext]) && !in_array($mime, $allowedMime[$ext], true)) {
-                    jsonOut(false, "文件内容与扩展名不匹配（检测到 MIME: $mime）");
-                }
-
-                // 5. 保存到 uploads/（自动建目录）
-                $uploadsDir = __DIR__ . '/../uploads';
-                if (!is_dir($uploadsDir)) @mkdir($uploadsDir, 0755, true);
-                $tmpFile = $uploadsDir . '/import_' . uniqid('doc_', true) . '.' . $ext;
-                if (!move_uploaded_file($file['tmp_name'], $tmpFile)) {
-                    jsonOut(false, "临时文件保存失败，请检查 uploads 目录权限");
-                }
-
-                try {
-                    $parsed = call_user_func($parsers[$ext], $tmpFile, $file['name']);
-                } catch (Exception $e) {
-                    @unlink($tmpFile);
-                    jsonOut(false, "解析异常: " . $e->getMessage());
-                }
-                @unlink($tmpFile); // 用完即删
-
-                if (empty($parsed['success'])) {
-                    jsonOut(false, $parsed['message'] ?? '解析失败');
-                }
-
-                // 6. 归一化为扁平数组（与 import_questions_json 兼容）
-                $subjectOverride = sanitizeInput($_POST['subject'] ?? '');
-                $rawEducationLevel = trim((string)($_POST['education_level'] ?? ''));
-                if ($rawEducationLevel === '') jsonOut(false, '请选择所属学段');
-                $educationLevel = validateEducationLevel($rawEducationLevel);
-                $categoryOverride = validateQuestionCategory($_POST['category'] ?? '', '');
-                $flat = normalizeExtractedQuestions(
-                    $parsed['questions'] ?? [],
-                    $subjectOverride,
-                    $file['name'],
-                    $parsed['text'] ?? ''
-                );
-                foreach ($flat as &$extractQuestion) {
-                    $extractQuestion['education_level'] = $educationLevel;
-                    $extractQuestion['category'] = $categoryOverride !== ''
-                        ? $categoryOverride
-                        : validateQuestionCategory($extractQuestion['category'] ?? ($extractQuestion['question_type'] ?? 'single'), 'single');
-                }
-                unset($extractQuestion);
-
-                // 7. 可选：save_questions=1 时自动入库（带查重）
-                $saveFlag = (bool)($_POST['save_questions'] ?? false);
-                $saveStats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0];
-                if ($saveFlag && !empty($flat)) {
-                    try {
-                        $db->exec('BEGIN');
-                        foreach ($flat as $q) {
-                            try {
-                                $dup = dbFetchOne($db, "SELECT id FROM questions WHERE content=? AND correct_answer=? AND subject=? AND education_level=? LIMIT 1",
-                                    [$q['content'] ?? '', $q['correct_answer'] ?? '', $q['subject'] ?? '', $q['education_level'] ?? 'junior']);
-                                if ($dup) { $saveStats['skipped']++; continue; }
-                                $optionsJson = !empty($q['options']) ? json_encode($q['options'], JSON_UNESCAPED_UNICODE) : null;
-                                dbQuery($db, "INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                    [$q['subject'], $q['question_type'], $q['category'] ?? $q['question_type'], $q['education_level'] ?? 'junior', $q['content'], $optionsJson, $q['correct_answer'] ?? '',
-                                     $q['explanation'] ?? null, (int)($q['difficulty'] ?? 2), (int)($q['points'] ?? 2)]);
-                                $saveStats['inserted']++;
-                            } catch (Exception $ex) {
-                                $saveStats['errors']++;
-                            }
-                        }
-                        $db->exec('COMMIT');
-                    } catch (Exception $e) {
-                        @$db->exec('ROLLBACK');
-                        $saveStats['errors']++;
-                    }
-                }
-
-                jsonOut(true, "解析完成: 共 " . count($flat) . " 道题（method=" . ($parsed['method'] ?? 'unknown') . "）", [
-                    'questions'         => $flat,
-                    'subject'           => $subjectOverride !== '' ? $subjectOverride : detectSubjectFromName($file['name'], $parsed['text'] ?? ''),
-                    'method'            => $parsed['method'] ?? '',
-                    'file_type'         => $parsed['type'] ?? $ext,
-                    'raw_text_preview'  => mb_substr($parsed['text'] ?? '', 0, 500),
-                    'raw_text_chars'    => strlen($parsed['text'] ?? ''),
-                    'save_stats'        => $saveFlag ? $saveStats : null,
-                ]);
-                break;
-
-            // =====================================================
             // ============== P1-B1：组卷（管理员） =================
             // =====================================================
 
@@ -2279,7 +2292,15 @@ jsonOut(false, "请通过API接口调用");
 //    第II卷非选择题:{题目列表:[{题号,题干,分值,小问:[{小问序号,问题,参考答案}]}]}}
 // 也支持扁平数组：[{subject, question_type, content, options, correct_answer, explanation, ...}]
 function importExtractQuestions(array $data, string $subject, array &$questions): void {
-    // 模式0：PaperCutter-VL 格式（含 question_id/question_content/question_options/question_images 等）
+    // 模式0a：PaperCutter-VL 包装格式（{match_key, paper_name, subject, education_level, questions: [...]}）
+    if (isset($data['questions']) && is_array($data['questions'])) {
+        // 从包装层提取科目
+        if ($subject === '' && !empty($data['subject'])) {
+            $subject = trim($data['subject']);
+        }
+        $data = $data['questions'];
+    }
+    // 模式0b：PaperCutter-VL 扁平格式（含 question_id/question_content/question_options/question_images 等）
     if (pcvl_isPaperCutterVL($data)) {
         $pcvlSubject = $subject !== '' ? $subject : pcvl_detectSubject($data);
         pcvlConvertPaperCutterVL($data, $pcvlSubject, $questions);
@@ -2430,143 +2451,6 @@ function importEstimateDifficulty(string $text): int {
     return 5;
 }
 
-// =====================================================
-// ============== 文档智能导入辅助函数 =================
-// =====================================================
-// 设计目标：
-//   1) 解析器注册表模式：新增格式只需在 getParsers() 注册一项
-//   2) 不直接依赖具体实现（Python / PHP 原生均可），保证可替换
-//   3) 输出格式与 import_questions_json 兼容，可无缝回填入库
-
-/**
- * 解析器注册表
- * 新增格式时只需在此注册一项：'扩展名' => '处理器函数名'
- * 每个 parser 必须返回:
- *   ['success'=>bool, 'message'=>?, 'method'=>?, 'text'=>?, 'questions'=>[], 'type'=>?]
- */
-function getParsers(): array {
-    return [
-        'pdf'   => 'parserPythonExtract',
-        'doc'   => 'parserPythonExtract',
-        'docx'  => 'parserPythonExtract',
-        'txt'   => 'parserPythonExtract',
-        'md'    => 'parserPythonExtract',
-        // 扩展示例（未启用，预留接口）：
-        // 'csv'  => 'parserCsv',
-        // 'xlsx' => 'parserXlsx',
-    ];
-}
-
-/**
- * 调用 extract.py 解析文档（兼容 PDF/DOC/DOCX/TXT/MD）
- * 依赖：Python 3 + extract.py 同目录 + (可选) pdftotext / pdf2image / pytesseract / python-docx / antiword
- */
-function parserPythonExtract(string $tmpFile, string $origName): array {
-    $pyBin = getPythonBinary();
-    if ($pyBin === null) {
-        return [
-            'success' => false,
-            'message' => '服务器未安装 Python 或不可调用（python/python3 均失败）。请联系运维安装 Python 3，或继续使用 JSON 导入。',
-        ];
-    }
-    $script = __DIR__ . '/../extract.py';
-    if (!file_exists($script)) {
-        return ['success' => false, 'message' => 'extract.py 脚本缺失'];
-    }
-
-    // 命令三段全部 escapeshellarg 包裹，防止注入
-    $cmd = escapeshellarg($pyBin) . ' ' . escapeshellarg($script)
-         . ' ' . escapeshellarg($tmpFile) . ' --parse 2>&1';
-
-    // 临时抬高执行时间，避免 OCR 大文件超时
-    // 9 页扫描 PDF @150dpi 用 RapidOCR(fitz) 实测 ~70s，留安全余量到 600s
-    $origLimit = @ini_get('max_execution_time');
-    @set_time_limit(600);
-
-    $output = shell_exec($cmd);
-
-    if ($origLimit) @set_time_limit((int)$origLimit);
-
-    if ($output === null || $output === '') {
-        return ['success' => false, 'message' => '调用 extract.py 无输出（可能 shell_exec 被 php.ini disable_functions 禁用）'];
-    }
-    $data = json_decode($output, true);
-    if (!is_array($data)) {
-        return ['success' => false, 'message' => 'extract.py 输出非 JSON: ' . mb_substr($output, 0, 200)];
-    }
-    return $data;
-}
-
-/**
- * 探测可用 Python 二进制
- * 优先级：环境变量 PYTHON_BIN > python > python3
- * 结果在单次请求内缓存
- */
-function getPythonBinary(): ?string {
-    static $cached = null;
-    if ($cached !== null) return $cached === '' ? null : $cached;
-
-    $env = getenv('PYTHON_BIN');
-    if ($env && isPythonBinaryReady($env)) {
-        $cached = $env;
-        return $cached;
-    }
-    foreach (['python', 'python3'] as $c) {
-        if (isPythonBinaryReady($c)) {
-            $cached = $c;
-            return $cached;
-        }
-    }
-    $cached = '';
-    return null;
-}
-
-function isPythonBinaryReady(string $bin): bool {
-    $test = @shell_exec(escapeshellarg($bin) . ' --version 2>&1');
-    return $test !== null && stripos($test, 'Python') !== false;
-}
-
-/**
- * 归一化 extract.py 输出为扁平数组（与 import_questions_json 兼容）
- * 缺省字段按 importNormalizeFlat() 的同款规则补齐
- */
-function normalizeExtractedQuestions(array $questions, string $subjectOverride, string $fileName, string $rawText): array {
-    $subject = $subjectOverride !== '' ? $subjectOverride : detectSubjectFromName($fileName, $rawText);
-    $flat = [];
-    foreach ($questions as $q) {
-        $content = $q['content'] ?? '';
-        if (trim($content) === '') continue;
-        $flat[] = [
-            'subject'        => $subject,
-            'question_type'  => $q['question_type'] ?? 'single',
-            'category'       => $q['category'] ?? ($q['question_type'] ?? 'single'),
-            'education_level'=> $q['education_level'] ?? 'junior',
-            'content'        => $content,
-            'options'        => $q['options'] ?? null,
-            'correct_answer' => $q['correct_answer'] ?? '',
-            'explanation'    => null,
-            'difficulty'     => $q['difficulty'] ?? importEstimateDifficulty($content),
-            'points'         => (float)($q['points'] ?? 2.0),
-        ];
-    }
-    return $flat;
-}
-
-/**
- * 从文件名 + 文本片段识别科目（与 import_questions_json 共用同一份 subjectMap）
- */
-function detectSubjectFromName(string $fileName, string $rawText = ''): string {
-    $subjectMap = [
-        '生物' => '生物', '化学' => '化学', '物理' => '物理', '数学' => '数学',
-        '英语' => '英语', '语文' => '语文', '历史' => '历史', '地理' => '地理',
-        '政治' => '政治', '信息技术' => '信息技术', '计算机' => '信息技术',
-    ];
-    $haystack = $fileName . ' ' . mb_substr($rawText, 0, 500);
-    foreach ($subjectMap as $k => $v) {
-        if (str_contains($haystack, $k)) return $v;
-    }
-    return '综合';
-}
 
 // =====================================================
 // ======== P1-B 模块：公共帮助函数 ====================
