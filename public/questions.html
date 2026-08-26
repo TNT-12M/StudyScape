@@ -1708,12 +1708,11 @@ function onAnswerFilePicked(event) {
             toast('答案文件已加载: ' + file.name + '（' + Object.keys(answerFileData).length + ' 条答案）', 'info');
             // 尝试合并到题库文本框
             const jsonStr = document.getElementById('import-json').value.trim();
-            if (!jsonStr) {
-                // 题库文本框为空，把答案文件 JSON 放入文本框，让后端按题号匹配
-                document.getElementById('import-json').value = raw;
-                setAlert('import-alert', '📋 答案文件已加载（' + Object.keys(answerFileData).length + ' 条答案）。点击「开始导入」后，系统将按题号自动匹配已导入的题目并回填答案。', 'info');
-            } else {
+            if (jsonStr) {
                 mergeAnswerIntoQuestions();
+            } else {
+                // 题库文本框为空，等待题库文件上传后自动合并
+                setAlert('import-alert', '📋 答案文件已加载（' + Object.keys(answerFileData).length + ' 条答案）。请上传题库文件后点击「开始导入」，系统将自动合并答案。', 'info');
             }
         } catch (err) {
             toast('答案文件解析失败: ' + err.message, 'error');
@@ -1766,7 +1765,8 @@ async function doImport() {
         return;
     }
     // 本地预校验
-    try { JSON.parse(jsonStr); } catch (e) {
+    let parsed;
+    try { parsed = JSON.parse(jsonStr); } catch (e) {
         setAlert('import-alert', 'JSON 格式错误: ' + e.message, 'danger');
         return;
     }
@@ -1775,9 +1775,30 @@ async function doImport() {
         setAlert('import-alert', '请选择所属学段', 'danger');
         return;
     }
+
+    // 强制合并答案（安全措施，确保无论顺序如何都能合并）
+    if (answerFileData && Object.keys(answerFileData).length > 0) {
+        // 检查是否还未合并（题目中缺少 answer 字段）
+        let qs = Array.isArray(parsed) ? parsed : (parsed.questions || []);
+        let needsMerge = false;
+        for (const q of qs) {
+            const qid = q.question_id || q.questionId || q.id;
+            if (qid != null && answerFileData[qid] && !q.answer) {
+                needsMerge = true;
+                break;
+            }
+        }
+        if (needsMerge) {
+            mergeAnswerIntoQuestions();
+            // 重新读取合并后的 JSON
+            const mergedStr = document.getElementById('import-json').value.trim();
+            try { parsed = JSON.parse(mergedStr); } catch (e) {}
+        }
+    }
+
     setAlert('import-alert', '⏳ 正在导入...', 'info');
     const ret = await api('import_questions_json', {
-        json_data: jsonStr,
+        json_data: JSON.stringify(parsed),
         education_level,
         category: document.getElementById('import-category').value,
         subject: document.getElementById('import-subject').value.trim()

@@ -2386,7 +2386,7 @@ function importNormalizeFlat(array $q, string $subject): array {
         foreach ($options as $k => $v) { $arr[] = strtoupper($k) . '. ' . $v; }
         $options = $arr;
     }
-    $answer = $q['correct_answer'] ?? ($q['答案'] ?? ($q['参考答案'] ?? ''));
+    $answer = $q['correct_answer'] ?? ($q['answer'] ?? ($q['答案'] ?? ($q['参考答案'] ?? '')));
     if (is_array($options) && is_string($answer) && strlen($answer) > 0) {
         $letter = strtoupper(trim($answer));
         // 若只填了字母，扩展为 "A. 选项内容"
@@ -2404,7 +2404,7 @@ function importNormalizeFlat(array $q, string $subject): array {
         'content'        => $q['content'] ?? ($q['题干'] ?? ''),
         'options'        => $options,
         'correct_answer' => $answer,
-        'explanation'    => $q['explanation'] ?? ($q['解析'] ?? null),
+        'explanation'    => $q['explanation'] ?? ($q['resolve'] ?? ($q['解析'] ?? null)),
         'difficulty'     => importEstimateDifficulty($q['content'] ?? ($q['题干'] ?? '')),
         'points'         => (float)($q['points'] ?? 1.0)
     ];
@@ -2754,9 +2754,9 @@ function pcvlConvertPaperCutterVL(array $data, string $subject, array &$question
             elseif ($cnt >= 4) $typeKey = 'single';
         }
 
-        // 答案处理（PaperCutter-VL 通常 answer 字段为空，这里尽力而为）
-        $answerText = $q['answer'] ?? '';
-        $explanation = $q['resolve'] ?? '';
+        // 答案处理（优先使用 answer 字段，兼容 correct_answer 字段）
+        $answerText = $q['answer'] ?? ($q['correct_answer'] ?? '');
+        $explanation = $q['resolve'] ?? ($q['explanation'] ?? '');
 
         // 题干富化：把 question_images、analysis_images 里的 base64 补到 HTML 中
         $content = $q['question_content'] ?? '';
