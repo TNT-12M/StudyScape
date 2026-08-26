@@ -1393,13 +1393,14 @@ if ($action) {
                         $isAnswerOnly = trim($q['content'] ?? '') === '' || ($pcvlQid > 0 && mb_strlen(trim($q['content'] ?? '')) <= 30 && $hasAnswer);
                         if ($isAnswerOnly) {
                             if ($hasAnswer && $pcvlQid > 0) {
-                                // 按科目+学段找到第 N 道无答案的题目（按 id 排序）
+                                // 每次匹配下一道无答案的题目（OFFSET 0）
+                                // 因为匹配后该题不再"无答案"，所以下次自动取到下一道
                                 $match = dbFetchOne($db,
                                     "SELECT id, correct_answer, explanation FROM questions
                                      WHERE subject=? AND education_level=?
                                      AND (correct_answer IS NULL OR trim(correct_answer)='')
-                                     ORDER BY id ASC LIMIT 1 OFFSET ?",
-                                    [$q['subject'], $q['education_level'], $pcvlQid - 1]);
+                                     ORDER BY id ASC LIMIT 1",
+                                    [$q['subject'], $q['education_level']]);
                                 if ($match) {
                                     $updParts = []; $updArgs = [];
                                     if ($newAns !== '' && trim($match['correct_answer'] ?? '') === '') {
