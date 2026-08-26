@@ -1706,8 +1706,15 @@ function onAnswerFilePicked(event) {
                 }
             });
             toast('答案文件已加载: ' + file.name + '（' + Object.keys(answerFileData).length + ' 条答案）', 'info');
-            // 如果题库文件已加载，立即合并
-            mergeAnswerIntoQuestions();
+            // 尝试合并到题库文本框
+            const jsonStr = document.getElementById('import-json').value.trim();
+            if (!jsonStr) {
+                // 题库文本框为空，把答案文件 JSON 放入文本框，让后端按题号匹配
+                document.getElementById('import-json').value = raw;
+                setAlert('import-alert', '📋 答案文件已加载（' + Object.keys(answerFileData).length + ' 条答案）。点击「开始导入」后，系统将按题号自动匹配已导入的题目并回填答案。', 'info');
+            } else {
+                mergeAnswerIntoQuestions();
+            }
         } catch (err) {
             toast('答案文件解析失败: ' + err.message, 'error');
             answerFileData = null;
@@ -1722,7 +1729,11 @@ function onAnswerFilePicked(event) {
 function mergeAnswerIntoQuestions() {
     if (!answerFileData || Object.keys(answerFileData).length === 0) return;
     const jsonStr = document.getElementById('import-json').value.trim();
-    if (!jsonStr) return;
+    if (!jsonStr) {
+        // 题库文本框为空，无法合并。提示用户先导入题库文件，答案将单独按题号匹配
+        setAlert('import-alert', '⚠️ 答案文件已加载，但题库文本框为空。请先上传题库文件并导入，然后再上传答案文件。系统会按题号自动匹配已有题目并回填答案。', 'warning');
+        return;
+    }
     try {
         const data = JSON.parse(jsonStr);
         let qs = Array.isArray(data) ? data : (data.questions || []);

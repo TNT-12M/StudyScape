@@ -1355,13 +1355,18 @@ if ($action) {
                     '生物' => '生物', '化学' => '化学', '物理' => '物理',
                     '数学' => '数学', '英语' => '英语', '语文' => '语文',
                     '历史' => '历史', '地理' => '地理', '政治' => '政治',
-                    '信息技术' => '信息技术', '计算机' => '信息技术'
+                    '信息技术' => '信息技术', '计算机' => '信息技术',
+                    '道德与法治' => '道德与法治', '道法' => '道德与法治'
                 ];
                 $detectedSubject = $subjectOverride;
                 if ($detectedSubject === '') {
-                    $title = $data['试卷名称'] ?? $data['title'] ?? '';
+                    $title = $data['试卷名称'] ?? $data['title'] ?? $data['paper_name'] ?? $data['match_key'] ?? '';
                     foreach ($subjectMap as $k => $v) {
                         if (str_contains($title, $k)) { $detectedSubject = $v; break; }
+                    }
+                    // 也从 questions 数组的 subject 字段检测
+                    if ($detectedSubject === '' && isset($data['subject'])) {
+                        $detectedSubject = trim($data['subject']);
                     }
                     if ($detectedSubject === '') $detectedSubject = '综合';
                 }
@@ -1379,8 +1384,45 @@ if ($action) {
                 $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0, 'updated' => 0];
                 foreach ($questions as $q) {
                     try {
-                        // 跳过空题干（答案文件的条目可能 content 为空）
-                        if (trim($q['content'] ?? '') === '') { $stats['skipped']++; continue; }
+                        $pcvlQid = (int)($q['_pcvl_qid'] ?? 0);
+                        $newAns = $q['correct_answer'] ?? '';
+                        $newExp = $q['explanation'] ?? '';
+                        $hasAnswer = ($newAns !== '' || $newExp);
+
+                        // PaperCutter-VL 答案文件导入：题目内容为空或仅含简短标签 → 按原始题号位置匹配已有题目
+                        $isAnswerOnly = trim($q['content'] ?? '') === '' || ($pcvlQid > 0 && mb_strlen(trim($q['content'] ?? '')) <= 30 && $hasAnswer);
+                        if ($isAnswerOnly) {
+                            if ($hasAnswer && $pcvlQid > 0) {
+                                // 按科目+学段找到第 N 道无答案的题目（按 id 排序）
+                                $match = dbFetchOne($db,
+                                    "SELECT id, correct_answer, explanation FROM questions
+                                     WHERE subject=? AND education_level=?
+                                     AND (correct_answer IS NULL OR trim(correct_answer)='')
+                                     ORDER BY id ASC LIMIT 1 OFFSET ?",
+                                    [$q['subject'], $q['education_level'], $pcvlQid - 1]);
+                                if ($match) {
+                                    $updParts = []; $updArgs = [];
+                                    if ($newAns !== '' && trim($match['correct_answer'] ?? '') === '') {
+                                        $updParts[] = 'correct_answer = ?'; $updArgs[] = $newAns;
+                                    }
+                                    if ($newExp && trim($match['explanation'] ?? '') === '') {
+                                        $updParts[] = 'explanation = ?'; $updArgs[] = $newExp;
+                                    }
+                                    if (!empty($updParts)) {
+                                        $updArgs[] = (int)$match['id'];
+                                        dbQuery($db, "UPDATE questions SET " . implode(', ', $updParts) . " WHERE id = ?", $updArgs);
+                                        $stats['updated']++;
+                                    } else {
+                                        $stats['skipped']++;
+                                    }
+                                } else {
+                                    $stats['skipped']++;
+                                }
+                            } else {
+                                $stats['skipped']++;
+                            }
+                            continue;
+                        }
                         // 查重：相同题干 + 科目 + 学段
                         $dup = dbFetchOne($db, "SELECT id, correct_answer, explanation FROM questions WHERE content=? AND subject=? AND education_level=? LIMIT 1",
                             [$q['content'], $q['subject'], $q['education_level']]);
@@ -2294,8 +2336,8 @@ jsonOut(false, "请通过API接口调用");
 function importExtractQuestions(array $data, string $subject, array &$questions): void {
     // 模式0a：PaperCutter-VL 包装格式（{match_key, paper_name, subject, education_level, questions: [...]}）
     if (isset($data['questions']) && is_array($data['questions'])) {
-        // 从包装层提取科目
-        if ($subject === '' && !empty($data['subject'])) {
+        // 从包装层提取科目（覆盖"综合"默认值）
+        if (!empty($data['subject']) && ($subject === '' || $subject === '综合')) {
             $subject = trim($data['subject']);
         }
         $data = $data['questions'];
@@ -2795,6 +2837,7 @@ function pcvlConvertPaperCutterVL(array $data, string $subject, array &$question
             'difficulty'     => $diff,
             'points'         => $points,
             'is_html'        => $isHtml ? 1 : 0,
+            '_pcvl_qid'      => $q['question_id'] ?? 0,  // 保留原始题号用于答案匹配
         ];
     }
 }
