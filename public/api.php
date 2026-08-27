@@ -402,6 +402,29 @@ function validateQuestionCategory($value, string $default = 'single'): string {
     return $value;
 }
 
+/**
+ * 统一科目名称，防止同义科目因名称不同而分裂
+ * 例：道法 → 道德与法治，政治 → 政治（不合并，保留独立科目）
+ */
+function normalizeSubject(string $subject): string {
+    $subject = trim($subject);
+    if ($subject === '') return $subject;
+    // 别名 → 标准名
+    $aliases = [
+        '道法' => '道德与法治',
+        '思想政治' => '道德与法治',
+        '思想品德' => '道德与法治',
+        '政史' => '道德与法治',  // 粗略处理，实际应该拆分
+        '信息' => '信息技术',
+        '计算机' => '信息技术',
+        '英语（本）' => '英语',
+        '语文（本）' => '语文',
+        '数学（本）' => '数学',
+    ];
+    if (isset($aliases[$subject])) return $aliases[$subject];
+    return $subject;
+}
+
 function validateEmail($email) {
     return filter_var($email, FILTER_VALIDATE_EMAIL);
 }
@@ -1160,7 +1183,7 @@ if ($action) {
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
                 requireAdmin();
 
-                $subject     = sanitizeInput($_POST['subject'] ?? '');
+                $subject     = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 $qtype       = sanitizeInput($_POST['question_type'] ?? '');
                 $content     = sanitizeInput($_POST['content'] ?? '');
                 $optionsRaw  = $_POST['options'] ?? '[]';
@@ -1219,7 +1242,7 @@ if ($action) {
                 $existing = dbFetchOne($db, "SELECT id FROM questions WHERE id=?", [$qid]);
                 if (!$existing) jsonOut(false, "题目不存在");
 
-                $subject     = sanitizeInput($_POST['subject'] ?? '');
+                $subject     = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 $qtype       = sanitizeInput($_POST['question_type'] ?? '');
                 $content     = sanitizeInput($_POST['content'] ?? '');
                 $optionsRaw  = $_POST['options'] ?? '[]';
@@ -1344,7 +1367,7 @@ if ($action) {
                 $data = json_decode($rawJson, true);
                 if (!is_array($data)) jsonOut(false, "JSON解析失败: " . json_last_error_msg());
 
-                $subjectOverride = sanitizeInput($_POST['subject'] ?? '');
+                $subjectOverride = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 $rawEducationLevel = trim((string)($_POST['education_level'] ?? ''));
                 if ($rawEducationLevel === '') jsonOut(false, '请选择所属学段');
                 $educationLevel = validateEducationLevel($rawEducationLevel);
@@ -2397,7 +2420,7 @@ function importNormalizeFlat(array $q, string $subject): array {
         }
     }
     return [
-        'subject'        => $q['subject'] ?? $subject,
+        'subject'        => normalizeSubject($q['subject'] ?? $subject),
         'question_type'  => $type,
         'category'       => $q['category'] ?? $type,
         'education_level'=> $q['education_level'] ?? 'junior',
@@ -2827,7 +2850,7 @@ function pcvlConvertPaperCutterVL(array $data, string $subject, array &$question
         }
 
         $questions[] = [
-            'subject'        => $subject,
+            'subject'        => normalizeSubject($subject),
             'question_type'  => $typeKey,
             'category'       => $typeKey,
             'education_level'=> '',   // 由外层按当前选择的学段覆盖
