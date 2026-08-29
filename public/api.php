@@ -1423,13 +1423,15 @@ if ($action) {
                 $questions = [];
                 importExtractQuestions($data, $detectedSubject, $questions);
 
-                // OCR 流水线适配：提取 match_key，用于题目-答案精准匹配
-                $matchKey = '';
+                // OCR 流水线适配：提取 match_key 并归一化，用于题目-答案精准匹配
+                // 归一化：去掉"答案/试卷/真题/原卷完整版"等后缀，使题目和答案文件的 match_key 一致
+                $rawMatchKey = '';
                 if (!empty($data['match_key'])) {
-                    $matchKey = trim((string)$data['match_key']);
+                    $rawMatchKey = trim((string)$data['match_key']);
                 } elseif (!empty($data['paper_name'])) {
-                    $matchKey = trim((string)$data['paper_name']);
+                    $rawMatchKey = trim((string)$data['paper_name']);
                 }
+                $matchKey = generateMatchKey($rawMatchKey !== '' ? $rawMatchKey : 'import_' . count($questions), $rawMatchKey);
 
                 foreach ($questions as &$importQuestion) {
                     $importQuestion['education_level'] = $educationLevel;
@@ -1440,7 +1442,7 @@ if ($action) {
                 }
                 unset($importQuestion);
 
-                $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0, 'updated' => 0, 'answer_matched' => 0];
+                $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0, 'updated' => 0, 'answer_matched' => 0, 'skip_no_match' => 0, 'skip_dup' => 0];
                 foreach ($questions as $q) {
                     try {
                         $pcvlQid = (string)($q['_pcvl_qid'] ?? '');
@@ -1461,7 +1463,15 @@ if ($action) {
                                          WHERE match_key=? AND source_qid=? LIMIT 1",
                                         [$qMatchKey, (string)$pcvlQid]);
                                 }
-                                // 兜底：没有 match_key 时，按顺序匹配同科目同学段无答案的题（兼容旧逻辑）
+                                // 兜底1：用 source_qid 跨 match_key 匹配（同科目同学段同题号）
+                                if (!$match && $pcvlQid !== '') {
+                                    $match = dbFetchOne($db,
+                                        "SELECT id, correct_answer, explanation, match_key FROM questions
+                                         WHERE subject=? AND education_level=? AND source_qid=?
+                                         LIMIT 1",
+                                        [$q['subject'], $q['education_level'], (string)$pcvlQid]);
+                                }
+                                // 兜底2：按顺序匹配同科目同学段无答案的题（兼容旧逻辑）
                                 if (!$match) {
                                     $match = dbFetchOne($db,
                                         "SELECT id, correct_answer, explanation FROM questions
@@ -1485,12 +1495,15 @@ if ($action) {
                                         $stats['answer_matched']++;
                                     } else {
                                         $stats['skipped']++;
+                                        $stats['skip_dup']++;
                                     }
                                 } else {
                                     $stats['skipped']++;
+                                    $stats['skip_no_match']++;
                                 }
                             } else {
                                 $stats['skipped']++;
+                                $stats['skip_no_match']++;
                             }
                             continue;
                         }
@@ -1542,10 +1555,19 @@ if ($action) {
                         $stats['errors']++;
                     }
                 }
-                jsonOut(true, "导入完成: 新增 {$stats['inserted']} / 更新 {$stats['updated']} / 跳过 {$stats['skipped']} / 失败 {$stats['errors']}", [
+                $skipDetail = '';
+                if (!empty($stats['skip_no_match']) && $stats['skip_no_match'] > 0) {
+                    $skipDetail .= "（{$stats['skip_no_match']}条答案未匹配到题目，请先导入题目文件）";
+                }
+                if (!empty($stats['skip_dup']) && $stats['skip_dup'] > 0) {
+                    $skipDetail .= "（{$stats['skip_dup']}条已有答案，重复跳过）";
+                }
+                $msg = "导入完成: 新增 {$stats['inserted']} / 更新 {$stats['updated']} / 跳过 {$stats['skipped']} / 失败 {$stats['errors']}{$skipDetail}";
+                jsonOut(true, $msg, [
                     'stats' => $stats,
                     'subject' => $detectedSubject,
-                    'parsed_count' => count($questions)
+                    'parsed_count' => count($questions),
+                    'match_key' => $matchKey
                 ]);
                 break;
 
