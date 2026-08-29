@@ -197,6 +197,13 @@ try {
         // 富 HTML 题干（含 base64 图片/表格等 PaperCutter-VL 输出）：1=是，0=否
         $db->exec("ALTER TABLE questions ADD COLUMN is_html INTEGER NOT NULL DEFAULT 0");
     }
+    // OCR 流水线对接：匹配码 + 原始题号（用于题目-答案精准匹配）
+    if (!tableHasColumn($db, 'questions', 'match_key')) {
+        $db->exec("ALTER TABLE questions ADD COLUMN match_key TEXT NOT NULL DEFAULT ''");
+    }
+    if (!tableHasColumn($db, 'questions', 'source_qid')) {
+        $db->exec("ALTER TABLE questions ADD COLUMN source_qid TEXT NOT NULL DEFAULT ''");
+    }
     if (!tableHasColumn($db, 'materials', 'education_level')) {
         $db->exec("ALTER TABLE materials ADD COLUMN education_level TEXT NOT NULL DEFAULT 'junior'");
     }
@@ -218,6 +225,8 @@ try {
     $db->exec("UPDATE materials SET education_level='junior' WHERE education_level IS NULL OR education_level='' OR education_level NOT IN ('junior','senior')");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_education_level ON questions(education_level)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_level_subject ON questions(education_level, subject)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_match_key ON questions(match_key)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_source_qid ON questions(source_qid)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_materials_education_level ON materials(education_level)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_materials_level_subject ON materials(education_level, subject)");
 } catch (Exception $e) {
@@ -1369,7 +1378,24 @@ if ($action) {
 
                 $subjectOverride = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 $rawEducationLevel = trim((string)($_POST['education_level'] ?? ''));
-                if ($rawEducationLevel === '') jsonOut(false, '请选择所属学段');
+                // OCR 流水线适配：优先用 JSON 中的 education_level，其次用用户选择
+                if ($rawEducationLevel === '') {
+                    if (!empty($data['education_level'])) {
+                        $rawEducationLevel = trim((string)$data['education_level']);
+                    }
+                }
+                if ($rawEducationLevel === '') {
+                    // 从 questions 数组里检测
+                    if (isset($data['questions']) && is_array($data['questions'])) {
+                        foreach ($data['questions'] as $q) {
+                            if (!empty($q['education_level'])) {
+                                $rawEducationLevel = trim((string)$q['education_level']);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if ($rawEducationLevel === '') $rawEducationLevel = 'junior';
                 $educationLevel = validateEducationLevel($rawEducationLevel);
                 $categoryOverride = validateQuestionCategory($_POST['category'] ?? '', '');
 
@@ -1396,34 +1422,54 @@ if ($action) {
 
                 $questions = [];
                 importExtractQuestions($data, $detectedSubject, $questions);
+
+                // OCR 流水线适配：提取 match_key，用于题目-答案精准匹配
+                $matchKey = '';
+                if (!empty($data['match_key'])) {
+                    $matchKey = trim((string)$data['match_key']);
+                } elseif (!empty($data['paper_name'])) {
+                    $matchKey = trim((string)$data['paper_name']);
+                }
+
                 foreach ($questions as &$importQuestion) {
                     $importQuestion['education_level'] = $educationLevel;
+                    $importQuestion['match_key'] = $matchKey;
                     $importQuestion['category'] = $categoryOverride !== ''
                         ? $categoryOverride
                         : validateQuestionCategory($importQuestion['category'] ?? ($importQuestion['question_type'] ?? 'single'), 'single');
                 }
                 unset($importQuestion);
 
-                $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0, 'updated' => 0];
+                $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0, 'updated' => 0, 'answer_matched' => 0];
                 foreach ($questions as $q) {
                     try {
-                        $pcvlQid = (int)($q['_pcvl_qid'] ?? 0);
+                        $pcvlQid = (string)($q['_pcvl_qid'] ?? '');
                         $newAns = $q['correct_answer'] ?? '';
                         $newExp = $q['explanation'] ?? '';
                         $hasAnswer = ($newAns !== '' || $newExp);
+                        $qMatchKey = $q['match_key'] ?? '';
 
-                        // PaperCutter-VL 答案文件导入：题目内容为空或仅含简短标签 → 按原始题号位置匹配已有题目
-                        $isAnswerOnly = trim($q['content'] ?? '') === '' || ($pcvlQid > 0 && mb_strlen(trim($q['content'] ?? '')) <= 30 && $hasAnswer);
+                        // OCR 流水线适配：答案文件按 match_key + source_qid 精准匹配已有题目
+                        $isAnswerOnly = trim($q['content'] ?? '') === '' || ($pcvlQid !== '' && mb_strlen(trim($q['content'] ?? '')) <= 30 && $hasAnswer);
                         if ($isAnswerOnly) {
-                            if ($hasAnswer && $pcvlQid > 0) {
-                                // 每次匹配下一道无答案的题目（OFFSET 0）
-                                // 因为匹配后该题不再"无答案"，所以下次自动取到下一道
-                                $match = dbFetchOne($db,
-                                    "SELECT id, correct_answer, explanation FROM questions
-                                     WHERE subject=? AND education_level=?
-                                     AND (correct_answer IS NULL OR trim(correct_answer)='')
-                                     ORDER BY id ASC LIMIT 1",
-                                    [$q['subject'], $q['education_level']]);
+                            if ($hasAnswer && $pcvlQid !== '') {
+                                // 优先用 match_key + source_qid 精准匹配（OCR 流水线新方案）
+                                $match = null;
+                                if ($qMatchKey !== '') {
+                                    $match = dbFetchOne($db,
+                                        "SELECT id, correct_answer, explanation FROM questions
+                                         WHERE match_key=? AND source_qid=? LIMIT 1",
+                                        [$qMatchKey, (string)$pcvlQid]);
+                                }
+                                // 兜底：没有 match_key 时，按顺序匹配同科目同学段无答案的题（兼容旧逻辑）
+                                if (!$match) {
+                                    $match = dbFetchOne($db,
+                                        "SELECT id, correct_answer, explanation FROM questions
+                                         WHERE subject=? AND education_level=?
+                                         AND (correct_answer IS NULL OR trim(correct_answer)='')
+                                         ORDER BY id ASC LIMIT 1",
+                                        [$q['subject'], $q['education_level']]);
+                                }
                                 if ($match) {
                                     $updParts = []; $updArgs = [];
                                     if ($newAns !== '' && trim($match['correct_answer'] ?? '') === '') {
@@ -1436,6 +1482,7 @@ if ($action) {
                                         $updArgs[] = (int)$match['id'];
                                         dbQuery($db, "UPDATE questions SET " . implode(', ', $updParts) . " WHERE id = ?", $updArgs);
                                         $stats['updated']++;
+                                        $stats['answer_matched']++;
                                     } else {
                                         $stats['skipped']++;
                                     }
@@ -1486,8 +1533,10 @@ if ($action) {
                         }
                         $optionsJson = !empty($q['options']) ? json_encode($q['options'], JSON_UNESCAPED_UNICODE) : null;
                         $isHtml = !empty($q['is_html']) ? 1 : 0;
-                        dbQuery($db, "INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            [$q['subject'], $q['question_type'], $q['category'], $q['education_level'], $q['content'], $optionsJson, $q['correct_answer'], $q['explanation'] ?? null, $q['difficulty'], $q['points'], $isHtml]);
+                        $sourceQid = (string)($q['_pcvl_qid'] ?? '');
+                        $qMk = $q['match_key'] ?? '';
+                        dbQuery($db, "INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html, match_key, source_qid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            [$q['subject'], $q['question_type'], $q['category'], $q['education_level'], $q['content'], $optionsJson, $q['correct_answer'], $q['explanation'] ?? null, $q['difficulty'], $q['points'], $isHtml, $qMk, $sourceQid]);
                         $stats['inserted']++;
                     } catch (Exception $ex) {
                         $stats['errors']++;

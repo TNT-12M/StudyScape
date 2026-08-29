@@ -759,9 +759,9 @@
                 <strong>支持同时导入题库文件 + 答案文件：</strong>先选题库文件，再选答案文件，系统会按题号自动合并答案。
             </div>
             <div class="form-group">
-                <label>所属学段 *</label>
-                <select class="form-control" id="import-level"><option value="">请选择学段</option><option value="junior">初中</option><option value="senior">高中</option></select>
-            </div>
+                    <label>所属学段 <small style="color:var(--text-light);">（JSON 中有则自动识别）</small></label>
+                    <select class="form-control" id="import-level"><option value="">自动识别 / 初中(默认)</option><option value="junior">初中</option><option value="senior">高中</option></select>
+                </div>
             <div class="form-group">
                 <label>分类覆盖</label>
                 <select class="form-control" id="import-category"><option value="">按题型</option><option value="single">单选题</option><option value="multiple">多选题</option><option value="judge">判断题</option><option value="fill">填空题</option><option value="multi_fill">多空填空题</option><option value="short">简答题</option></select>
@@ -1771,10 +1771,7 @@ async function doImport() {
         return;
     }
     const education_level = document.getElementById('import-level').value;
-    if (!education_level) {
-        setAlert('import-alert', '请选择所属学段', 'danger');
-        return;
-    }
+    // 学段改为可选：JSON 中有 education_level 则自动识别，否则后端默认 junior
 
     // 强制合并答案（安全措施，确保无论顺序如何都能合并）
     if (answerFileData && Object.keys(answerFileData).length > 0) {

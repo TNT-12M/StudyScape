@@ -7,16 +7,43 @@ exam.db-shm
 *.sqlite3
 *.db
 
-# ===== 临时/运行时文件 =====
+# ===== 运行时数据 =====
+data/logs/
+data/*.json
+data/*.txt
+
+# ===== 会话/缓存 =====
+tmp_sessions/
 *.log
 *.tmp
 *.bak
 *.swp
 .DS_Store
 Thumbs.db
-data/logs/
+
+# ===== 上传的资料文件 =====
 materials/mat_*
+
+# ===== 本地开发配置 =====
+php.ini
+*.ini.local
+.env
+.env.local
+
+# ===== 临时/补丁脚本（开发期一次性脚本，不入库）=====
+patch_*.php
+fix_*.php
+check_*.php
+import_questions.php
+*_patch.php
+*_test.php
+
+# ===== 测试数据 =====
 test/
+*.test.json
+*真题*.json
+*答案*.json
+*试卷*.json
 
 # ===== 密码/密钥类临时脚本 =====
 *password*.php
@@ -31,4 +58,3 @@ public/.user.ini
 update.tar.gz
 
 .ssh_temp/
-
