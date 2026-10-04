@@ -1587,8 +1587,8 @@ if ($action) {
             case 'notification_unread_count':
                 if (!isLoggedIn()) jsonOut(false, '请先登录');
                 $uid = (int)getUid();
-                // 未读数 = 个人未读通知 + 未读的已发布公告
-                $personalUnread = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM notifications WHERE user_id=? AND read_at IS NULL', [$uid])['c'] ?? 0);
+                // 未读数 = 个人未读通知（排除旧的公告通知） + 未读的已发布公告
+                $personalUnread = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM notifications WHERE user_id=? AND read_at IS NULL AND type <> ?', [$uid, 'announcement'])['c'] ?? 0);
                 $announcementUnread = (int)(dbFetchOne($db, "
                     SELECT COUNT(*) AS c FROM announcements a
                     WHERE a.is_published = 1
@@ -1604,12 +1604,14 @@ if ($action) {
                 $size = max(1, min(50, (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 20)));
 
                 // 合并个人通知和公告，用 UNION ALL + 外层排序分页
+                // 注意：排除 notifications 里 type='announcement' 的旧数据
+                // 公告统一从 announcements 表动态读取，避免重复显示
                 $items = dbFetchAll($db, "
                     SELECT id, type, title, body, related_id, read_at, created_at
                     FROM (
                         SELECT id, type, title, body, related_id, read_at, created_at
                         FROM notifications
-                        WHERE user_id = ?
+                        WHERE user_id = ? AND type <> 'announcement'
 
                         UNION ALL
 
@@ -1655,8 +1657,8 @@ if ($action) {
                         dbQuery($db, 'INSERT OR IGNORE INTO announcement_reads(user_id, announcement_id, read_at) VALUES(?, ?, CURRENT_TIMESTAMP)', [$uid, $announcementId]);
                     }
                 } else {
-                    // 全部已读：个人通知 + 所有已发布公告
-                    dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL', [$uid]);
+                    // 全部已读：个人通知（排除旧公告通知） + 所有已发布公告
+                    dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL AND type <> ?', [$uid, 'announcement']);
                     dbQuery($db, "
                         INSERT OR IGNORE INTO announcement_reads(user_id, announcement_id, read_at)
                         SELECT ?, id, CURRENT_TIMESTAMP FROM announcements WHERE is_published = 1
