@@ -68,6 +68,25 @@ def _as_dict(value):
     return {}
 
 
+def _as_list(value, key=None):
+    """安全地获取 list：从 dict[key] 取值，确保返回 list。非 list / 非 dict 都返回空列表。"""
+    if value is None:
+        return []
+    if key is not None:
+        if isinstance(value, dict):
+            value = value.get(key)
+        else:
+            return []
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    # 单个 dict 包一层
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
 def parse_data(response):
     raw = response.to_map()
     body = raw.get("body", {}) if isinstance(raw, dict) else {}
@@ -76,10 +95,38 @@ def parse_data(response):
     data = body.get("Data")
     if not data:
         raise RuntimeError("Alibaba OCR response did not contain Data")
-    result = _as_dict(data)
-    if not result:
-        raise RuntimeError("Alibaba OCR Data 格式异常，无法解析为题目结构")
-    return result
+
+    # Data 可能是 JSON 字符串，也可能已经是 dict/list
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise RuntimeError(f"Alibaba OCR Data 不是合法 JSON: {exc}") from exc
+    else:
+        parsed = data
+
+    # 兼容三种结构：
+    #   1) dict 含 part_info — 标准结构化返回
+    #   2) list of dicts — 多个 part 扁平展开
+    #   3) 其他异常结构
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        # 如果 list 第一个元素有 part_info，说明是多页结果，合并 part_info
+        has_part_info = any(
+            isinstance(item, dict) and "part_info" in item
+            for item in parsed
+        )
+        if has_part_info:
+            merged_parts = []
+            for item in parsed:
+                if isinstance(item, dict):
+                    merged_parts.extend(_as_list(item, "part_info"))
+            return {"part_info": merged_parts}
+        # 否则把整个 list 包成单个 part 的 subject_list
+        return {"part_info": [{"part_title": "", "subject_list": parsed}]}
+
+    raise RuntimeError(f"Alibaba OCR Data 格式异常（类型: {type(parsed).__name__}），无法解析为题目结构")
 
 
 def render_pdf(path):
@@ -146,15 +193,21 @@ def split_content_options(content, options):
 
 def normalize(data, paper_name, subject, education_level):
     questions = []
-    for part in data.get("part_info", []) or []:
-        part_title = part.get("part_title", "")
-        for item in part.get("subject_list", []) or []:
+    for part in _as_list(data, "part_info"):
+        if not isinstance(part, dict):
+            continue
+        part_title = part.get("part_title", "") if isinstance(part, dict) else ""
+        for item in _as_list(part, "subject_list"):
+            if not isinstance(item, dict):
+                continue
             elements = item.get("element_list", []) or []
             text = item.get("text", "")
             options = []
             answer = ""
             explanation = ""
             for element in elements:
+                if not isinstance(element, dict):
+                    continue
                 kind = element.get("type")
                 value = element.get("text", "")
                 if kind == 1 and value:
@@ -166,7 +219,9 @@ def normalize(data, paper_name, subject, education_level):
             # 题干里可能混入了选项，剥离并清洗
             text, options = split_content_options(text, options)
             figures = []
-            for fig in item.get("figure_list", []) or []:
+            for fig in _as_list(item, "figure_list"):
+                if not isinstance(fig, dict):
+                    continue
                 points = fig.get("points") or []
                 figures.append({"type": fig.get("type"), "bbox": points, "base64": None})
             questions.append({
@@ -200,9 +255,11 @@ def run(input_path, output_path, subject, education_level, dry_run=False):
     api_client = client()
     pages = render_pdf(path) if suffix == ".pdf" else [path.read_bytes()]
     merged = {"part_info": []}
+    page_count = 0
     for page in pages:
+        page_count += 1
         page_data = ocr_bytes(api_client, page, subject)
-        merged["part_info"].extend(page_data.get("part_info", []) or [])
+        merged["part_info"].extend(_as_list(page_data, "part_info"))
     return normalize(merged, path.name, subject, education_level)
 
 
