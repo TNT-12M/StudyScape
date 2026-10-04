@@ -1,202 +1,206 @@
-# OCR流水线 → StudyScape网站 对接文档
+# OCR 流水线与 StudyScape 对接说明
 
-## 一、整体架构
+本文说明当前仓库中的 OCR Worker、PaperCutter-VL JSON 导入格式和审核入库流程。
 
+## 1. 当前实现
+
+仓库内实际可运行的 OCR Worker 是：
+
+```text
+ocr/worker.py
 ```
-PDF文件 → [阿里云OCR] → [图片裁剪base64] → [DeepSeek LLM结构化] → PaperCutter-VL格式JSON → 网站导入
+
+它由 PHP API 异步启动，使用阿里云教育试卷结构化 OCR，将 PDF/图片转换为待审核题目 JSON：
+
+```text
+PDF / 图片
+  ↓
+PyMuPDF 渲染 PDF 页面
+  ↓
+阿里云 RecognizeEduPaperStructed
+  ↓
+ocr/worker.py 标准化题干、选项、答案、解析和图片
+  ↓
+ocr_import_batches 批次
+  ↓
+Vue 管理端审核、编辑、剔除
+  ↓
+统一入库 questions 表
 ```
 
-脚本: `ocr_pipeline.py`
-输出目录: `d:\lian\新建文件夹\ocr_output\`
+PHP 入口：
 
-## 二、输出JSON格式
+- `ocr_batch_create`：创建 OCR 批次并启动 Worker。
+- `ocr_batch_list`：查看批次和状态。
+- `ocr_batch_get`：读取待审核结果。
+- `ocr_batch_retry`：重试失败批次并重新启动 Worker。
+- `ocr_batch_delete`：删除批次。
+- `ocr_batch_commit`：把审核后的题目写入题库。
 
-输出为 **PaperCutter-VL包装格式**，网站 `api.php` 的 `import_questions_json` 接口已原生支持（模式0a）。
+这些接口只允许 root 或 content_admin 使用。
 
-### 2.1 题目文件格式（真题原卷）
+## 2. 运行环境
+
+安装 Python 依赖：
+
+```bash
+python -m pip install -r ocr/requirements.txt
+```
+
+`ocr/requirements.txt` 当前包含：
+
+```text
+alibabacloud_ocr_api20210707
+alibabacloud_tea_openapi
+alibabacloud_tea_util
+Pillow
+PyMuPDF
+```
+
+Worker 从项目外的 `AccessKey .env` 读取：
+
+```dotenv
+ALIYUN_ACCESS_KEY_ID=your_access_key_id
+ALIYUN_ACCESS_KEY_SECRET=your_access_key_secret
+```
+
+不要把真实 AccessKey 写进 Python 文件、JSON、Git 或前端。生产环境建议将该文件设置为 PHP-FPM/Worker 用户可读、其他用户不可读。
+
+## 3. Worker 输出格式
+
+Worker 输出标准包装对象：
 
 ```json
 {
-  "match_key": "2025年安徽中考化学真题原卷完整版",
-  "paper_name": "2025年安徽中考化学真题原卷完整版",
+  "paper_name": "sample.pdf",
+  "subject": "化学",
+  "education_level": "junior",
+  "questions": [
+    {
+      "source_qid": "1",
+      "part_title": "选择题",
+      "question_type": "single",
+      "content": "题干内容",
+      "options": ["选项一", "选项二", "选项三", "选项四"],
+      "correct_answer": "",
+      "explanation": "",
+      "difficulty": 3,
+      "points": 1,
+      "is_html": 0,
+      "images": [],
+      "included": true
+    }
+  ]
+}
+```
+
+字段说明：
+
+| 字段 | 说明 |
+|---|---|
+| `source_qid` | 原始题号，答案匹配和审核时使用 |
+| `question_type` | 标准题型，如 `single`、`multiple`、`judge`、`fill`、`short` |
+| `content` | 题干 |
+| `options` | 选项数组 |
+| `correct_answer` | 答案，可为空，后续用答案 JSON 回填 |
+| `explanation` | 解析 |
+| `difficulty` | 1-5 的难度 |
+| `points` | 题目分值 |
+| `images` | OCR 识别出的图片和坐标信息 |
+| `included` | 审核时是否保留，设为 `false` 的题目不会入库 |
+
+## 4. PaperCutter-VL JSON 导入
+
+除 OCR Worker 输出外，题库管理还支持 PaperCutter-VL 包装 JSON。题目文件示例：
+
+```json
+{
+  "match_key": "2025_anhui_zhongkao_chemistry",
+  "paper_name": "2025年安徽中考化学真题",
   "subject": "化学",
   "education_level": "junior",
   "questions": [
     {
       "question_id": "1",
       "question_type": "单选题",
-      "question_content": "2025年安徽省政府工作报告提出...",
-      "question_options": ["A. 建设可再生资源...", "B. ...", "C. ...", "D. ..."],
-      "question_images": ["/9j/4AAQ..."],
+      "question_content": "题干内容",
+      "question_options": ["A. 选项一", "B. 选项二", "C. 选项三", "D. 选项四"],
+      "question_images": [],
       "question_tables": [],
       "answer": "",
       "resolve": "",
-      "analysis_images": [],
-      "difficulty": 3,
-      "source": "2025年安徽中考化学真题原卷完整版",
-      "subject": "化学",
-      "education_level": "junior",
-      "knowledge_points": [],
-      "sub_questions": []
+      "difficulty": 3
     }
   ]
 }
 ```
 
-### 2.2 答案文件格式（答案/解析）
+答案文件可以使用同一个 `match_key`：
 
 ```json
 {
-  "match_key": "2025年安徽中考化学答案",
+  "match_key": "2025_anhui_zhongkao_chemistry",
   "paper_name": "2025年安徽中考化学答案",
   "subject": "化学",
   "education_level": "junior",
   "questions": [
     {
       "question_id": "1",
-      "question_type": "单选题",
       "question_content": "第1题",
-      "question_options": [],
-      "question_images": [],
-      "question_tables": [],
       "answer": "D",
-      "resolve": "",
-      "analysis_images": [],
-      "difficulty": 3,
-      "source": "2025年安徽中考化学答案",
-      "subject": "化学",
-      "education_level": "junior",
-      "knowledge_points": [],
-      "sub_questions": []
+      "resolve": "解析内容"
     }
   ]
 }
 ```
 
-**答案文件识别逻辑**: `question_content` 为空或≤30字 且有 `answer`/`resolve` → 网站判定为答案文件，按题号顺序自动匹配到已导入的题目。
+导入接口会将字段转换为：
 
-## 三、图片处理
+| JSON | `questions` 表 |
+|---|---|
+| `question_content` | `content` |
+| `question_options` | `options` |
+| `answer` | `correct_answer` |
+| `resolve` | `explanation` |
+| `question_type` | 标准化后的 `question_type` 和 `category` |
+| `education_level` | `education_level` |
+| `match_key` | `match_key` |
+| `question_id` | `source_qid` |
+| `question_images` | 题干 HTML 图片 |
+| `analysis_images` | 解析 HTML 图片 |
 
-### 3.1 图片提取流程
+## 5. 题目和答案匹配
 
-1. PyMuPDF 渲染PDF页面为PNG（200 DPI）
-2. 调用阿里云OCR，API返回 `figure` 数组（含 x, y, w, h 坐标）
-3. 按坐标从渲染图片中裁剪区域
-4. 转为 base64 JPEG（quality=85）
-5. 按y→x坐标排序，在OCR文本中插入 `[图片N]` 标记
-6. LLM将图片标记分配到对应题目的 `question_images` 字段
-7. 脚本将标记替换为实际 base64 字符串
+推荐在题目和答案 JSON 中使用相同的 `match_key`。导入答案时，后端按以下顺序匹配：
 
-### 3.2 网站端图片渲染
+1. `match_key + source_qid` 精确匹配；
+2. 同科目、同学段、同 `source_qid` 兜底匹配；
+3. 同科目、同学段下尚未填写答案的题目顺序匹配。
 
-网站 `api.php` 第2784-2839行已实现：
-- 从 `question_images` 数组提取 base64
-- 包装为 `<div style="text-align:center"><img src="data:image/jpeg;base64,..." style="max-width:100%;height:auto;"></div>`
-- 追加到 `content` 字段
-- 从 `analysis_images` 数组提取，追加到 `explanation` 字段
-- 按 base64 前80字符去重
+最终入库仍会按题干、科目和学段查重。
 
-**无需额外适配**，现有代码已完全兼容。
+## 6. 使用流程
 
-## 四、上传使用流程
+### OCR 文件
 
-### 步骤1: 运行脚本处理PDF
+1. root 或 content_admin 登录 `/admin/`。
+2. 打开“智能 OCR 审核”。
+3. 上传 PDF 或图片。
+4. 等待批次变成“待审核”。
+5. 修改题干、选项、答案、解析，剔除错误题目。
+6. 点击“统一入库”。
 
-```bash
-python ocr_pipeline.py
-```
+### PaperCutter-VL JSON
 
-### 步骤2: 上传题目文件
+1. 打开“题库管理”。
+2. 选择 JSON/OCR 导入。
+3. 上传题目 JSON，必要时同时读取答案 JSON。
+4. 确认学段、科目和分类。
+5. 执行导入并查看新增、更新、跳过和失败数量。
 
-1. 登录网站管理后台
-2. 题库管理 → 批量导入
-3. 上传 `2025年安徽中考化学真题原卷完整版.json`
-4. 选择学段（初中/高中）
-5. 提交 → 题目入库（无答案）
+## 7. 图片和大文件注意事项
 
-### 步骤3: 上传答案文件
-
-1. 同一页面，上传 `2025年安徽中考化学答案.json`
-2. 网站自动识别为答案文件
-3. 按题号顺序匹配到已导入的题目
-4. 回填 `correct_answer` 和 `explanation`
-
-### 步骤4: 验证
-
-1. 题库列表中查看题目
-2. 确认题干、选项、答案、图片均正确显示
-
-## 五、给网站开发工程师的建议
-
-### 5.1 已兼容（无需改动）
-
-| 功能 | 状态 |
-|------|------|
-| PaperCutter-VL格式JSON导入 | ✅ 已支持 |
-| base64图片自动嵌入HTML | ✅ 已支持 |
-| 答案文件自动匹配（按match_key+题号精准匹配） | ✅ 已支持 |
-| 图片去重 | ✅ 已支持 |
-| 富文本标记 is_html | ✅ 已支持 |
-| 科目自动识别（优先JSON的subject字段） | ✅ 已支持 |
-| 学段自动识别（优先JSON的education_level字段） | ✅ 已支持 |
-| match_key 匹配码 | ✅ 已支持 |
-
-### 5.2 答案匹配机制说明
-
-网站端实现了**两级匹配**机制：
-
-1. **精准匹配（推荐）**：当 JSON 中包含 `match_key` 字段时，使用 `match_key + question_id` 精准匹配题目和答案。同一套卷的题目文件和答案文件使用相同的 `match_key` 即可确保 100% 准确匹配，不同试卷之间不会串题。
-
-2. **顺序匹配（兜底）**：当没有 `match_key` 时，按"科目+学段下无答案的题目顺序"依次匹配（兼容旧版导入方式）。
-
-### 5.3 建议优化（非阻塞）
-
-1. **大文件支持**: 多页试卷的JSON可能超过1MB（含base64图片），建议上传接口的 `post_max_size` 和 `upload_max_filesize` 设为至少 20MB
-2. **批量处理进度**: 考虑添加批量上传多个JSON文件的接口，脚本一次会输出320+个文件
-
-### 5.4 数据库字段映射
-
-| JSON字段 | 数据库字段 | 说明 |
-|----------|-----------|------|
-| question_content | content | 题干 |
-| question_options | options (JSON array) | 选项 |
-| answer | correct_answer | 正确答案 |
-| resolve | explanation | 解析 |
-| difficulty | difficulty (1-5) | 难度 |
-| subject | subject | 科目 |
-| education_level | education_level | 学段 |
-| question_type → 标准值 | question_type | single/multiple/judge/fill/multi_fill/short |
-| question_images (base64) | content (HTML嵌入) | 图片内嵌到题干 |
-| analysis_images (base64) | explanation (HTML嵌入) | 图片内嵌到解析 |
-| is_html (自动标记) | is_html | 1=含HTML |
-| match_key | match_key | 匹配码（题目-答案精准匹配用） |
-| question_id | source_qid | 原始题号（配合 match_key 做精准匹配） |
-
-## 六、脚本配置
-
-```python
-# 阿里云OCR
-ALIYUN_ACCESS_KEY_ID = "your_access_key_id_here"
-ALIYUN_ACCESS_KEY_SECRET = "your_access_key_secret_here"
-
-# DeepSeek LLM
-DEEPSEEK_API_KEY = "sk-your_deepseek_api_key_here"
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL = "deepseek-v4-flash"
-
-# 渲染参数
-RENDER_DPI = 200  # PDF渲染分辨率
-API_INTERVAL = 0.5  # API调用间隔(秒)
-MAX_RETRIES = 3  # 失败重试次数
-```
-
-## 七、全量处理
-
-当前脚本 `main()` 中的 `test_files` 列表改为扫描整个目录即可全量处理:
-
-```python
-import glob
-test_files = glob.glob(os.path.join(SOURCE_DIR, "**", "*.pdf"), recursive=True)
-```
-
-320份PDF预计处理时间: 约2-3小时（OCR ~3秒/页 + LLM ~10秒/文件）
+- 图片通常以 Base64 嵌入题干或解析，文件会明显变大。
+- PHP `upload_max_filesize` 和 `post_max_size` 应根据题目 JSON 大小调整，生产建议至少 20MB，含大量图片时提高到 128MB。
+- OCR 原文件暂存于 `data/ocr_batches/`，该目录必须允许 PHP-FPM 写入，但禁止 Nginx 直接访问。
+- 不要把 OCR 运行结果、原始上传文件和 AccessKey 提交到 Git。

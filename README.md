@@ -1,337 +1,247 @@
 # 学补在线刷题平台
 
-> 面向初高中学生的公益在线刷题与考试系统
-> 技术栈：PHP + SQLite + RapidOCR + 原生前端
+面向初高中学生的在线刷题、组卷考试、资料管理和智能题目导入平台。
 
----
+当前项目采用轻量单体架构：PHP 提供 API 和 Session，SQLite 保存业务数据，Vue 3 管理端负责正式的用户和管理界面，Python Worker 负责 PDF/图片 OCR。
 
-## 📋 功能概览
+## 功能
 
-| 模块 | 说明 |
-|------|------|
-| 👤 注册登录 | 独立认证页，注册后可直接登录；系统内置 `lian` 为初始 root |
-| 📘 组卷考试 | 管理员从题库组卷，学生在线答题、自动评分 |
-| 🎯 自由刷题 | 按科目/知识点分类刷题，即时反馈 |
-| 📁 资料中心 | 上传/下载试卷资料，支持 DOC/DOCX/PDF 智能导入 |
-| 🔍 智能导入 | 扫描件 PDF 自动 OCR 识别题目（默认 onnxruntime+v5-MOBILE） |
-| 🛡️ 管理后台 | 用户管理、题库管理、考试管理、数据统计 |
+- 用户注册、登录、验证码和 Session 会话。
+- 初始账号 `lian` 自动初始化为不可删除的 root。
+- root、内容管理员、普通用户三级权限。
+- 题库浏览、题目编辑、批量 JSON 导入和 PaperCutter-VL 导入。
+- PDF/图片 OCR 批次处理、审核、编辑、剔除和入库。
+- root 组卷、发布、下架和管理考试。
+- 学生在线考试、自由刷题、提交、自评和结果查看。
+- 资料上传、编辑、下载和删除。
+- 用户反馈每日限制、管理员快捷回复、忽略和重新处理。
+- root 授权操作通知。
 
----
+## 技术栈和架构
 
-## 📁 项目结构
-
+```text
+浏览器
+  ├── Vue 3 + Vite + Naive UI 管理端（/admin）
+  └── 原生用户页面（public/*.html，逐步迁移到 Vue）
+          │ Fetch / Axios + PHP Session + CSRF
+          ▼
+      public/api.php
+          │
+          ├── SQLite exam.db
+          ├── materials/、uploads/ 文件存储
+          ├── data/ OCR 批次和运行数据
+          └── ocr/worker.py
+                  ├── 阿里云教育试卷结构化 OCR
+                  ├── PyMuPDF
+                  └── Pillow
 ```
-StudyScape/
-├── public/                          # Web 根目录（Nginx 文档根）
-│   ├── index.html                   # 首页 + 已登录控制台
-│   ├── auth.html                    # 登录/注册页
-│   ├── admin.html                   # 旧管理入口（仅跳转 Vue /admin）
-│   ├── questions.html               # 题库组卷
-│   ├── exam.html                    # 组卷考试
-│   ├── practice.html                # 自由刷题
-│   ├── materials.html               # 资料中心
-│   ├── api.php                      # 所有 API 接口
-│   └── assets/
-│       └── app.css                  # 全局样式
-├── extract.py                       # 文档解析 + OCR（被 api.php 调用）
-├── import_questions.php            # 命令行 JSON 题库导入
-├── data/
-│   ├── import_exam.json            # 导入题目格式示例
-│   └── logs/                        # 运行日志
-├── test/
-│   └── 2025成都中考生物真题及答案解析.pdf  # OCR 测试用 PDF
-├── legacy/
-│   └── Email_Verification.php       # 旧邮件验证代码（保留）
-├── materials/                       # 资料永久存储（.htaccess 禁直接访问）
-├── uploads/                         # 临时上传目录（解析后清理）
-├── exam.db                          # SQLite 数据库（自动生成）
-├── start_server.bat                 # Windows 一键启动
-├── php.ini                          # 本地开发 PHP 配置
+
+主要技术：
+
+| 层次 | 技术 |
+|---|---|
+| 后端 | PHP 8.2+、SQLite3 |
+| 会话和安全 | PHP Session、CSRF、登录限流、HTTP 安全头 |
+| 密码存储 | PHP libsodium `secretbox`，密钥位于项目外 |
+| 管理端 | Vue 3、Vite、Pinia、Vue Router、Naive UI、Axios |
+| OCR | Python、阿里云 OCR SDK、PyMuPDF、Pillow |
+| Web 服务 | 本地 PHP 内置服务器，生产 Nginx + PHP-FPM |
+
+## 目录结构
+
+```text
+.
+├── public/
+│   ├── api.php                 # PHP API 唯一入口
+│   ├── admin/                  # Vue 管理端生产构建结果
+│   ├── admin.html              # 旧入口，仅跳转 /admin
+│   ├── index.html              # 原生首页
+│   ├── auth.html               # 原生登录/注册页
+│   ├── questions.html          # 原生题库页
+│   ├── exam.html               # 原生考试页
+│   ├── practice.html           # 原生刷题页
+│   ├── materials.html          # 原生资料页
+│   └── assets/app.css
+├── vue-naive-admin/            # Vue 管理端源码，保留原项目 LICENSE 和作者信息
+├── ocr/
+│   ├── worker.py               # OCR Worker
+│   └── requirements.txt
+├── materials/                  # 永久资料存储
+├── uploads/                    # 临时上传目录
+├── data/                       # OCR 批次和运行数据，不应提交到 Git
+├── exam.db                     # SQLite 数据库，首次访问时自动创建
+├── php.ini                     # Windows 本地 PHP 配置
+├── start_server.bat            # Windows 启动脚本
+├── DEPLOYMENT.md               # 独立部署说明
+├── OCR流水线对接文档.md
+├── 题目答案自动匹配功能说明.md
 └── .gitignore
 ```
 
----
+`exam.db`、上传资料、OCR 结果、日志和外部密码密钥属于运行数据，不应提交到代码仓库。
 
-## 🚀 本地开发（Windows）
+## 本地开发
 
-### 环境需求
+### 环境要求
 
-- PHP 8.0+（需扩展：sqlite3、gd、fileinfo、curl、mbstring、zip、xml、sodium）
-- Python 3.10+（OCR 功能）
-- 可选：antiword（DOC 解析）、poppler-utils（pdftotext）
+- PHP 8.2+，扩展：`sqlite3`、`pdo_sqlite`、`gd`、`fileinfo`、`curl`、`mbstring`、`zip`、`xml`、`sodium`。
+- Python 3.10+，用于 OCR Worker。
+- 可选：Poppler、antiword 等文档转换工具。
+- Vue 管理端构建需要 Node.js 和 pnpm，或使用项目已有的 Bun 运行环境。
 
-### 快速启动
+### 启动 PHP 服务
+
+Windows 可以编辑 `start_server.bat` 中的 `PHP_BIN` 后双击运行。也可以手动执行：
 
 ```bash
-# 1. 双击 start_server.bat
-# 或手动执行：
 php -c php.ini -S 127.0.0.1:8080 -t public/
-
-# 2. 访问
-# 首页: http://127.0.0.1:8080/index.html
-# API:  http://127.0.0.1:8080/api.php?action=public_overview
 ```
 
-### Python 依赖（OCR 必需）
+访问地址：
+
+```text
+首页：http://127.0.0.1:8080/index.html
+登录：http://127.0.0.1:8080/auth.html
+管理端：http://127.0.0.1:8080/admin/
+API：http://127.0.0.1:8080/api.php?action=public_overview
+```
+
+### 安装 OCR 依赖
 
 ```bash
-pip install rapidocr onnxruntime pymupdf python-docx pillow
+python -m pip install -r ocr/requirements.txt
 ```
 
-### 首次使用
+OCR 需要阿里云 AccessKey。Worker 从项目外的 `AccessKey .env` 读取凭据；生产环境应通过服务器安全配置提供，禁止把密钥写入源码或提交 Git。
 
-1. 打开首页，点击「注册」
-2. 首次访问自动初始化 `lian` root，普通注册用户默认无管理权限
-3. 管理员进入后台 → 资料中心 → 上传 PDF → 智能导入 → 题目自动入库
-
----
-
-## 🌐 线上部署（阿里云 Ubuntu 22.04）
-
-### 1. 安装依赖
+### 构建 Vue 管理端
 
 ```bash
-# Nginx + PHP 8.3
-sudo apt update && sudo apt -y upgrade
-sudo apt -y install nginx-light php8.3-fpm php8.3-cli \
-    php8.3-sqlite3 php8.3-gd php8.3-fileinfo php8.3-curl php8.3-mbstring \
-    php8.3-opcache php8.3-zip php8.3-xml php8.3-sodium \
-    antiword poppler-utils software-properties-common
-
-# Python 3.13
-sudo add-apt-repository -y ppa:deadsnakes/ppa
-sudo apt -y install python3.13 python3.13-venv python3.13-dev
-sudo python3.13 -m venv /opt/xb-pyvenv
-sudo chown -R www-data:www-data /opt/xb-pyvenv
-sudo /opt/xb-pyvenv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    'rapidocr>=3.9.2' 'onnxruntime>=1.20' 'pymupdf>=1.24' 'python-docx>=1.1' 'pillow>=10.0'
+cd vue-naive-admin
+pnpm install
+pnpm build
 ```
 
-### 2. 部署代码
+生产环境变量已经配置为：
+
+```text
+VITE_USE_HASH=true
+VITE_PUBLIC_PATH=/admin/
+VITE_PHP_API_URL=/api.php
+```
+
+构建后将 `vue-naive-admin/dist/` 内容同步到 `public/admin/`：
 
 ```bash
-sudo mkdir -p /var/www/xb && cd /var/www/xb
-sudo git clone <repo-url> .
-sudo chown -R www-data:www-data /var/www/xb
-sudo chmod 750 /var/www/xb/{data,uploads,materials}
+rm -rf ../public/admin
+mkdir -p ../public/admin
+cp -R dist/. ../public/admin/
 ```
 
-构建 Vue 管理端后，将 `vue-naive-admin/dist/` 的内容部署到站点的 `/admin/` 目录，并把 `/admin` 和 `/admin/` 回退到该目录的 `index.html`。生产构建默认使用同源 `/api.php`，PHP Session 因此保持同源。
+## 权限模型
 
-### 3. 密码密钥
+| 角色 | 权限 |
+|---|---|
+| `root` | 全部平台权限，包括用户授权、反馈处理、题库、OCR、资料和考试发布 |
+| `content_admin` | 题库查看/增删改、JSON 导入、OCR 审核入库、资料上传/编辑/删除/下载 |
+| `user` | 刷题、考试、资料下载、提交反馈和查看自己的反馈回复 |
 
-```bash
-sudo install -d -m 700 /etc/studyscape
-# api.php 首次访问会自动创建 32 字节密钥；也可以提前创建并交给 PHP-FPM
-sudo chown www-data:www-data /etc/studyscape
-sudo chmod 700 /etc/studyscape
+特殊规则：
+
+- 用户名 `lian` 是初始 root，不能删除、禁用或降权。
+- 只有初始 `lian` 可以新增或撤销其他 root。
+- 所有 root 可以授权或撤销 `content_admin`。
+- content_admin 无法组卷、发布/下架考试、管理用户或处理反馈。
+- 所有权限在 PHP 后端实时校验，前端菜单隐藏不构成安全边界。
+
+首次初始化会创建：
+
+```text
+用户名：lian
+邮箱：44175149@qq.com
+初始密码：lian120208
 ```
 
-`/etc/studyscape/password.key` 必须由 PHP-FPM 用户可读，权限建议为 `0600`。该文件必须与 `exam.db` 一起备份；密钥丢失后无法解密已有密码。
+密码不会明文保存。部署后应按运维流程管理初始密码；当前系统不提供网页端密码读取接口。
 
-### 4. PHP-FPM 配置
+## 密码密钥
 
-```ini
-; /etc/php/8.3/fpm/pool.d/www.conf
-env[PYTHON_BIN] = /opt/xb-pyvenv/bin/python
-env[PATH] = /usr/local/bin:/usr/bin:/bin
+默认密钥路径：
+
+```text
+/etc/studyscape/password.key
 ```
 
-### 4. Nginx 配置
+也可以通过环境变量覆盖：
 
-```nginx
-server {
-    listen 80;
-    server_name xb.yourdomain.com;
-    root /var/www/xb/public;
-    index index.html;
-
-    # 禁止直接访问数据库和上传目录
-    location ~* \.(db|sqlite|log)$ { deny all; }
-    location ^~ /materials/ { deny all; }
-    location ^~ /uploads/  { deny all; }
-
-    # PHP-FPM
-    location ~ \.php$ {
-        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_read_timeout 900s;
-        client_max_body_size 128m;
-    }
-
-    # 静态资源缓存
-    location ~* \.(css|js|png|jpg|svg|ico|woff2?)$ {
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-    }
-}
+```text
+PASSWORD_KEY_FILE=/path/to/password.key
 ```
 
-### 5. HTTPS（推荐）
+密钥由 PHP 首次运行时自动生成，使用 32 字节随机值和 libsodium `secretbox`。密钥必须与 `exam.db` 成对备份；密钥丢失后无法解密已有密码。密钥不能写入项目、数据库、日志或 HTTP 响应。
 
-```bash
-sudo apt -y install certbot python3-certbot-nginx
-sudo certbot --nginx -d xb.yourdomain.com
+## 主要 API
+
+所有 API 使用 `public/api.php?action=<action>`。
+
+公开接口：
+
+- `public_overview`、`captcha`、`register`、`login`、`logout`、`check_session`。
+
+用户接口：
+
+- `get_dashboard`
+- `paper_list`、`paper_get`
+- `attempt_start_exam`、`attempt_get`、`attempt_submit`、`attempt_result`、`attempt_self_grade`、`attempt_list_mine`
+- `practice_subjects`、`practice_start`、`practice_submit`、`practice_result`、`practice_self_grade`
+- `material_list`、`material_get_token`、`material_download`
+- `feedback_submit`、`feedback_list_mine`
+- `notification_list`、`notification_unread_count`、`notification_mark_read`
+
+内容管理接口：
+
+- `question_stats`、`get_subjects`、`list_questions`、`get_question`
+- `add_question`、`update_question`、`delete_question`
+- `bulk_move_questions`、`bulk_update_question_category`、`bulk_delete_questions`
+- `import_questions_json`
+- `ocr_batch_create`、`ocr_batch_list`、`ocr_batch_get`、`ocr_batch_retry`、`ocr_batch_delete`、`ocr_batch_commit`
+- `material_upload`、`material_update`、`material_delete`
+
+root 接口：
+
+- `get_admin_panel`
+- `create_root`、`grant_root`、`revoke_root`
+- `grant_content_admin`、`revoke_content_admin`
+- `admin_feedback_list`、`admin_feedback_update`
+- `admin_access_stats`
+- `paper_save`、`paper_publish`、`paper_unpublish`、`paper_delete`
+
+以下危险接口已经移除，历史请求统一返回“功能已移除”：
+
+- `admin_danger_challenge`
+- `clear_users`
+- `reset_db`
+
+## 数据和备份
+
+运行时目录需要由 PHP-FPM 用户读写：
+
+```text
+exam.db
+materials/
+uploads/
+data/
+/etc/studyscape/password.key
 ```
 
-### 6. 目录权限
+备份时必须同时备份 `exam.db` 和 `password.key`。不要把 `data/`、上传资料或生产密钥加入 Git。
 
-```bash
-cd /var/www/xb
-sudo chown -R www-data:www-data data uploads materials exam.db
-sudo chmod 750 data uploads materials
-sudo chmod 660 exam.db
-```
+## 相关文档
 
----
+- [DEPLOYMENT.md](DEPLOYMENT.md)：Ubuntu/Nginx/PHP-FPM/Vue/OCR 完整部署步骤。
+- [OCR流水线对接文档.md](OCR流水线对接文档.md)：OCR Worker 与 PaperCutter-VL JSON 对接。
+- [题目答案自动匹配功能说明.md](题目答案自动匹配功能说明.md)：题目和答案导入匹配规则。
 
-## ⚙️ OCR 配置
+## 开源许可
 
-### 默认方案：onnxruntime + PP-OCRv5 MOBILE
-
-经实测在 2核2G 服务器上表现最优：
-
-| 指标 | 数值 |
-|------|------|
-| 初始化 | ~1.1s |
-| 单页 OCR | ~8s |
-| 9 页 PDF | ~1.5 min |
-| 内存 Δ | ~38MB |
-| 中文有效率 | 100% |
-
-配置位于 `extract.py` 顶部：
-
-```python
-OCR_CONFIG = {
-    "engine": "onnxruntime",       # 引擎
-    "det_model": "mobile",         # 检测模型
-    "rec_model": "mobile",         # 识别模型
-    "ocr_version": "v5",           # 版本
-    "dpi_rapidocr": 120,           # 分辨率
-    "timeout_per_page": 180,       # 单页超时
-}
-```
-
-### 备选：MNN 引擎（Linux）
-
-若 onnxruntime 兼容性有问题可切换：
-
-```bash
-pip install MNN
-# 修改 extract.py: OCR_CONFIG["engine"] = "mnn"
-```
-
-### 降级策略
-
-每页 OCR 流程：RapidOCR → Tesseract CLI 兜底（内存 ~50MB，精度较低但稳定）
-
----
-
-## 🔌 API 接口
-
-所有接口通过 `api.php?action=<name>` 调用，返回 JSON。
-
-### 公共接口
-
-| 接口 | 说明 |
-|------|------|
-| `public_overview` | 首页概览（统计数据） |
-| `register` | 用户注册 |
-| `login` | 用户登录 |
-| `logout` | 登出 |
-| `captcha` | 获取验证码 |
-
-### 学生接口（需登录）
-
-| 接口 | 说明 |
-|------|------|
-| `exam_list` | 获取可用考试列表 |
-| `start_exam` | 开始考试 |
-| `submit_answer` | 提交答题 |
-| `practice_list` | 自由刷题题目 |
-| `practice_submit` | 刷题提交 |
-
-### 管理接口（需管理员）
-
-| 接口 | 说明 |
-|------|------|
-| `admin_panel` | 管理面板数据 |
-| `toggle_user` | 启用或禁用用户 |
-| `grant_root` / `revoke_root` | 初始 lian 授予或撤销 root |
-| `grant_content_admin` / `revoke_content_admin` | root 授予或撤销内容管理员 |
-| `admin_feedback_update` | root 采纳回复、忽略或重新处理反馈 |
-| `notification_list` | 查看本人系统通知 |
-| `material_upload` | 上传资料 |
-| `extract_document` | 智能导入（OCR + 入库） |
-| `import_questions` | JSON 批量导入题目 |
-
-### 文件上传
-
-- 支持格式：PDF / DOC / DOCX / TXT
-- 单文件上限：60MB（配置在 `api.php`）
-- 权限目录：`uploads/`（临时）、`materials/`（永久）
-
----
-
-## 🏗️ 技术架构
-
-```
-Nginx (HTTPS + 静态缓存)
-  │
-  ├── PHP-FPM 8.3 (api.php)
-  │     ├── SQLite3 数据层
-  │     ├── Session + CSRF
-  │     └── shell_exec → Python extract.py
-  │           ├── RapidOCR (onnxruntime + v5-MOBILE)
-  │           ├── PyMuPDF (PDF 渲染)
-  │           ├── antiword / catdoc (DOC 解析)
-  │           └── Tesseract CLI (兜底 OCR)
-  │
-  └── 原生 HTML/CSS/JS (无框架依赖)
-```
-
-### 关键设计
-
-- **子进程逐页 OCR**：每页独立 Python 进程，防止单页 OOM 影响全局
-- **CSRF 防护**：所有 POST 接口需携带 token
-- **权限分离**：学生/管理员接口严格区分
-- **角色分级**：`lian` 为不可删除的初始 root；root 可授权 root/内容管理员，内容管理员仅负责题库、OCR 和资料
-- **统一管理入口**：正式管理端为 `vue-naive-admin` 构建的 Vue 管理端 `/admin`，旧 `public/admin.html` 仅保留跳转
-- **危险操作移除**：清空用户、重置数据库和危险操作授权码接口均已移除，历史请求返回“功能已移除”
-- **密码保护**：密码使用项目外 `/etc/studyscape/password.key` 通过 libsodium 可逆加密保存，管理接口不返回密码
-
----
-
-## 💾 数据备份
-
-```bash
-# SQLite 备份（用 .backup 命令）
-sqlite3 /var/www/xb/exam.db ".backup /backup/exam_$(date +%Y%m%d).db"
-
-# 全量备份
-tar czf /backup/xb_$(date +%Y%m%d).tar.gz /var/www/xb/ \
-    --exclude=/var/www/xb/uploads/*
-
-# 保留 30 天
-find /backup -name "*.tar.gz" -mtime +30 -delete
-```
-
----
-
-## 🔧 常见问题
-
-| 问题 | 排查 |
-|------|------|
-| OCR 报 OOM | 降低 `dpi_rapidocr` 或切换到 Tesseract 兜底 |
-| PHP 调不到 Python | 检查 `www.conf` 中 `env[PYTHON_BIN]` 并重启 FPM |
-| 中文乱码 | 确认 antiword 版本或改用 `antiword -m UTF-8` |
-| 文件上传失败 | 检查 `uploads/` 和 `materials/` 权限（750 www-data） |
-| SQLite 只读 | 确认 `exam.db` 所有者为 www-data 且 660 权限 |
-
----
-
-## 📄 License
-
-公益项目，仅供学习交流使用。
+Vue 管理端保留上游项目的 `LICENSE` 文件、作者署名和 MIT 协议。项目自身代码和文档按仓库现有授权约定使用。
