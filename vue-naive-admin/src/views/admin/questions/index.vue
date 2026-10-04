@@ -24,7 +24,16 @@
     <n-modal v-model:show="showEditor" preset="card" :title="editingId ? '编辑题目' : '新增题目'" style="width:min(760px, 94vw)">
       <n-form ref="formRef" :model="form" :rules="rules" label-placement="left" label-width="100">
         <n-grid :cols="2" :x-gap="16"><n-form-item-gi label="科目" path="subject"><n-input v-model:value="form.subject" /></n-form-item-gi><n-form-item-gi label="学段" path="education_level"><n-select v-model:value="form.education_level" :options="levelOptions" /></n-form-item-gi><n-form-item-gi label="分类"><n-select v-model:value="form.category" :options="categoryOptions" /></n-form-item-gi><n-form-item-gi label="题型" path="question_type"><n-select v-model:value="form.question_type" :options="typeOptions" @update:value="syncOptions" /></n-form-item-gi><n-form-item-gi label="难度"><n-rate v-model:value="form.difficulty" :count="5" /></n-form-item-gi><n-form-item-gi label="分值"><n-input-number v-model:value="form.points" :min="0" :step="0.5" /></n-form-item-gi></n-grid>
-        <n-form-item label="题干" path="content"><n-input v-model:value="form.content" type="textarea" :rows="4" /></n-form-item>
+        <n-form-item label="题干" path="content">
+          <n-tabs v-model:value="contentMode" type="segment" size="small">
+            <n-tab-pane name="preview" tab="预览">
+              <div class="question-preview" v-html="form.content || '<span class=\"question-placeholder\">暂无题干内容</span>'" />
+            </n-tab-pane>
+            <n-tab-pane name="source" tab="编辑源码">
+              <n-input v-model:value="form.content" type="textarea" :rows="8" placeholder="请输入题干文本或 HTML 内容" />
+            </n-tab-pane>
+          </n-tabs>
+        </n-form-item>
         <n-form-item v-if="form.question_type !== 'fill'" label="选项"><n-dynamic-input v-model:value="form.options" :on-create="() => ''"><template #create-button-default>增加选项</template></n-dynamic-input></n-form-item>
         <n-form-item label="正确答案" path="correct_answer"><n-input v-model:value="form.correct_answer" placeholder="A / AB / 答案" /></n-form-item>
         <n-form-item label="解析"><n-input v-model:value="form.explanation" type="textarea" :rows="3" /></n-form-item>
@@ -54,6 +63,7 @@ const importing = ref(false)
 const showEditor = ref(false)
 const showImport = ref(false)
 const editingId = ref(null)
+const contentMode = ref('preview')
 const stats = ref({ total: 0, by_subject: [], by_type: [] })
 const filters = reactive({ education_level: '', subject: '', qtype: '', keyword: '' })
 const pagination = reactive({ page: 1, pageSize: 10, itemCount: 0, showSizePicker: true, pageSizes: [10, 20, 50] })
@@ -72,17 +82,11 @@ function defaultForm() { return { subject: '', education_level: 'junior', catego
 function labelOf(type) { return typeOptions.find(item => item.value === type)?.label || type || '-' }
 function plainSummary(value, limit = 120) {
   const source = String(value || '')
-  // 有 HTML 标签就用 DOM 解析提取纯文本，比正则更彻底，不会残留 CSS 属性等垃圾
-  if (/<[a-z][\s\S]*>/i.test(source)) {
-    const wrapper = document.createElement('div')
-    wrapper.innerHTML = source
-    // 去掉所有 style 属性里的内容再取文本，防止 CSS 混入
-    wrapper.querySelectorAll('[style]').forEach(node => node.removeAttribute('style'))
-    const text = (wrapper.textContent || wrapper.innerText || '').replace(/\s+/g, ' ').trim()
-    return [...text].slice(0, limit).join('') + ([...text].length > limit ? '…' : '')
-  }
-  // 纯文本直接截取
-  const text = source.replace(/\s+/g, ' ').trim()
+  const wrapper = document.createElement('div')
+  if (/<[a-z][\s\S]*>/i.test(source)) wrapper.innerHTML = source
+  else wrapper.textContent = source
+  wrapper.querySelectorAll('img, script, style, svg').forEach(node => node.remove())
+  const text = (wrapper.textContent || wrapper.innerText || '').replace(/\s+/g, ' ').trim()
   return [...text].slice(0, limit).join('') + ([...text].length > limit ? '…' : '')
 }
 function syncOptions(type) { if (type === 'fill' || type === 'short') form.options = [] ; else if (!form.options?.length) form.options = ['', '', '', ''] }
@@ -91,8 +95,8 @@ async function reloadSubjects() { try { subjects.value = (await phpQuestionsApi.
 async function loadQuestions() { loading.value = true; try { const result = await phpQuestionsApi.list({ ...filters, page: pagination.page, page_size: pagination.pageSize, scope: 'manage_all' }); const data = result.data || {}; questions.value = data.items || []; pagination.itemCount = Number(data.total) || 0; subjects.value = data.subjects || subjects.value } catch (error) { message.error(error.message) } finally { loading.value = false } }
 function handlePageChange(page) { pagination.page = page; loadQuestions() }
 function handlePageSizeChange(size) { pagination.pageSize = size; pagination.page = 1; loadQuestions() }
-function openCreate() { Object.assign(form, defaultForm()); editingId.value = null; showEditor.value = true }
-async function openEdit(id) { try { const result = await phpQuestionsApi.get(id); const q = result.data.question; Object.assign(form, { ...defaultForm(), ...q, options: Array.isArray(q.options) ? q.options.map(item => String(item).replace(/^[A-Z]\.\s*/, '')) : [] }); editingId.value = id; showEditor.value = true } catch (error) { message.error(error.message) } }
+function openCreate() { Object.assign(form, defaultForm()); editingId.value = null; contentMode.value = 'source'; showEditor.value = true }
+async function openEdit(id) { try { const result = await phpQuestionsApi.get(id); const q = result.data.question; Object.assign(form, { ...defaultForm(), ...q, options: Array.isArray(q.options) ? q.options.map(item => String(item).replace(/^[A-Z]\.\s*/, '')) : [] }); editingId.value = id; contentMode.value = 'preview'; showEditor.value = true } catch (error) { message.error(error.message) } }
 async function saveQuestion() { saving.value = true; try { const payload = { ...form, id: editingId.value || undefined, options: JSON.stringify((form.question_type === 'fill' || form.question_type === 'short') ? [] : form.options.filter(Boolean)) }; await (editingId.value ? phpQuestionsApi.update(payload) : phpQuestionsApi.add(payload)); message.success('题目已保存'); showEditor.value = false; await Promise.all([loadQuestions(), loadStats()]) } catch (error) { message.error(error.message) } finally { saving.value = false } }
 function removeQuestion(id) { dialog.warning({ title: '删除题目', content: '删除后会同步清理试卷关联，确定继续吗？', positiveText: '删除', negativeText: '取消', onPositiveClick: async () => { try { await phpQuestionsApi.remove(id); message.success('已删除'); await Promise.all([loadQuestions(), loadStats()]) } catch (error) { message.error(error.message) } } }) }
 async function bulkCategory() { const category = await chooseValue('修改分类', categoryOptions); if (!category) return; try { await phpQuestionsApi.bulkCategory({ ids: selectedIds.value, category }); selectedIds.value = []; message.success('批量修改成功'); await loadQuestions() } catch (error) { message.error(error.message) } }
@@ -105,4 +109,13 @@ function mergeAnswers(data) { if (!importForm.answerData) return data; const ans
 async function doImport() { if (!importForm.json_data.trim()) return message.warning('请先提供题库 JSON'); importing.value = true; try { let data = JSON.parse(importForm.json_data); data = mergeAnswers(data); const result = await phpQuestionsApi.importOcr({ json_data: JSON.stringify(data), education_level: importForm.education_level, category: importForm.category, subject: importForm.subject }); message.success(result.message || '导入完成'); showImport.value = false; Object.assign(importForm, { json_data: '', education_level: '', category: '', subject: '', answerData: null }); await Promise.all([loadQuestions(), loadStats()]) } catch (error) { message.error(error.message || 'JSON 格式错误') } finally { importing.value = false } }
 onMounted(async () => { await Promise.all([loadStats(), reloadSubjects()]); await loadQuestions() })
 </script>
-<style scoped>.mb-16{margin-bottom:16px}.mt-8{margin-top:8px}.question-summary{display:block;white-space:normal;line-height:1.55;overflow-wrap:anywhere;word-break:break-word}</style>
+<style scoped>
+.mb-16 { margin-bottom: 16px; }
+.mt-8 { margin-top: 8px; }
+.question-summary { display: block; white-space: normal; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; }
+.question-preview { min-height: 150px; max-height: 360px; overflow: auto; padding: 12px; border: 1px solid var(--n-border-color); border-radius: 4px; line-height: 1.7; overflow-wrap: anywhere; word-break: break-word; }
+.question-preview :deep(img) { display: block; max-width: 100%; height: auto; max-height: 320px; object-fit: contain; margin: 8px 0; }
+.question-preview :deep(table) { max-width: 100%; overflow: auto; border-collapse: collapse; }
+.question-preview :deep(td), .question-preview :deep(th) { border: 1px solid var(--n-border-color); padding: 4px 8px; }
+.question-placeholder { color: var(--n-text-color-3); }
+</style>
