@@ -98,6 +98,14 @@ export const phpAdminFeedbackApi = {
   reopen: id => phpAction('admin_feedback_update', { id, feedback_action: 'reopen' }),
 }
 
+export const phpAdminAnnouncementApi = {
+  list: data => phpAction('admin_announcement_list', data),
+  create: data => phpAction('admin_announcement_create', data),
+  update: data => phpAction('admin_announcement_update', data),
+  remove: id => phpAction('admin_announcement_delete', { id }),
+  publish: id => phpAction('admin_announcement_publish', { id }),
+}
+
 export const phpAdminApi = {
   panel: () => phpAction('get_admin_panel'),
   accessStats: () => phpAction('admin_access_stats', {}, { bypassCsrf: true }),

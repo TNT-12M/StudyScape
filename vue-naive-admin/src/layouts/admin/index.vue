@@ -9,6 +9,7 @@
         <RouterLink v-if="session.isRoot" to="/admin/papers">考试管理</RouterLink>
         <RouterLink v-if="session.isContentAdmin" to="/admin/materials">资料管理</RouterLink>
         <RouterLink v-if="session.isRoot" to="/admin/feedback">反馈处理</RouterLink>
+        <RouterLink v-if="session.isRoot" to="/admin/announcements">公告管理</RouterLink>
         <RouterLink v-if="session.isContentAdmin" to="/admin/ocr">智能 OCR 审核</RouterLink>
       </nav>
       <RouterLink class="back-user" to="/app">返回用户端</RouterLink>

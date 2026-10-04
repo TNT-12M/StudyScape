@@ -38,6 +38,7 @@ export const basicRoutes = [
       { name: 'AdminPapers', path: 'papers', component: () => import('@/views/admin/papers/index.vue'), meta: { title: '组卷管理', requiresRoot: true } },
       { name: 'AdminMaterials', path: 'materials', component: () => import('@/views/admin/materials/index.vue'), meta: { title: '资料管理', requiresPermission: 'material_manage' } },
       { name: 'AdminFeedback', path: 'feedback', component: () => import('@/views/admin/feedback/index.vue'), meta: { title: '开发者反馈', requiresRoot: true } },
+      { name: 'AdminAnnouncements', path: 'announcements', component: () => import('@/views/admin/announcements/index.vue'), meta: { title: '公告管理', requiresRoot: true } },
       { name: 'AdminOcr', path: 'ocr', component: () => import('@/views/admin/ocr/index.vue'), meta: { title: '智能 OCR 审核', requiresPermission: 'question_import' } },
     ],
   },

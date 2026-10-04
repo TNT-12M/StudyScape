@@ -352,6 +352,19 @@ try {
     $db->exec("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at, id DESC)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_feedback_user_date ON user_feedback(user_id, created_at)");
 
+    // ---------- 公告表 ----------
+    $db->exec("CREATE TABLE IF NOT EXISTS announcements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        is_published INTEGER NOT NULL DEFAULT 0,
+        published_at DATETIME,
+        created_by INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_announcements_published ON announcements(is_published, published_at DESC)");
+
     $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='roles_password_feedback_v1'");
     if (!$migration) {
         $db->exec('BEGIN IMMEDIATE');
@@ -1396,6 +1409,95 @@ if ($action) {
                 if ($id > 0) dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?', [$id, $uid]);
                 else dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL', [$uid]);
                 jsonOut(true, '通知已读');
+                break;
+
+            // ---------- 公告管理（仅 root） ----------
+            case 'admin_announcement_list':
+                $adminUid = requireRoot();
+                $page = max(1, (int)($_POST['page'] ?? 1));
+                $size = max(1, min(100, (int)($_POST['page_size'] ?? 20)));
+                $status = trim((string)($_POST['status'] ?? ''));
+                $where = ['1=1']; $args = [];
+                if ($status === 'published') { $where[] = 'is_published=1'; }
+                elseif ($status === 'draft') { $where[] = 'is_published=0'; }
+                $whereSql = implode(' AND ', $where);
+                $total = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM announcements WHERE $whereSql", $args)['c'] ?? 0);
+                $items = dbFetchAll($db, "SELECT a.id, a.title, a.content, a.is_published, a.published_at, a.created_by, u.username AS creator_name, a.created_at, a.updated_at FROM announcements a LEFT JOIN users u ON u.id=a.created_by WHERE $whereSql ORDER BY a.id DESC LIMIT ? OFFSET ?", array_merge($args, [$size, ($page - 1) * $size]));
+                foreach ($items as &$item) {
+                    $item['is_published'] = (bool)$item['is_published'];
+                    foreach (['published_at', 'created_at', 'updated_at'] as $field) if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]);
+                }
+                unset($item);
+                log_admin_action('list_announcements', $adminUid);
+                jsonOut(true, '', ['items' => $items, 'pagination' => ['page' => $page, 'page_size' => $size, 'total' => $total]]);
+                break;
+
+            case 'admin_announcement_create':
+                $adminUid = requireRoot();
+                $title = trim((string)($_POST['title'] ?? ''));
+                $content = trim((string)($_POST['content'] ?? ''));
+                if ($title === '' || mb_strlen($title) > 100) jsonOut(false, '标题不能为空且不超过 100 字');
+                if (mb_strlen($content) > 10000) jsonOut(false, '内容不能超过 10000 字');
+                dbQuery($db, 'INSERT INTO announcements(title, content, is_published, created_by) VALUES(?, ?, 0, ?)', [$title, $content, $adminUid]);
+                $aid = (int)$db->lastInsertRowID();
+                log_admin_action('create_announcement', $adminUid, ['id' => $aid, 'title' => $title]);
+                jsonOut(true, '公告已创建', ['id' => $aid]);
+                break;
+
+            case 'admin_announcement_update':
+                $adminUid = requireRoot();
+                $id = (int)($_POST['id'] ?? 0);
+                $title = trim((string)($_POST['title'] ?? ''));
+                $content = trim((string)($_POST['content'] ?? ''));
+                if ($id <= 0) jsonOut(false, '参数错误');
+                if ($title === '' || mb_strlen($title) > 100) jsonOut(false, '标题不能为空且不超过 100 字');
+                if (mb_strlen($content) > 10000) jsonOut(false, '内容不能超过 10000 字');
+                $ann = dbFetchOne($db, 'SELECT id, is_published FROM announcements WHERE id=?', [$id]);
+                if (!$ann) jsonOut(false, '公告不存在');
+                if ($ann['is_published']) jsonOut(false, '已发布的公告不能修改');
+                dbQuery($db, 'UPDATE announcements SET title=?, content=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$title, $content, $id]);
+                log_admin_action('update_announcement', $adminUid, ['id' => $id]);
+                jsonOut(true, '公告已更新');
+                break;
+
+            case 'admin_announcement_delete':
+                $adminUid = requireRoot();
+                $id = (int)($_POST['id'] ?? 0);
+                if ($id <= 0) jsonOut(false, '参数错误');
+                $ann = dbFetchOne($db, 'SELECT id, is_published FROM announcements WHERE id=?', [$id]);
+                if (!$ann) jsonOut(false, '公告不存在');
+                dbQuery($db, 'DELETE FROM announcements WHERE id=?', [$id]);
+                log_admin_action('delete_announcement', $adminUid, ['id' => $id]);
+                jsonOut(true, '公告已删除');
+                break;
+
+            case 'admin_announcement_publish':
+                $adminUid = requireRoot();
+                $id = (int)($_POST['id'] ?? 0);
+                if ($id <= 0) jsonOut(false, '参数错误');
+                $ann = dbFetchOne($db, 'SELECT id, title, content, is_published FROM announcements WHERE id=?', [$id]);
+                if (!$ann) jsonOut(false, '公告不存在');
+                if ($ann['is_published']) jsonOut(false, '该公告已发布');
+
+                $db->exec('BEGIN IMMEDIATE');
+                try {
+                    // 标记为已发布
+                    dbQuery($db, 'UPDATE announcements SET is_published=1, published_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$id]);
+                    // 给所有活跃用户发通知
+                    $users = dbFetchAll($db, 'SELECT id FROM users WHERE is_active=1');
+                    $notifiedCount = 0;
+                    foreach ($users as $u) {
+                        dbQuery($db, 'INSERT INTO notifications(user_id, type, title, body, related_id) VALUES(?, ?, ?, ?, ?)',
+                            [(int)$u['id'], 'announcement', $ann['title'], $ann['content'], $id]);
+                        $notifiedCount++;
+                    }
+                    $db->exec('COMMIT');
+                } catch (Exception $e) {
+                    @$db->exec('ROLLBACK');
+                    jsonOut(false, '发布失败：' . $e->getMessage());
+                }
+                log_admin_action('publish_announcement', $adminUid, ['id' => $id, 'notified_users' => $notifiedCount]);
+                jsonOut(true, "公告已发布，已通知 {$notifiedCount} 位用户", ['notified_users' => $notifiedCount]);
                 break;
 
             case 'admin_access_stats':
