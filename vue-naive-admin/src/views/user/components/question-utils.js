@@ -61,16 +61,16 @@ function escapeHtml(value) {
 function wrapBareMath(text) {
   // 已有分隔符则不处理
   if (/\$\$|\\\(|\\\[/.test(text)) return text
-  // 匹配包含 LaTeX 命令（\cmd）、上标 ^、下标 _ 的数学片段
-  // 允许花括号内含中文（如 \longequal{一定条件}）
-  return text.replace(
-    /([A-Za-z0-9+\-*/=()\[\]{}<>.|~\\\s]*(?:\\[a-zA-Z]+(?:\{[^{}]*\})*|\^[\w{]|_\w)[A-Za-z0-9+\-*/=()\[\]{}<>.|~\\\s]*)/g,
-    (match) => {
-      const trimmed = match.trim()
-      if (!trimmed || trimmed.length < 2) return match
-      return `\\(${trimmed}\\)`
-    },
-  )
+  // 安全版：以数学特征开头，中间填充字符不含 \ ^ _（避免与特征起始符重叠导致回溯）
+  // 结构：MIDDLE (FILLER MIDDLE)* FILLER*  ——  O(n)，无灾难性回溯
+  const MIDDLE = '(?:\\\\[a-zA-Z]+(?:\\{[^{}]*\\})*|\\^[\\w{]|_\\w)'
+  const FILLER = '[A-Za-z0-9+\\-*/=()\\[\\]{}<>.|~\\s]'
+  const re = new RegExp(`${MIDDLE}(?:${FILLER}*${MIDDLE})*${FILLER}*`, 'g')
+  return text.replace(re, (match) => {
+    const trimmed = match.trim()
+    if (!trimmed || trimmed.length < 2) return match
+    return `\\(${trimmed}\\)`
+  })
 }
 
 export function renderMathInHtml(value) {

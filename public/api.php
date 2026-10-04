@@ -2676,7 +2676,6 @@ if ($action) {
                 // 返回题目（不含 correct_answer）
                 $ids = array_column($rows, 'id');
                 $in = implode(',', array_fill(0, count($ids), '?'));
-                $qrows = dbFetchAll($db, "SELECT * FROM questions WHERE id IN ($in) ORDER BY id DESC LIMIT 0", []);
                 // 保持抽题顺序（按 ids 数组顺序恢复）
                 $qById = [];
                 $idOrder = $ids;
