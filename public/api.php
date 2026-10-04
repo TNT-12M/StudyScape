@@ -1027,6 +1027,41 @@ function checkLoginThrottle(): bool {
     return true;
 }
 
+// 获取当前登录失败状态（剩余次数、是否锁定、锁定剩余秒数）
+function getLoginThrottleStatus(): array {
+    $sessionFail = (int)($_SESSION['login_fail_count'] ?? 0);
+    $sessionLockLeft = 0;
+    if (!empty($_SESSION['login_lock_until'])) {
+        $sessionLockLeft = max(0, (int)$_SESSION['login_lock_until'] - time());
+    }
+    $ipFail = 0;
+    $ipLockLeft = 0;
+    $file = loginThrottleIpFile();
+    if (is_file($file)) {
+        $raw = @json_decode(@file_get_contents($file), true);
+        if (is_array($raw)) {
+            $now = time();
+            $fails = is_array($raw['fails'] ?? null) ? $raw['fails'] : [];
+            $fails = array_values(array_filter($fails, function ($t) use ($now) {
+                return ($now - $t) < 300;
+            }));
+            $ipFail = count($fails);
+            if (!empty($raw['lock_until'])) {
+                $ipLockLeft = max(0, (int)$raw['lock_until'] - $now);
+            }
+        }
+    }
+    $sessionRemaining = max(0, LOGIN_THROTTLE_SESSION_MAX - $sessionFail);
+    $ipRemaining = max(0, LOGIN_THROTTLE_IP_MAX - $ipFail);
+    $remaining = min($sessionRemaining, $ipRemaining);
+    $lockLeft = max($sessionLockLeft, $ipLockLeft);
+    return [
+        'remaining' => $remaining,
+        'lock_left' => $lockLeft,
+        'locked' => $lockLeft > 0,
+    ];
+}
+
 function recordLoginFail(): void {
     // 会话级计数
     $_SESSION['login_fail_count'] = ($_SESSION['login_fail_count'] ?? 0) + 1;
@@ -1176,21 +1211,32 @@ if ($action) {
                 // 先限流（统一错误信息，不枚举）
                 if (!checkLoginThrottle()) {
                     recordLoginFail(); // 记一次，避免重置计时
-                    jsonOut(false, "用户名或密码错误或登录过于频繁，请稍后再试");
+                    $status = getLoginThrottleStatus();
+                    $mins = (int)ceil($status['lock_left'] / 60);
+                    jsonOut(false, "登录尝试次数过多，请 {$mins} 分钟后再试", [
+                        'throttle' => $status,
+                    ]);
                 }
                 $username = sanitizeInput($_POST['username'] ?? '');
                 $password = $_POST['password'] ?? '';
                 
                 if (empty($username) || empty($password)) {
                     recordLoginFail();
-                    jsonOut(false, "用户名或密码错误或登录过于频繁，请稍后再试");
+                    $status = getLoginThrottleStatus();
+                    jsonOut(false, "用户名或密码错误，还可尝试 {$status['remaining']} 次", [
+                        'throttle' => $status,
+                    ]);
                 }
                 
                 $u = dbFetchOne($db, "SELECT * FROM users WHERE username=?", [$username]);
                 
                 if (!$u || !passwordMatches((string)$u['password'], $password)) {
                     recordLoginFail();
-                    jsonOut(false, "用户名或密码错误或登录过于频繁，请稍后再试");
+                    $status = getLoginThrottleStatus();
+                    $msg = $status['locked']
+                        ? "登录尝试次数过多，请 " . (int)ceil($status['lock_left'] / 60) . " 分钟后再试"
+                        : "用户名或密码错误，还可尝试 {$status['remaining']} 次";
+                    jsonOut(false, $msg, ['throttle' => $status]);
                 }
                 // 兼容历史明文账号：验证成功后立即改写为密文。
                 if (!str_starts_with((string)$u['password'], 'enc:v1:')) {
@@ -1199,7 +1245,8 @@ if ($action) {
 
                 if (!$u['is_active']) {
                     recordLoginFail();
-                    jsonOut(false, "用户名或密码错误或登录过于频繁，请稍后再试");
+                    $status = getLoginThrottleStatus();
+                    jsonOut(false, "账号已被禁用，请联系管理员", ['throttle' => $status]);
                 }
 
                 // 注册审批已取消：历史账号即使保存为未审批状态，也不再阻止登录或自动升权。

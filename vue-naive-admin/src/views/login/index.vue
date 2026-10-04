@@ -47,18 +47,16 @@ async function login() {
   loading.value = true
   try {
     const result = await phpAuthApi.login({ username: form.username, password: form.password })
-    if (!result.data?.user?.id) throw new Error('登录响应无效，请重试')
-    const verifiedUser = await session.refresh()
-    if (!verifiedUser?.id || !verifiedUser.is_active) {
-      await session.logout()
-      throw new Error('账号状态无效，无法进入系统')
-    }
-    session.setUser(verifiedUser)
+    const user = result.data?.user
+    if (!user?.id) throw new Error('登录响应无效，请重试')
+    // 直接使用登录接口返回的用户数据，不再额外 refresh
+    // 避免 session_regenerate_id 后立即二次请求偶发的 cookie 不同步问题
+    session.setUser(user)
     $message.success(result.message || '登录成功')
     const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
       ? route.query.redirect
       : null
-    router.replace(redirect || (verifiedUser.is_admin ? '/admin' : '/app'))
+    router.replace(redirect || (user.is_admin ? '/admin' : '/app'))
   }
   catch (error) { $message.error(error.message || '登录失败') }
   finally { loading.value = false }
