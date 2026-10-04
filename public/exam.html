@@ -464,7 +464,7 @@ async function checkSessionAndRender() {
     STATE.csrf = j.csrf_token || '';
     document.getElementById('whoAmI').textContent = `${STATE.user.username}（${STATE.isAdmin ? '管理员' : '学生'}）`;
     document.getElementById('goAdmin').style.display = STATE.isAdmin ? '' : 'none';
-    document.getElementById('goAdmin').href = 'admin.html';
+    document.getElementById('goAdmin').href = '/admin';
     document.getElementById('logoutBtn').onclick = async () => {
         await req('logout');
         localStorage.removeItem('xb_session');

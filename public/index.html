@@ -446,7 +446,7 @@ function navBarLoggedIn(user) {
         <a href="questions.html">📚 题库中心</a>
         <span class="who">你好，${escapeHtml(user.username)}${user.is_admin ? ' · 👑' : ''}</span>
         <button class="btn btn-ghost btn-sm" id="themeBtn2" title="切换主题">🌓</button>
-        ${user.is_admin ? '<a href="admin.html" class="btn btn-ghost btn-sm">管理后台</a>' : ''}
+        ${user.is_admin ? '<a href="/admin" class="btn btn-ghost btn-sm">管理后台</a>' : ''}
         <button class="btn btn-danger btn-sm" onclick="logout()">退出</button>
     `;
     const tb = document.getElementById('themeBtn2');
@@ -488,7 +488,7 @@ function afterLogin(user) {
     showPublic(false);
     navBarLoggedIn(user);
     if (user.is_admin) {
-        location.href = 'admin.html';
+        location.href = '/admin';
         return;
     }
     openDash();

@@ -1,0 +1,1 @@
+import{L as e}from"./Button-CjW_3_5b.js";function t(e){let{textColor1:t,textColor2:n,fontWeightStrong:r,fontSize:i}=e;return{fontSize:i,titleTextColor:t,textColor:n,titleFontWeight:r}}var n={name:`Thing`,common:e,self:t};export{n,t};

@@ -1,0 +1,1 @@
+import{F as e,d as t,g as n,m as r}from"./runtime-core.esm-bundler-xeKD6iRk.js";import{t as i}from"./_plugin-vue_export-helper-BDNMzG2s.js";var a={},o={class:`f-c-c text-14 text-gray-500`};function s(i,a){return e(),r(`footer`,o,[...a[0]||=[t(`p`,null,[n(` Copyright © 2026 `),t(`span`,{class:`transition`},`学境・StudyScape`)],-1)]])}var c=i(a,[[`render`,s]]);export{c as t};

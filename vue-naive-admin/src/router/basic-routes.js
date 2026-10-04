@@ -1,0 +1,46 @@
+export const basicRoutes = [
+  {
+    name: 'Login',
+    path: '/login',
+    component: () => import('@/views/login/index.vue'),
+    meta: { title: '登录', layout: 'empty', public: true },
+  },
+  {
+    name: 'UserHome',
+    path: '/',
+    redirect: '/app',
+    meta: { public: true },
+  },
+  {
+    name: 'UserApp',
+    path: '/app',
+    component: () => import('@/layouts/user/index.vue'),
+    meta: { title: '学习中心', requiresAuth: true, layout: 'empty' },
+    children: [
+      { name: 'AppDashboard', path: '', component: () => import('@/views/user/dashboard/index.vue'), meta: { title: '学习首页' } },
+      { name: 'AppPractice', path: 'practice', component: () => import('@/views/user/practice/index.vue'), meta: { title: '在线刷题' } },
+      { name: 'AppPapers', path: 'papers', component: () => import('@/views/user/papers/index.vue'), meta: { title: '在线考试' } },
+      { name: 'AppMaterials', path: 'materials', component: () => import('@/views/user/materials/index.vue'), meta: { title: '资料中心' } },
+      { name: 'AppQuestions', path: 'questions', component: () => import('@/views/user/questions/index.vue'), meta: { title: '题库浏览' } },
+      { name: 'AppFeedback', path: 'feedback', component: () => import('@/views/user/feedback/index.vue'), meta: { title: '开发者反馈' } },
+      { name: 'AppAttempts', path: 'attempts', component: () => import('@/views/user/attempts/index.vue'), meta: { title: '学习记录' } },
+    ],
+  },
+  {
+    name: 'Admin',
+    path: '/admin',
+    component: () => import('@/layouts/admin/index.vue'),
+    meta: { title: '管理后台', requiresAuth: true, requiresAdmin: true, layout: 'empty' },
+    children: [
+      { name: 'AdminDashboard', path: '', component: () => import('@/views/admin/dashboard/index.vue'), meta: { title: '工作台' } },
+      { name: 'AdminUsers', path: 'users', component: () => import('@/views/admin/users/index.vue'), meta: { title: '用户管理', requiresRoot: true } },
+      { name: 'AdminQuestions', path: 'questions', component: () => import('@/views/admin/questions/index.vue'), meta: { title: '题库管理', requiresPermission: 'question_view' } },
+      { name: 'AdminPapers', path: 'papers', component: () => import('@/views/admin/papers/index.vue'), meta: { title: '组卷管理', requiresRoot: true } },
+      { name: 'AdminMaterials', path: 'materials', component: () => import('@/views/admin/materials/index.vue'), meta: { title: '资料管理', requiresPermission: 'material_manage' } },
+      { name: 'AdminFeedback', path: 'feedback', component: () => import('@/views/admin/feedback/index.vue'), meta: { title: '开发者反馈', requiresRoot: true } },
+      { name: 'AdminOcr', path: 'ocr', component: () => import('@/views/admin/ocr/index.vue'), meta: { title: '智能 OCR 审核', requiresPermission: 'question_import' } },
+    ],
+  },
+  { name: '403', path: '/403', component: () => import('@/views/error-page/403.vue'), meta: { title: '没有权限', layout: 'empty', public: true } },
+  { name: '404', path: '/:pathMatch(.*)*', component: () => import('@/views/error-page/404.vue'), meta: { title: '页面不存在', layout: 'empty', public: true } },
+]

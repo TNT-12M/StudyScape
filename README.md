@@ -9,7 +9,7 @@
 
 | 模块 | 说明 |
 |------|------|
-| 👤 注册登录 | 独立认证页，注册后可直接登录；首位注册用户自动成为管理员 |
+| 👤 注册登录 | 独立认证页，注册后可直接登录；系统内置 `lian` 为初始 root |
 | 📘 组卷考试 | 管理员从题库组卷，学生在线答题、自动评分 |
 | 🎯 自由刷题 | 按科目/知识点分类刷题，即时反馈 |
 | 📁 资料中心 | 上传/下载试卷资料，支持 DOC/DOCX/PDF 智能导入 |
@@ -25,7 +25,7 @@ StudyScape/
 ├── public/                          # Web 根目录（Nginx 文档根）
 │   ├── index.html                   # 首页 + 已登录控制台
 │   ├── auth.html                    # 登录/注册页
-│   ├── admin.html                   # 管理后台
+│   ├── admin.html                   # 旧管理入口（仅跳转 Vue /admin）
 │   ├── questions.html               # 题库组卷
 │   ├── exam.html                    # 组卷考试
 │   ├── practice.html                # 自由刷题
@@ -56,7 +56,7 @@ StudyScape/
 
 ### 环境需求
 
-- PHP 8.0+（需扩展：sqlite3、gd、fileinfo、curl、mbstring、zip、xml）
+- PHP 8.0+（需扩展：sqlite3、gd、fileinfo、curl、mbstring、zip、xml、sodium）
 - Python 3.10+（OCR 功能）
 - 可选：antiword（DOC 解析）、poppler-utils（pdftotext）
 
@@ -65,7 +65,7 @@ StudyScape/
 ```bash
 # 1. 双击 start_server.bat
 # 或手动执行：
-php -S 127.0.0.1:8080 -t public/
+php -c php.ini -S 127.0.0.1:8080 -t public/
 
 # 2. 访问
 # 首页: http://127.0.0.1:8080/index.html
@@ -81,7 +81,7 @@ pip install rapidocr onnxruntime pymupdf python-docx pillow
 ### 首次使用
 
 1. 打开首页，点击「注册」
-2. 首位注册用户自动成为管理员
+2. 首次访问自动初始化 `lian` root，普通注册用户默认无管理权限
 3. 管理员进入后台 → 资料中心 → 上传 PDF → 智能导入 → 题目自动入库
 
 ---
@@ -95,7 +95,7 @@ pip install rapidocr onnxruntime pymupdf python-docx pillow
 sudo apt update && sudo apt -y upgrade
 sudo apt -y install nginx-light php8.3-fpm php8.3-cli \
     php8.3-sqlite3 php8.3-gd php8.3-fileinfo php8.3-curl php8.3-mbstring \
-    php8.3-opcache php8.3-zip php8.3-xml \
+    php8.3-opcache php8.3-zip php8.3-xml php8.3-sodium \
     antiword poppler-utils software-properties-common
 
 # Python 3.13
@@ -116,7 +116,20 @@ sudo chown -R www-data:www-data /var/www/xb
 sudo chmod 750 /var/www/xb/{data,uploads,materials}
 ```
 
-### 3. PHP-FPM 配置
+构建 Vue 管理端后，将 `vue-naive-admin/dist/` 的内容部署到站点的 `/admin/` 目录，并把 `/admin` 和 `/admin/` 回退到该目录的 `index.html`。生产构建默认使用同源 `/api.php`，PHP Session 因此保持同源。
+
+### 3. 密码密钥
+
+```bash
+sudo install -d -m 700 /etc/studyscape
+# api.php 首次访问会自动创建 32 字节密钥；也可以提前创建并交给 PHP-FPM
+sudo chown www-data:www-data /etc/studyscape
+sudo chmod 700 /etc/studyscape
+```
+
+`/etc/studyscape/password.key` 必须由 PHP-FPM 用户可读，权限建议为 `0600`。该文件必须与 `exam.db` 一起备份；密钥丢失后无法解密已有密码。
+
+### 4. PHP-FPM 配置
 
 ```ini
 ; /etc/php/8.3/fpm/pool.d/www.conf
@@ -246,9 +259,10 @@ pip install MNN
 |------|------|
 | `admin_panel` | 管理面板数据 |
 | `toggle_user` | 启用或禁用用户 |
-| `admin_danger_challenge` | 生成危险操作一次性授权码 |
-| `clear_users` | 输入授权码后永久删除所有用户 |
-| `reset_db` | 输入授权码后备份并清空业务数据 |
+| `grant_root` / `revoke_root` | 初始 lian 授予或撤销 root |
+| `grant_content_admin` / `revoke_content_admin` | root 授予或撤销内容管理员 |
+| `admin_feedback_update` | root 采纳回复、忽略或重新处理反馈 |
+| `notification_list` | 查看本人系统通知 |
 | `material_upload` | 上传资料 |
 | `extract_document` | 智能导入（OCR + 入库） |
 | `import_questions` | JSON 批量导入题目 |
@@ -283,10 +297,10 @@ Nginx (HTTPS + 静态缓存)
 - **子进程逐页 OCR**：每页独立 Python 进程，防止单页 OOM 影响全局
 - **CSRF 防护**：所有 POST 接口需携带 token
 - **权限分离**：学生/管理员接口严格区分
-- **首用户自动升权**：首次注册用户自动成为管理员
-- **统一管理员入口**：管理员登录后进入 `public/admin.html`，首页仅保留普通用户控制台
-- **危险操作保护**：删除所有用户或重置数据库前，必须输入服务端生成的一次性英文授权码，并完成最终确认；授权码 5 分钟有效且只能使用一次
-- **危险操作备份**：重置数据库前自动备份 SQLite 数据库，成功后当前管理员会话失效并要求重新登录
+- **角色分级**：`lian` 为不可删除的初始 root；root 可授权 root/内容管理员，内容管理员仅负责题库、OCR 和资料
+- **统一管理入口**：正式管理端为 `vue-naive-admin` 构建的 Vue 管理端 `/admin`，旧 `public/admin.html` 仅保留跳转
+- **危险操作移除**：清空用户、重置数据库和危险操作授权码接口均已移除，历史请求返回“功能已移除”
+- **密码保护**：密码使用项目外 `/etc/studyscape/password.key` 通过 libsodium 可逆加密保存，管理接口不返回密码
 
 ---
 

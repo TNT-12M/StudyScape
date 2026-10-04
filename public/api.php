@@ -3,7 +3,7 @@
  * 初高中在线考试系统 - API接口
  * db文件: exam.db 自动生成
  * 表：users, exam_data
- * 【警告：密码明文存储，仅用于本地测试，禁止外网部署】
+ * 密码使用项目外 libsodium 密钥加密存储；密钥路径由 PASSWORD_KEY_FILE 覆盖，默认 /etc/studyscape/password.key。
  */
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
@@ -25,6 +25,70 @@ session_set_cookie_params([
 ]);
 session_start();
 
+// ===================== 密码密钥（项目目录之外） =====================
+function passwordKeyPath(): string {
+    $configured = getenv('PASSWORD_KEY_FILE');
+    return $configured !== false && trim($configured) !== ''
+        ? trim($configured)
+        : '/etc/studyscape/password.key';
+}
+
+function loadPasswordKey(): string {
+    if (!function_exists('sodium_crypto_secretbox')) {
+        throw new RuntimeException('服务器缺少 libsodium，无法安全保存密码');
+    }
+    $path = passwordKeyPath();
+    $dir = dirname($path);
+    if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+        throw new RuntimeException('密码密钥目录无法创建: ' . $dir);
+    }
+    if (!is_file($path)) {
+        $key = random_bytes(SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
+        $handle = @fopen($path, 'x');
+        if ($handle !== false) {
+            @fwrite($handle, $key);
+            @fflush($handle);
+            @fclose($handle);
+            @chmod($path, 0600);
+        }
+    }
+    $key = @file_get_contents($path);
+    if (!is_string($key) || strlen($key) !== SODIUM_CRYPTO_SECRETBOX_KEYBYTES) {
+        throw new RuntimeException('密码密钥不存在、不可读或长度无效: ' . $path);
+    }
+    return $key;
+}
+
+function encryptPassword(string $password): string {
+    global $passwordKey;
+    $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+    $cipher = sodium_crypto_secretbox($password, $nonce, $passwordKey);
+    return 'enc:v1:' . base64_encode($nonce . $cipher);
+}
+
+function decryptPassword(string $stored): ?string {
+    global $passwordKey;
+    if (!str_starts_with($stored, 'enc:v1:')) return null;
+    $payload = base64_decode(substr($stored, 7), true);
+    if ($payload === false || strlen($payload) <= SODIUM_CRYPTO_SECRETBOX_NONCEBYTES) return null;
+    $nonce = substr($payload, 0, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+    $cipher = substr($payload, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+    try {
+        $plain = sodium_crypto_secretbox_open($cipher, $nonce, $passwordKey);
+        return $plain === false ? null : $plain;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function passwordMatches(string $stored, string $candidate): bool {
+    if (str_starts_with($stored, 'enc:v1:')) {
+        $plain = decryptPassword($stored);
+        return $plain !== null && hash_equals($plain, $candidate);
+    }
+    return hash_equals($stored, $candidate);
+}
+
 // ===================== SQLite 初始化 =====================
 $dbFile = __DIR__ . '/../exam.db';
 try {
@@ -32,6 +96,12 @@ try {
     $db->enableExceptions(true);
 } catch (Exception $e) {
     die(json_encode(['success' => false, 'message' => '数据库连接失败: ' . $e->getMessage()]));
+}
+try {
+    $passwordKey = loadPasswordKey();
+} catch (Throwable $e) {
+    http_response_code(500);
+    die(json_encode(['success' => false, 'message' => '密码密钥初始化失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
 
 // 创建表
@@ -41,6 +111,8 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT NOT NULL UNIQUE,
     email TEXT NOT NULL UNIQUE,
     password TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    is_initial_root INTEGER NOT NULL DEFAULT 0,
     is_admin INTEGER DEFAULT 0,
     is_approved INTEGER DEFAULT 0,
     is_active INTEGER DEFAULT 1,
@@ -187,6 +259,12 @@ function tableHasColumn(SQLite3 $db, string $table, string $column): bool {
 }
 try {
     $db->exec("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+    if (!tableHasColumn($db, 'users', 'role')) {
+        $db->exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
+    }
+    if (!tableHasColumn($db, 'users', 'is_initial_root')) {
+        $db->exec("ALTER TABLE users ADD COLUMN is_initial_root INTEGER NOT NULL DEFAULT 0");
+    }
     if (!tableHasColumn($db, 'questions', 'education_level')) {
         $db->exec("ALTER TABLE questions ADD COLUMN education_level TEXT NOT NULL DEFAULT 'junior'");
     }
@@ -236,6 +314,80 @@ try {
     die(json_encode(['success' => false, 'message' => '学段字段迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
 
+// 角色、初始 root、反馈回复与通知迁移。旧 is_admin=1 账号兼容迁移为 root。
+try {
+    $db->exec("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+    // 反馈表可能是旧库中尚未初始化的表，先建立基础结构再补充回复字段。
+    $db->exec("CREATE TABLE IF NOT EXISTS user_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        contact TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        admin_note TEXT,
+        handled_by INTEGER,
+        handled_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    if (!tableHasColumn($db, 'user_feedback', 'reply_content')) {
+        $db->exec("ALTER TABLE user_feedback ADD COLUMN reply_content TEXT");
+    }
+    if (!tableHasColumn($db, 'user_feedback', 'replied_by')) {
+        $db->exec("ALTER TABLE user_feedback ADD COLUMN replied_by INTEGER");
+    }
+    if (!tableHasColumn($db, 'user_feedback', 'replied_at')) {
+        $db->exec("ALTER TABLE user_feedback ADD COLUMN replied_at DATETIME");
+    }
+    $db->exec("CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        type TEXT NOT NULL DEFAULT 'system',
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        related_id INTEGER,
+        read_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at, id DESC)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_feedback_user_date ON user_feedback(user_id, created_at)");
+
+    $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='roles_password_feedback_v1'");
+    if (!$migration) {
+        $db->exec('BEGIN IMMEDIATE');
+        $db->exec("UPDATE users SET role='root', is_admin=1 WHERE is_admin=1 OR role='root'");
+        $db->exec("UPDATE users SET role='user' WHERE role IS NULL OR role NOT IN ('user','content_admin','root')");
+        $lian = dbFetchOne($db, "SELECT id FROM users WHERE username='lian' LIMIT 1");
+        if ($lian) {
+            $emailOwner = dbFetchOne($db, "SELECT id FROM users WHERE email=? AND id<>? LIMIT 1", ['44175149@qq.com', (int)$lian['id']]);
+            if ($emailOwner) {
+                dbQuery($db, "UPDATE users SET email=? WHERE id=?", ['legacy_' . (int)$emailOwner['id'] . '@system.local', (int)$emailOwner['id']]);
+            }
+            dbQuery($db, "UPDATE users SET email=?, role='root', is_initial_root=1, is_admin=1, is_approved=1, is_active=1 WHERE id=?", ['44175149@qq.com', (int)$lian['id']]);
+        } else {
+            // 按安装约定：只要初始 lian 不存在，就自动补建为 root。
+            dbQuery($db, "INSERT INTO users(username,email,password,role,is_initial_root,is_admin,is_approved,is_active) VALUES(?,?,?,?,1,1,1,1)", ['lian', '44175149@qq.com', encryptPassword('lian120208'), 'root']);
+        }
+        $db->exec("INSERT INTO schema_migrations(version) VALUES('roles_password_feedback_v1')");
+        $db->exec('COMMIT');
+    }
+    $db->exec("UPDATE users SET role='root', is_admin=1, is_initial_root=1 WHERE username='lian'");
+    $db->exec("UPDATE users SET role='root' WHERE is_admin=1 AND role='user'");
+    // 历史数据库中的裸密码只在启动迁移时读取一次，之后统一改写为密文。
+    $legacyUsers = dbFetchAll($db, "SELECT id, password FROM users WHERE password NOT LIKE 'enc:v1:%'");
+    if ($legacyUsers) {
+        $db->exec('BEGIN IMMEDIATE');
+        foreach ($legacyUsers as $legacyUser) {
+            dbQuery($db, "UPDATE users SET password=? WHERE id=?", [encryptPassword((string)$legacyUser['password']), (int)$legacyUser['id']]);
+        }
+        $db->exec('COMMIT');
+    }
+} catch (Throwable $e) {
+    try { $db->exec('ROLLBACK'); } catch (Throwable $ignored) {}
+    error_log('roles/feedback migration failed: ' . $e->getMessage());
+    die(json_encode(['success' => false, 'message' => '角色迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
+}
+
 // ==========================================================
 // import_batches 表：导入批次暂存（用于题目-答案自动匹配）
 // ==========================================================
@@ -261,6 +413,69 @@ try {
     $db->exec("CREATE INDEX IF NOT EXISTS idx_import_batches_status ON import_batches(match_status)");
 } catch (Exception $e) {
     error_log('import_batches table init failed: ' . $e->getMessage());
+}
+
+// ==========================================================
+// 平台访问统计与用户反馈（独立表，不改变既有业务表）
+// ==========================================================
+try {
+    $db->exec("CREATE TABLE IF NOT EXISTS site_visit_daily (
+        stat_date TEXT PRIMARY KEY,
+        uv_count INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    $db->exec("CREATE TABLE IF NOT EXISTS site_visit_daily_visitors (
+        stat_date TEXT NOT NULL,
+        visitor_hash TEXT NOT NULL,
+        first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (stat_date, visitor_hash)
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_site_visit_visitors_date ON site_visit_daily_visitors(stat_date)");
+    $db->exec("CREATE TABLE IF NOT EXISTS site_visit_rate_limits (
+        bucket_key TEXT PRIMARY KEY,
+        window_start INTEGER NOT NULL,
+        request_count INTEGER NOT NULL DEFAULT 0,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    $db->exec("CREATE TABLE IF NOT EXISTS user_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        contact TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        admin_note TEXT,
+        handled_by INTEGER,
+        handled_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON user_feedback(status, created_at DESC)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON user_feedback(user_id, created_at DESC)");
+} catch (Exception $e) {
+    error_log('site statistics tables init failed: ' . $e->getMessage());
+}
+
+try {
+    $db->exec("CREATE TABLE IF NOT EXISTS ocr_import_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT NOT NULL,
+        stored_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        subject TEXT NOT NULL DEFAULT '',
+        education_level TEXT NOT NULL DEFAULT 'junior',
+        result_json TEXT,
+        error_message TEXT,
+        created_by INTEGER NOT NULL,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        finished_at DATETIME
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_ocr_batches_owner ON ocr_import_batches(created_by, id DESC)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_ocr_batches_status ON ocr_import_batches(status, updated_at)");
+} catch (Exception $e) {
+    error_log('OCR batch table init failed: ' . $e->getMessage());
 }
 
 // 生成匹配码：从文件名中提取核心标识
@@ -360,7 +575,131 @@ function createCaptcha() {
 // ===================== API路由 =====================
 $action = $_POST['action'] ?? $_GET['action'] ?? '';
 
+// 访问统计只接受服务端生成的匿名 Cookie；统计失败不能阻断业务请求。
+function siteStatDate(): string {
+    $tz = new DateTimeZone('Asia/Shanghai');
+    return (new DateTimeImmutable('now', $tz))->format('Y-m-d');
+}
+
+function siteVisitorHash(string $visitorId, string $date): string {
+    $secret = getenv('VISITOR_HASH_SECRET') ?: hash('sha256', __FILE__ . '|' . __DIR__);
+    return hash_hmac('sha256', $visitorId . '|' . $date, $secret);
+}
+
+function ensureVisitorCookie(): string {
+    $name = 'site_visitor_id';
+    $value = $_COOKIE[$name] ?? '';
+    if (!is_string($value) || !preg_match('/^[a-f0-9]{32}$/', $value)) {
+        try { $value = bin2hex(random_bytes(16)); } catch (Throwable $e) { $value = md5(uniqid('', true)); }
+        $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+        setcookie($name, $value, [
+            'expires' => time() + 31536000,
+            'path' => '/',
+            'secure' => $secure,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+    }
+    return $value;
+}
+
+function siteStatBlockedAction(string $action): bool {
+    if ($action !== 'record_visit') return true;
+    $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+    if (!in_array($method, ['GET', 'POST'], true)) return true;
+    $ua = strtolower((string)($_SERVER['HTTP_USER_AGENT'] ?? ''));
+    if ($ua === '' || preg_match('/bot|crawler|spider|scrapy|curl|wget|python-requests|go-http-client|headless|nikto|sqlmap|nmap|masscan|zgrab/i', $ua)) return true;
+    return false;
+}
+
+function siteRateAllowed(string $key, int $limit, int $window): bool {
+    global $db;
+    try {
+        $now = time();
+        $row = dbFetchOne($db, 'SELECT window_start, request_count FROM site_visit_rate_limits WHERE bucket_key=?', [$key]);
+        if (!$row || $now - (int)$row['window_start'] >= $window) {
+            dbQuery($db, 'INSERT OR REPLACE INTO site_visit_rate_limits(bucket_key, window_start, request_count, updated_at) VALUES(?,?,1,CURRENT_TIMESTAMP)', [$key, $now]);
+            return true;
+        }
+        if ((int)$row['request_count'] >= $limit) return false;
+        dbQuery($db, 'UPDATE site_visit_rate_limits SET request_count=request_count+1, updated_at=CURRENT_TIMESTAMP WHERE bucket_key=?', [$key]);
+        return true;
+    } catch (Throwable $e) {
+        error_log('site rate limit failed: ' . $e->getMessage());
+        return true;
+    }
+}
+
+function ocrRefreshBatch(array $batch): array {
+    global $db;
+    $dir = __DIR__ . '/../data/ocr_batches/';
+    $base = basename((string)$batch['stored_name']);
+    $resultPath = $dir . $base . '.json';
+    $logPath = $dir . $base . '.log';
+    if (($batch['status'] === 'queued' || $batch['status'] === 'running') && is_file($resultPath)) {
+        $json = @file_get_contents($resultPath);
+        $data = json_decode((string)$json, true);
+        if (is_array($data) && isset($data['questions']) && is_array($data['questions'])) {
+            dbQuery($db, "UPDATE ocr_import_batches SET status='review', result_json=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'committed'", [$json, (int)$batch['id']]);
+            $batch['status'] = 'review'; $batch['result_json'] = $json; $batch['error_message'] = null;
+        }
+    } elseif (($batch['status'] === 'queued' || $batch['status'] === 'running') && is_file($logPath) && filesize($logPath) > 0) {
+        $error = trim((string)@file_get_contents($logPath));
+        if ($error !== '') {
+            dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'committed'", [mb_substr($error, 0, 1000), (int)$batch['id']]);
+            $batch['status'] = 'failed'; $batch['error_message'] = mb_substr($error, 0, 1000);
+        }
+    }
+    return $batch;
+}
+
+function startOcrWorker(array $batch): void {
+    $root = realpath(__DIR__ . '/..');
+    $dir = $root . DIRECTORY_SEPARATOR . 'data' . DIRECTORY_SEPARATOR . 'ocr_batches';
+    $input = $dir . DIRECTORY_SEPARATOR . basename((string)$batch['stored_name']);
+    $output = $input . '.json';
+    $log = $input . '.log';
+    $python = getenv('PYTHON_BIN') ?: (PHP_OS_FAMILY === 'Windows' ? 'python' : 'python3');
+    $worker = $root . DIRECTORY_SEPARATOR . 'ocr' . DIRECTORY_SEPARATOR . 'worker.py';
+    if (!is_file($worker)) return;
+    $cmd = escapeshellarg($python) . ' ' . escapeshellarg($worker) . ' --input ' . escapeshellarg($input) . ' --output ' . escapeshellarg($output) . ' --subject ' . escapeshellarg((string)$batch['subject']) . ' --education-level ' . escapeshellarg((string)$batch['education_level']);
+    if (PHP_OS_FAMILY === 'Windows') {
+        $cmd = 'start /B "StudyScapeOCR" ' . $cmd . ' > ' . escapeshellarg($log) . ' 2>&1';
+        @pclose(@popen($cmd, 'r'));
+    } else {
+        @exec($cmd . ' > ' . escapeshellarg($log) . ' 2>&1 &');
+    }
+}
+
+function recordSiteVisit(): void {
+    global $db;
+    if (siteStatBlockedAction((string)($_POST['action'] ?? $_GET['action'] ?? ''))) return;
+    try {
+        $date = siteStatDate();
+        $visitor = ensureVisitorCookie();
+        $hash = siteVisitorHash($visitor, $date);
+        if (!siteRateAllowed('visit:' . substr($hash, 0, 48), 2, 60)) return;
+        $db->exec('BEGIN IMMEDIATE');
+        $stmt = $db->prepare('INSERT OR IGNORE INTO site_visit_daily_visitors(stat_date, visitor_hash) VALUES(?, ?)');
+        $stmt->bindValue(1, $date, SQLITE3_TEXT);
+        $stmt->bindValue(2, $hash, SQLITE3_TEXT);
+        $stmt->execute();
+        if ($db->changes() > 0) {
+            $db->exec("INSERT INTO site_visit_daily(stat_date, uv_count, updated_at) VALUES('" . SQLite3::escapeString($date) . "', 1, CURRENT_TIMESTAMP) ON CONFLICT(stat_date) DO UPDATE SET uv_count=uv_count+1, updated_at=CURRENT_TIMESTAMP");
+        }
+        $db->exec('COMMIT');
+    } catch (Throwable $e) {
+        try { $db->exec('ROLLBACK'); } catch (Throwable $ignored) {}
+        error_log('site visit failed: ' . $e->getMessage());
+    }
+}
+
 // 验证码图片
+if ($action === 'record_visit') {
+    recordSiteVisit();
+    jsonOut(true, '', ['recorded' => true, 'stat_date' => siteStatDate()]);
+}
+
 if ($action === 'captcha') {
     $code = createCaptcha();
     header("Content-type: image/png");
@@ -438,31 +777,87 @@ function validateEmail($email) {
     return filter_var($email, FILTER_VALIDATE_EMAIL);
 }
 
-function isLoggedIn() {
-    return isset($_SESSION['user_id']);
+function isLoggedIn(): bool {
+    return currentUser() !== null;
 }
 
-function isAdmin() {
+function currentUser(): ?array {
     global $db;
     $uid = (int)($_SESSION['user_id'] ?? 0);
-    if ($uid <= 0 || !isset($db)) return false;
-
-    $user = dbFetchOne($db, "SELECT id, username, is_admin, is_active, is_approved FROM users WHERE id=?", [$uid]);
+    if ($uid <= 0 || !isset($db)) return null;
+    $user = dbFetchOne($db, "SELECT id, username, email, role, is_initial_root, is_admin, is_active, is_approved FROM users WHERE id=?", [$uid]);
     if (!$user || !(int)$user['is_active']) {
-        unset($_SESSION['user_id'], $_SESSION['username'], $_SESSION['is_admin'], $_SESSION['is_approved']);
-        return false;
+        unset($_SESSION['user_id'], $_SESSION['username'], $_SESSION['is_admin'], $_SESSION['is_approved'], $_SESSION['role']);
+        return null;
     }
-
+    if ($user['username'] === 'lian') {
+        $user['role'] = 'root';
+        $user['is_initial_root'] = 1;
+    }
     $_SESSION['username'] = $user['username'];
-    $_SESSION['is_admin'] = (bool)$user['is_admin'];
+    $_SESSION['is_admin'] = in_array($user['role'], ['root', 'content_admin'], true);
     $_SESSION['is_approved'] = (bool)$user['is_approved'];
-    return (bool)$user['is_admin'];
+    $_SESSION['role'] = $user['role'];
+    return $user;
+}
+
+function isAdmin(): bool {
+    $user = currentUser();
+    return $user !== null && in_array($user['role'], ['root', 'content_admin'], true);
+}
+
+function isRoot(): bool {
+    $user = currentUser();
+    return $user !== null && $user['role'] === 'root';
+}
+
+function isInitialRoot(): bool {
+    $user = currentUser();
+    return $user !== null && $user['username'] === 'lian';
 }
 
 function requireAdmin() {
     if (!isLoggedIn()) jsonOut(false, "请先登录");
     if (!isAdmin()) jsonOut(false, "权限不足，仅管理员可操作");
     return (int)$_SESSION['user_id'];
+}
+
+function requireRoot(): int {
+    if (!isLoggedIn()) jsonOut(false, "请先登录");
+    if (!isRoot()) jsonOut(false, "权限不足，仅 root 可操作");
+    return (int)$_SESSION['user_id'];
+}
+
+function requireContentPermission(string $permission): int {
+    if (!isLoggedIn()) jsonOut(false, "请先登录");
+    $user = currentUser();
+    if (!$user || !in_array($user['role'], ['root', 'content_admin'], true)) {
+        jsonOut(false, "权限不足，仅内容管理员或 root 可操作");
+    }
+    return (int)$user['id'];
+}
+
+function chinaTodayUtcBounds(): array {
+    $china = new DateTimeZone('Asia/Shanghai');
+    $utc = new DateTimeZone('UTC');
+    $start = new DateTimeImmutable('today', $china);
+    $end = $start->modify('+1 day');
+    return [$start->setTimezone($utc)->format('Y-m-d H:i:s'), $end->setTimezone($utc)->format('Y-m-d H:i:s')];
+}
+
+function createAuthorizationNotification(int $targetUid, string $type, string $label): void {
+    global $db;
+    $lian = dbFetchOne($db, "SELECT id FROM users WHERE username='lian' LIMIT 1");
+    $target = dbFetchOne($db, "SELECT username FROM users WHERE id=?", [$targetUid]);
+    if (!$lian || !$target) return;
+    $operator = (string)($_SESSION['username'] ?? '管理员');
+    $title = '授权动态';
+    $body = sprintf('%s 将用户 %s %s。', $operator, (string)$target['username'], $label);
+    try {
+        dbQuery($db, "INSERT INTO notifications(user_id,type,title,body,related_id) VALUES(?,?,?,?,?)", [(int)$lian['id'], $type, $title, $body, $targetUid]);
+    } catch (Throwable $e) {
+        error_log('authorization notification failed: ' . $e->getMessage());
+    }
 }
 
 function invalidateSession() {
@@ -476,30 +871,6 @@ function invalidateSession() {
 
 function getUid() {
     return $_SESSION['user_id'] ?? null;
-}
-
-function createDangerChallenge(string $target): string {
-    $alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-    $code = '';
-    for ($i = 0; $i < 12; $i++) {
-        $code .= $alphabet[random_int(0, strlen($alphabet) - 1)];
-    }
-    $_SESSION['danger_challenge'] = [
-        'action' => $target,
-        'user_id' => (int)$_SESSION['user_id'],
-        'hash' => hash('sha256', $code),
-        'expires_at' => time() + 300,
-    ];
-    return $code;
-}
-
-function consumeDangerChallenge(string $target, string $code, bool $confirmed): bool {
-    $challenge = $_SESSION['danger_challenge'] ?? null;
-    unset($_SESSION['danger_challenge']);
-    if (!$confirmed || !$challenge || !is_array($challenge)) return false;
-    if ($challenge['action'] !== $target || (int)$challenge['user_id'] !== (int)$_SESSION['user_id']) return false;
-    if (time() > (int)$challenge['expires_at']) return false;
-    return hash_equals((string)$challenge['hash'], hash('sha256', strtoupper(trim($code))));
 }
 
 // SQLite CURRENT_TIMESTAMP 使用 UTC 保存；用户界面统一显示中国标准时间。
@@ -641,7 +1012,6 @@ $csrfBypass = [
     'register',
     'captcha',
     'check_session',
-    'create_admin',           // 首装专用；内部会判断，若已有管理员则强制登录管理员 + CSRF
     'question_stats',
     'get_subjects',
     'list_questions',
@@ -653,11 +1023,20 @@ $csrfBypass = [
     'attempt_result',
     'practice_subjects',
     'practice_result',
+    'feedback_list_mine',
+    'notification_list',
+    'notification_unread_count',
     // C：资料读接口
     'material_list',
     'material_download',      // GET 直链，无法带 CSRF，另有一次性 token 鉴权
     // 首页公开概览（未登录即可调用）
     'public_overview',
+    'record_visit',
+    'admin_access_stats',
+    // 已移除的历史危险 action 直接返回“功能已移除”，不要求旧客户端提供 CSRF。
+    'admin_danger_challenge',
+    'clear_users',
+    'reset_db',
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -699,20 +1078,9 @@ if ($action) {
                     jsonOut(false, "用户名或邮箱已被注册");
                 }
 
-                // 首位用户继续自动成为管理员；后续用户注册后直接生效，无需审批。
-                $adminRow = dbFetchOne($db, "SELECT COUNT(*) AS c FROM users WHERE is_admin=1");
-                $isFirstAdmin = (int)($adminRow['c'] ?? 0) === 0;
-
-                if ($isFirstAdmin) {
-                    dbQuery($db, "INSERT INTO users(username, email, password, is_approved, is_admin, is_active, created_at) VALUES(?, ?, ?, 1, 1, 1, CURRENT_TIMESTAMP)",
-                        [$username, $email, $password]);
-                    $newId = $db->lastInsertRowID();
-                    log_admin_action('first_install_auto_admin', (int)$newId);
-                    jsonOut(true, "注册成功：您已成为首位管理员，可直接登录");
-                }
-
-                dbQuery($db, "INSERT INTO users(username, email, password, is_approved, is_admin, is_active) VALUES(?, ?, ?, 1, 0, 1)",
-                    [$username, $email, $password]);
+                // 初始 root 已在启动迁移阶段固定创建为 lian，普通注册不再自动升权。
+                dbQuery($db, "INSERT INTO users(username, email, password, role, is_initial_root, is_approved, is_admin, is_active) VALUES(?, ?, ?, 'user', 0, 1, 0, 1)",
+                    [$username, $email, encryptPassword($password)]);
                 jsonOut(true, "注册成功，可直接登录");
                 break;
 
@@ -733,11 +1101,15 @@ if ($action) {
                 
                 $u = dbFetchOne($db, "SELECT * FROM users WHERE username=?", [$username]);
                 
-                if (!$u || $u['password'] !== $password) {
+                if (!$u || !passwordMatches((string)$u['password'], $password)) {
                     recordLoginFail();
                     jsonOut(false, "用户名或密码错误或登录过于频繁，请稍后再试");
                 }
-                
+                // 兼容历史明文账号：验证成功后立即改写为密文。
+                if (!str_starts_with((string)$u['password'], 'enc:v1:')) {
+                    dbQuery($db, "UPDATE users SET password=? WHERE id=?", [encryptPassword($password), (int)$u['id']]);
+                }
+
                 if (!$u['is_active']) {
                     recordLoginFail();
                     jsonOut(false, "用户名或密码错误或登录过于频繁，请稍后再试");
@@ -752,7 +1124,8 @@ if ($action) {
 
                 $_SESSION['user_id'] = $u['id'];
                 $_SESSION['username'] = $u['username'];
-                $_SESSION['is_admin'] = (bool)$u['is_admin'];
+                $_SESSION['role'] = $u['username'] === 'lian' ? 'root' : ($u['role'] ?? ((int)$u['is_admin'] ? 'root' : 'user'));
+                $_SESSION['is_admin'] = in_array($_SESSION['role'], ['root', 'content_admin'], true);
                 $_SESSION['is_approved'] = (bool)$u['is_approved'];
                 
                 dbQuery($db, "UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?", [$u['id']]);
@@ -762,7 +1135,9 @@ if ($action) {
                         'id' => $u['id'],
                         'username' => $u['username'],
                         'email' => $u['email'],
-                        'is_admin' => (bool)$u['is_admin'],
+                        'role' => $_SESSION['role'],
+                        'is_initial_root' => (bool)($u['is_initial_root'] ?? false),
+                        'is_admin' => in_array($_SESSION['role'], ['root', 'content_admin'], true),
                         'is_approved' => (bool)$u['is_approved']
                     ]
                 ]);
@@ -770,6 +1145,7 @@ if ($action) {
 
             // ==================== 退出登录 ====================
             case 'logout':
+                if (strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') jsonOut(false, '请使用 POST 退出登录');
                 $_SESSION = [];
                 session_destroy();
                 jsonOut(true, "已退出登录");
@@ -862,9 +1238,13 @@ if ($action) {
             // ==================== 检查会话 ====================
             case 'check_session':
                 if (isLoggedIn()) {
-                    $u = dbFetchOne($db, "SELECT id, username, email, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [getUid()]);
+                    $u = dbFetchOne($db, "SELECT id, username, email, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [getUid()]);
                     if ($u && (int)$u['is_active']) {
+                        $u['role'] = $u['username'] === 'lian' ? 'root' : ($u['role'] ?? ((int)$u['is_admin'] ? 'root' : 'user'));
+                        $u['is_initial_root'] = $u['username'] === 'lian' ? 1 : (int)($u['is_initial_root'] ?? 0);
+                        $u['is_admin'] = in_array($u['role'], ['root', 'content_admin'], true) ? 1 : 0;
                         $_SESSION['username'] = $u['username'];
+                        $_SESSION['role'] = $u['role'];
                         $_SESSION['is_admin'] = (bool)$u['is_admin'];
                         $_SESSION['is_approved'] = (bool)$u['is_approved'];
                         jsonOut(true, "", ['user' => formatUserTimestamps($u)]);
@@ -879,10 +1259,17 @@ if ($action) {
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
                 $uid = getUid();
                 // 不返回 password 字段
-                $user = dbFetchOne($db, "SELECT id, username, email, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [$uid]);
-                $examList = dbFetchAll($db, "SELECT json_content FROM exam_data WHERE type='exam'");
+                $user = dbFetchOne($db, "SELECT id, username, email, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [$uid]);
+                $rootDashboard = isRoot();
+                $examSql = $rootDashboard
+                    ? "SELECT json_content FROM exam_data WHERE type='exam'"
+                    : "SELECT json_content FROM exam_data WHERE type='exam' AND json_valid(json_content) AND (json_extract(json_content, '$.user_id')=? OR json_extract(json_content, '$.user.id')=?)";
+                $examList = dbFetchAll($db, $examSql, $rootDashboard ? [] : [$uid, $uid]);
                 $examCount = count($examList);
-                $resList = dbFetchAll($db, "SELECT json_content FROM exam_data WHERE type='result'");
+                $resultSql = $rootDashboard
+                    ? "SELECT json_content FROM exam_data WHERE type='result'"
+                    : "SELECT json_content FROM exam_data WHERE type='result' AND json_valid(json_content) AND (json_extract(json_content, '$.user_id')=? OR json_extract(json_content, '$.user.id')=?)";
+                $resList = dbFetchAll($db, $resultSql, $rootDashboard ? [] : [$uid, $uid]);
                 $submitCount = count($resList);
                 jsonOut(true, "", [
                     'user' => formatUserTimestamps($user),
@@ -896,52 +1283,288 @@ if ($action) {
                 ]);
                 break;
 
-            // ==================== 危险操作授权码 ====================
-            case 'admin_danger_challenge':
-                $uid = requireAdmin();
-                $target = $_POST['target'] ?? '';
-                if (!in_array($target, ['clear_users', 'reset_db'], true)) {
-                    jsonOut(false, "危险操作类型无效");
+            // ==================== 用户反馈 ====================
+            case 'feedback_submit':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $content = trim((string)($_POST['content'] ?? ''));
+                $contact = trim((string)($_POST['contact'] ?? ''));
+                if ($content === '' || mb_strlen($content) < 2 || mb_strlen($content) > 2000) jsonOut(false, '反馈内容需为2-2000个字符');
+                if (mb_strlen($contact) > 200) jsonOut(false, '联系方式过长');
+                $user = currentUser();
+                [$dayStart, $dayEnd] = chinaTodayUtcBounds();
+                try {
+                    $db->exec('BEGIN IMMEDIATE');
+                    if (!$user || !in_array($user['role'], ['root', 'content_admin'], true)) {
+                        $count = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM user_feedback WHERE user_id=? AND created_at>=? AND created_at<?', [$uid, $dayStart, $dayEnd])['c'] ?? 0);
+                        if ($count >= 2) {
+                            $db->exec('ROLLBACK');
+                            jsonOut(false, '每位用户每天最多提交 2 条反馈，请明天再试');
+                        }
+                    }
+                    dbQuery($db, 'INSERT INTO user_feedback(user_id, content, contact) VALUES(?,?,?)', [$uid, $content, $contact]);
+                    $feedbackId = (int)$db->lastInsertRowID();
+                    $db->exec('COMMIT');
+                } catch (Throwable $e) {
+                    try { $db->exec('ROLLBACK'); } catch (Throwable $ignored) {}
+                    jsonOut(false, '反馈提交失败：' . $e->getMessage());
                 }
-                $code = createDangerChallenge($target);
-                log_admin_action('danger_challenge_' . $target, $uid);
-                jsonOut(true, "授权码已生成，5分钟内有效且只能使用一次", [
-                    'target' => $target,
-                    'code' => $code,
-                    'expires_in' => 300
-                ]);
+                jsonOut(true, '反馈已提交', ['id' => $feedbackId]);
                 break;
 
-            // ==================== 管理员面板（P0-A6：返回密码+审计日志） ====================
-            case 'get_admin_panel':
-                if (!isLoggedIn()) jsonOut(false, "请先登录");
+            case 'feedback_list_mine':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $page = max(1, (int)($_POST['page'] ?? $_GET['page'] ?? 1));
+                $size = max(1, min(50, (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 20)));
+                $total = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM user_feedback WHERE user_id=?', [$uid])['c'] ?? 0);
+                $items = dbFetchAll($db, 'SELECT id, content, contact, status, reply_content, replied_at, created_at, updated_at FROM user_feedback WHERE user_id=? ORDER BY id DESC LIMIT ? OFFSET ?', [$uid, $size, ($page - 1) * $size]);
+                foreach ($items as &$item) {
+                    foreach (['created_at', 'updated_at', 'replied_at'] as $field) if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]);
+                }
+                unset($item);
+                jsonOut(true, '', ['items' => $items, 'pagination' => ['page' => $page, 'page_size' => $size, 'total' => $total]]);
+                break;
+
+            case 'admin_feedback_list':
+                $adminUid = requireRoot();
+                $page = max(1, (int)($_POST['page'] ?? 1));
+                $size = max(1, min(100, (int)($_POST['page_size'] ?? 20)));
+                $status = trim((string)($_POST['status'] ?? ''));
+                $keyword = trim((string)($_POST['keyword'] ?? ''));
+                $where = ['1=1']; $args = [];
+                if (in_array($status, ['open', 'processing', 'resolved', 'closed'], true)) { $where[] = 'f.status=?'; $args[] = $status; }
+                if ($keyword !== '') { $where[] = '(f.content LIKE ? OR f.contact LIKE ? OR u.username LIKE ?)'; $like = '%' . $keyword . '%'; array_push($args, $like, $like, $like); }
+                $whereSql = implode(' AND ', $where);
+                $total = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM user_feedback f JOIN users u ON u.id=f.user_id WHERE $whereSql", $args)['c'] ?? 0);
+                $items = dbFetchAll($db, "SELECT f.id, f.user_id, u.username, f.content, f.contact, f.status, f.admin_note, f.reply_content, f.replied_at, f.handled_by, f.handled_at, f.created_at, f.updated_at FROM user_feedback f LEFT JOIN users u ON u.id=f.user_id WHERE $whereSql ORDER BY f.id DESC LIMIT ? OFFSET ?", array_merge($args, [$size, ($page - 1) * $size]));
+                foreach ($items as &$item) {
+                    foreach (['created_at', 'updated_at', 'handled_at', 'replied_at'] as $field) if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]);
+                }
+                unset($item);
+                log_admin_action('list_feedback', $adminUid);
+                jsonOut(true, '', ['items' => $items, 'pagination' => ['page' => $page, 'page_size' => $size, 'total' => $total]]);
+                break;
+
+            case 'admin_feedback_update':
+                $adminUid = requireRoot();
+                $id = (int)($_POST['id'] ?? 0);
+                $actionName = trim((string)($_POST['feedback_action'] ?? $_POST['action_type'] ?? ''));
+                $status = trim((string)($_POST['status'] ?? ''));
+                $note = trim((string)($_POST['admin_note'] ?? ''));
+                if ($id <= 0 || mb_strlen($note) > 2000) jsonOut(false, '参数无效');
+                $feedback = dbFetchOne($db, 'SELECT id, user_id, status FROM user_feedback WHERE id=?', [$id]);
+                if (!$feedback) jsonOut(false, '反馈不存在');
+                if ($actionName === 'adopt') {
+                    $status = 'resolved';
+                    dbQuery($db, 'UPDATE user_feedback SET status=?, admin_note=?, reply_content=?, replied_by=?, replied_at=CURRENT_TIMESTAMP, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$status, $note, '感谢您的建议，我们已采纳。', $adminUid, $adminUid, $id]);
+                } elseif ($actionName === 'ignore') {
+                    $status = 'closed';
+                    dbQuery($db, 'UPDATE user_feedback SET status=?, admin_note=?, reply_content=NULL, replied_by=NULL, replied_at=NULL, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$status, $note, $adminUid, $id]);
+                } elseif ($actionName === 'reopen') {
+                    $status = 'open';
+                    dbQuery($db, 'UPDATE user_feedback SET status=?, reply_content=NULL, replied_by=NULL, replied_at=NULL, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$status, $adminUid, $id]);
+                } elseif (in_array($status, ['open', 'closed'], true)) {
+                    dbQuery($db, 'UPDATE user_feedback SET status=?, admin_note=?, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$status, $note, $adminUid, $id]);
+                } elseif ($status === 'resolved') {
+                    jsonOut(false, '请使用“采纳并回复”按钮完成采纳');
+                } else {
+                    jsonOut(false, '反馈操作无效');
+                }
+                log_admin_action('update_feedback_' . ($actionName ?: $status), $id);
+                jsonOut(true, '反馈状态已更新');
+                break;
+
+            case 'notification_list':
+            case 'notification_unread_count':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $unread = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM notifications WHERE user_id=? AND read_at IS NULL', [$uid])['c'] ?? 0);
+                if ($action === 'notification_unread_count') jsonOut(true, '', ['unread_count' => $unread]);
+                $page = max(1, (int)($_POST['page'] ?? $_GET['page'] ?? 1));
+                $size = max(1, min(50, (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 20)));
+                $items = dbFetchAll($db, 'SELECT id, type, title, body, related_id, read_at, created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT ? OFFSET ?', [$uid, $size, ($page - 1) * $size]);
+                foreach ($items as &$item) { foreach (['read_at', 'created_at'] as $field) if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]); }
+                unset($item);
+                jsonOut(true, '', ['items' => $items, 'unread_count' => $unread]);
+                break;
+
+            case 'notification_mark_read':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $id = (int)($_POST['id'] ?? 0);
+                if ($id > 0) dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?', [$id, $uid]);
+                else dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL', [$uid]);
+                jsonOut(true, '通知已读');
+                break;
+
+            case 'admin_access_stats':
                 requireAdmin();
-                log_admin_action('get_admin_panel'); // 管理员查看用户列表（含密码）必须审计
-                // 明确返回 password（admin.html 需展示明文密码，作为密码找回机制）
-                $users = dbFetchAll($db, "SELECT id, username, email, password, is_admin, is_approved, is_active, created_at, last_login FROM users ORDER BY id DESC");
+                $tz = new DateTimeZone('Asia/Shanghai');
+                $today = new DateTimeImmutable('now', $tz);
+                $metrics = [
+                    'question_count' => (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM questions')['c'] ?? 0),
+                    'subject_count' => (int)(dbFetchOne($db, 'SELECT COUNT(DISTINCT subject) AS c FROM questions')['c'] ?? 0),
+                    'material_count' => (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM materials')['c'] ?? 0),
+                ];
+                if (isRoot()) {
+                    $metrics = array_merge($metrics, [
+                        'user_count' => (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM users')['c'] ?? 0),
+                        'active_count' => (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM users WHERE is_active=1')['c'] ?? 0),
+                        'published_paper_count' => (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM papers WHERE is_published=1')['c'] ?? 0),
+                        'download_count' => (int)(dbFetchOne($db, 'SELECT COALESCE(SUM(downloads),0) AS c FROM materials')['c'] ?? 0),
+                    ]);
+                }
+                $trend = [];
+                $todayUv = 0; $uv7d = 0; $peak = ['date' => null, 'uv' => 0];
+                if (isRoot()) {
+                    for ($i = 6; $i >= 0; $i--) {
+                        $date = $today->modify('-' . $i . ' days')->format('Y-m-d');
+                        $row = dbFetchOne($db, 'SELECT uv_count FROM site_visit_daily WHERE stat_date=?', [$date]);
+                        $trend[] = ['date' => $date, 'label' => substr($date, 5), 'uv' => (int)($row['uv_count'] ?? 0)];
+                    }
+                    $todayUv = (int)($trend[6]['uv'] ?? 0);
+                    $uv7d = array_sum(array_column($trend, 'uv'));
+                    foreach ($trend as $point) { if ((int)$point['uv'] > (int)$peak['uv']) $peak = $point; }
+                    $open = dbFetchOne($db, "SELECT COUNT(*) AS c FROM user_feedback WHERE status IN ('open','processing')");
+                    $metrics['feedback_open_count'] = (int)($open['c'] ?? 0);
+                }
+                jsonOut(true, '', array_merge($metrics, ['timezone' => 'Asia/Shanghai', 'today' => ['date' => $today->format('Y-m-d'), 'uv' => $todayUv], 'summary' => ['uv_7d' => $uv7d, 'average_uv' => round($uv7d / 7, 2), 'peak_uv' => (int)$peak['uv'], 'peak_date' => $peak['date']], 'trend' => $trend]));
+                break;
+
+            // ==================== OCR 批次审核 ====================
+            case 'ocr_batch_create':
+                $uid = requireContentPermission('question_import');
+                if (empty($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) jsonOut(false, '请选择有效文件');
+                $file = $_FILES['file'];
+                $ext = strtolower(pathinfo((string)$file['name'], PATHINFO_EXTENSION));
+                if (!in_array($ext, ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff'], true)) jsonOut(false, '仅支持 PDF 或图片文件');
+                if ((int)$file['size'] > 50 * 1024 * 1024) jsonOut(false, '文件不能超过 50MB');
+                $level = validateEducationLevel($_POST['education_level'] ?? 'junior');
+                $subject = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
+                $dir = __DIR__ . '/../data/ocr_batches';
+                if (!is_dir($dir)) @mkdir($dir, 0750, true);
+                $stored = 'ocr_' . bin2hex(random_bytes(16)) . '.' . $ext;
+                $path = $dir . DIRECTORY_SEPARATOR . $stored;
+                if (!move_uploaded_file($file['tmp_name'], $path)) jsonOut(false, 'OCR 文件保存失败');
+                $resultName = $stored . '.json';
+                dbQuery($db, 'INSERT INTO ocr_import_batches(file_name, stored_name, subject, education_level, created_by, status) VALUES(?,?,?,?,?,\'running\')', [(string)$file['name'], $stored, $subject, $level, $uid]);
+                $batchId = (int)$db->lastInsertRowID();
+                $batch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [$batchId]);
+                startOcrWorker($batch ?: ['id' => $batchId, 'stored_name' => $stored, 'subject' => $subject, 'education_level' => $level]);
+                jsonOut(true, '文件已上传，OCR 处理中', ['batch_id' => $batchId, 'status' => 'running']);
+                break;
+
+            case 'ocr_batch_list':
+                requireContentPermission('question_import');
+                $page = max(1, (int)($_POST['page'] ?? $_GET['page'] ?? 1));
+                $size = max(1, min(50, (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 20)));
+                $total = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM ocr_import_batches')['c'] ?? 0);
+                $items = dbFetchAll($db, 'SELECT id, file_name, stored_name, status, subject, education_level, error_message, retry_count, created_at, updated_at, finished_at, json_extract(result_json, "$.questions") AS questions_json FROM ocr_import_batches ORDER BY id DESC LIMIT ? OFFSET ?', [$size, ($page - 1) * $size]);
+                foreach ($items as &$item) {
+                    $item = ocrRefreshBatch($item);
+                    $raw = (string)($item['result_json'] ?? $item['questions_json'] ?? '');
+                    $decoded = json_decode($raw, true);
+                    // result_json 是完整对象 {"questions":[...]}；questions_json 是 json_extract 出的数组
+                    $qs = isset($item['result_json']) ? ($decoded['questions'] ?? []) : $decoded;
+                    $item['question_count'] = is_array($qs) ? count($qs) : 0;
+                    unset($item['questions_json'], $item['result_json'], $item['stored_name']);
+                }
+                unset($item);
+                jsonOut(true, '', ['items' => $items, 'pagination' => ['page' => $page, 'page_size' => $size, 'total' => $total]]);
+                break;
+
+            case 'ocr_batch_get':
+                requireContentPermission('question_import');
+                $id = (int)($_POST['batch_id'] ?? $_GET['batch_id'] ?? 0);
+                $batch = dbFetchOne($db, 'SELECT id, file_name, stored_name, status, subject, education_level, result_json, error_message, retry_count, created_at, updated_at, finished_at FROM ocr_import_batches WHERE id=?', [$id]);
+                if (!$batch) jsonOut(false, 'OCR 批次不存在');
+                $batch = ocrRefreshBatch($batch);
+                $batch['result'] = $batch['result_json'] ? json_decode($batch['result_json'], true) : null;
+                unset($batch['result_json'], $batch['stored_name']);
+                jsonOut(true, '', ['batch' => $batch]);
+                break;
+
+            case 'ocr_batch_retry':
+                $uid = requireContentPermission('question_import');
+                $id = (int)($_POST['batch_id'] ?? 0);
+                $batch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [$id]);
+                if (!$batch) jsonOut(false, 'OCR 批次不存在');
+                if (!in_array($batch['status'], ['failed', 'queued'], true)) jsonOut(false, '当前状态不可重试');
+                dbQuery($db, 'UPDATE ocr_import_batches SET status=\'queued\', retry_count=retry_count+1, error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$id]);
+                $retryBatch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [$id]);
+                if ($retryBatch) startOcrWorker($retryBatch);
+                jsonOut(true, '已重新排队', ['batch_id' => $id, 'status' => 'queued']);
+                break;
+
+            case 'ocr_batch_delete':
+                requireContentPermission('question_import');
+                $id = (int)($_POST['batch_id'] ?? 0);
+                $batch = dbFetchOne($db, 'SELECT stored_name FROM ocr_import_batches WHERE id=?', [$id]);
+                if (!$batch) jsonOut(false, 'OCR 批次不存在');
+                @unlink(__DIR__ . '/../data/ocr_batches/' . basename((string)$batch['stored_name']));
+                dbQuery($db, 'DELETE FROM ocr_import_batches WHERE id=?', [$id]);
+                jsonOut(true, 'OCR 批次已删除');
+                break;
+
+            case 'ocr_batch_commit':
+                requireContentPermission('question_import');
+                $id = (int)($_POST['batch_id'] ?? 0);
+                $json = (string)($_POST['result_json'] ?? '');
+                $batch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [$id]);
+                if (!$batch) jsonOut(false, 'OCR 批次不存在');
+                if ($batch['status'] === 'committed') jsonOut(false, '该批次已入库');
+                $data = json_decode($json !== '' ? $json : (string)$batch['result_json'], true);
+                if (!is_array($data)) jsonOut(false, '审核数据格式无效');
+                $questions = is_array($data['questions'] ?? null) ? $data['questions'] : [];
+                $kept = [];
+                foreach ($questions as $q) {
+                    if (!is_array($q) || ($q['included'] ?? true) === false) continue;
+                    $content = trim((string)($q['content'] ?? $q['text'] ?? ''));
+                    if ($content === '' || mb_strlen($content) > 100000) continue;
+                    $options = is_array($q['options'] ?? null) ? array_values(array_filter(array_map('strval', $q['options']))) : [];
+                    $kept[] = ['question_id' => (string)($q['source_qid'] ?? count($kept) + 1), 'question_type' => (string)($q['question_type'] ?? 'single'), 'question_content' => $content, 'question_options' => $options, 'answer' => (string)($q['correct_answer'] ?? ''), 'resolve' => (string)($q['explanation'] ?? ''), 'difficulty' => max(1, min(5, (int)($q['difficulty'] ?? 3))), 'points' => max(0, (float)($q['points'] ?? 1)), 'is_html' => !empty($q['is_html']) ? 1 : 0, 'subject' => $batch['subject'], 'education_level' => $batch['education_level']];
+                }
+                if (!$kept) jsonOut(false, '没有可入库的题目');
+                $importData = ['paper_name' => $batch['file_name'], 'subject' => $batch['subject'], 'education_level' => $batch['education_level'], 'questions' => $kept];
+                $normalized = [];
+                importExtractQuestions($importData, $batch['subject'] ?: '综合', $normalized);
+                $inserted = 0; $skipped = 0;
+                foreach ($normalized as $q) {
+                    $exists = dbFetchOne($db, 'SELECT id FROM questions WHERE content=? AND subject=? AND education_level=? LIMIT 1', [$q['content'], $q['subject'], $q['education_level']]);
+                    if ($exists) { $skipped++; continue; }
+                    $opts = !empty($q['options']) ? json_encode($q['options'], JSON_UNESCAPED_UNICODE) : null;
+                    dbQuery($db, 'INSERT INTO questions(subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html, match_key, source_qid) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', [$q['subject'], $q['question_type'], $q['category'] ?? $q['question_type'], $q['education_level'], $q['content'], $opts, $q['correct_answer'] ?? '', $q['explanation'] ?? '', $q['difficulty'] ?? 3, $q['points'] ?? 1, !empty($q['is_html']) ? 1 : 0, '', $q['_pcvl_qid'] ?? '']);
+                    $inserted++;
+                }
+                dbQuery($db, 'UPDATE ocr_import_batches SET status=\'committed\', result_json=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?', [json_encode(['questions' => $questions], JSON_UNESCAPED_UNICODE), $id]);
+                jsonOut(true, '审核题目已入库', ['inserted' => $inserted, 'skipped' => $skipped, 'total' => count($kept)]);
+                break;
+
+            // ==================== 危险操作已移除 ====================
+            case 'admin_danger_challenge':
+            case 'clear_users':
+            case 'reset_db':
+                jsonOut(false, '功能已移除');
+                break;
+
+            // ==================== 管理员面板（不返回密码） ====================
+            case 'get_admin_panel':
+                requireRoot();
+                $users = dbFetchAll($db, "SELECT id, username, email, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users ORDER BY id DESC");
                 $users = array_map('formatUserTimestamps', $users);
-                $examsRaw = dbFetchAll($db, "SELECT * FROM exam_data WHERE type='exam' ORDER BY id DESC");
-                $exams = array_map(function ($i) {
-                    return json_decode($i['json_content'], true);
-                }, $examsRaw);
                 $userTotal = dbFetchOne($db, "SELECT count(*) as c FROM users")['c'];
                 $activeTotal = dbFetchOne($db, "SELECT count(*) as c FROM users WHERE is_active=1")['c'];
-                // 审批流程已取消，保留 pending_count 仅为兼容旧版前端协议。
                 jsonOut(true, "", [
                     'users' => $users,
-                    'exams' => $exams,
-                    'stats' => [
-                        'user_count' => $userTotal,
-                        'active_count' => $activeTotal,
-                        'pending_count' => 0
-                    ]
+                    'stats' => ['user_count' => $userTotal, 'active_count' => $activeTotal, 'pending_count' => 0]
                 ]);
                 break;
 
             // ==================== 兼容旧客户端：注册审批已取消 ====================
             case 'approve_user':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireRoot();
                 $uid = (int)$_POST['user_id'];
                 dbQuery($db, "UPDATE users SET is_approved=1 WHERE id=?", [$uid]);
                 jsonOut(true, "注册后无需审批，账号已保持可用");
@@ -949,132 +1572,98 @@ if ($action) {
 
             case 'reject_user':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireRoot();
                 jsonOut(false, "注册审批已取消，请使用启用/禁用管理账号");
                 break;
 
             // ==================== 启用/禁用用户 ====================
             case 'toggle_user':
-                if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
-                $uid = (int)$_POST['user_id'];
+                $operator = requireRoot();
+                $uid = (int)($_POST['user_id'] ?? 0);
+                $target = dbFetchOne($db, "SELECT id, username, role, is_initial_root, is_active FROM users WHERE id=?", [$uid]);
+                if (!$target) jsonOut(false, '用户不存在');
+                if ((int)$target['is_initial_root'] === 1 || $target['username'] === 'lian') jsonOut(false, '初始 root 不可禁用');
+                if ($target['role'] === 'root' && !isInitialRoot()) jsonOut(false, '只有初始 lian 可以禁用其他 root');
                 dbQuery($db, "UPDATE users SET is_active = CASE WHEN is_active=1 THEN 0 ELSE 1 END WHERE id=?", [$uid]);
+                log_admin_action('toggle_user', $uid);
                 jsonOut(true, "状态已更新");
                 break;
 
-            // ==================== 创建管理员（P0-A1：首装保护） ====================
+            // ==================== 创建 root（仅初始 lian） ====================
             case 'create_admin':
-                // 首装保护：若已存在任何管理员，则必须是已登录管理员 + CSRF 手动校验
-                $has_admin = (bool)dbFetchOne($db, "SELECT 1 FROM users WHERE is_admin=1 LIMIT 1");
-                if ($has_admin) {
-                    if (!isLoggedIn() || !isAdmin()) jsonOut(false, "创建失败");
-                    // 手动 CSRF（create_admin 在 bypass 列表，但此时必须强制）
-                    $csrf_token = $_POST['csrf_token'] ?? '';
-                    if (!isset($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $csrf_token)) {
-                        jsonOut(false, "创建失败");
-                    }
-                }
+            case 'create_root':
+                requireRoot();
+                if (!isInitialRoot()) jsonOut(false, '仅初始 lian 可以创建 root');
                 $username = sanitizeInput($_POST['username'] ?? '');
                 $email = sanitizeInput($_POST['email'] ?? '');
-                $password = $_POST['password'] ?? '';
-                
-                if (empty($username) || empty($email) || empty($password)) {
-                    jsonOut(false, "创建失败");
-                }
-                if (!validateEmail($email)) {
-                    jsonOut(false, "创建失败");
-                }
-                if (strlen($password) < 4) {
-                    jsonOut(false, "创建失败");
-                }
-                
-                $exist = dbFetchOne($db, "SELECT id FROM users WHERE username=? OR email=?", [$username, $email]);
-                if ($exist) {
-                    jsonOut(false, "创建失败");
-                }
-                
-                dbQuery($db, "INSERT INTO users(username, email, password, is_admin, is_approved, is_active) VALUES(?, ?, ?, 1, 1, 1)", 
-                    [$username, $email, $password]);
-                jsonOut(true, "管理员创建成功");
+                $password = (string)($_POST['password'] ?? '');
+                if ($username === '' || $email === '' || $password === '' || !validateEmail($email) || strlen($password) < 4) jsonOut(false, '创建信息无效');
+                if (dbFetchOne($db, "SELECT id FROM users WHERE username=? OR email=?", [$username, $email])) jsonOut(false, '用户名或邮箱已存在');
+                dbQuery($db, "INSERT INTO users(username,email,password,role,is_initial_root,is_admin,is_approved,is_active) VALUES(?,?,?,'root',0,1,1,1)", [$username, $email, encryptPassword($password)]);
+                $newRootId = (int)$db->lastInsertRowID();
+                createAuthorizationNotification($newRootId, 'root', '已创建为 root');
+                log_admin_action('create_root', $newRootId);
+                jsonOut(true, 'root 创建成功');
                 break;
 
-            // ==================== 设为管理员 ====================
+            // ==================== 授权/撤销角色 ====================
+            case 'grant_root':
+                requireRoot();
+                if (!isInitialRoot()) jsonOut(false, '仅初始 lian 可以授权 root');
+                $uid = (int)($_POST['user_id'] ?? 0);
+                $target = dbFetchOne($db, "SELECT id, username, role FROM users WHERE id=?", [$uid]);
+                if (!$target) jsonOut(false, '用户不存在');
+                dbQuery($db, "UPDATE users SET role='root', is_admin=1 WHERE id=? AND username<>'lian'", [$uid]);
+                createAuthorizationNotification($uid, 'root', '已授予 root 权限');
+                jsonOut(true, '已授予 root 权限');
+                break;
+            case 'revoke_root':
+                requireRoot();
+                if (!isInitialRoot()) jsonOut(false, '仅初始 lian 可以撤销 root');
+                $uid = (int)($_POST['user_id'] ?? 0);
+                $target = dbFetchOne($db, "SELECT id, username, role, is_initial_root FROM users WHERE id=?", [$uid]);
+                if (!$target) jsonOut(false, '用户不存在');
+                if ((int)$target['is_initial_root'] === 1 || $target['username'] === 'lian') jsonOut(false, '初始 root 不可撤销');
+                dbQuery($db, "UPDATE users SET role='user', is_admin=0 WHERE id=?", [$uid]);
+                createAuthorizationNotification($uid, 'root_revoked', 'root 权限已撤销');
+                jsonOut(true, '已撤销 root 权限');
+                break;
+            case 'grant_content_admin':
+                requireRoot();
+                $uid = (int)($_POST['user_id'] ?? 0);
+                $target = dbFetchOne($db, "SELECT id, username, role FROM users WHERE id=?", [$uid]);
+                if (!$target) jsonOut(false, '用户不存在');
+                if ($target['role'] === 'root') jsonOut(false, 'root 无需授予内容管理员权限');
+                dbQuery($db, "UPDATE users SET role='content_admin', is_admin=0 WHERE id=?", [$uid]);
+                createAuthorizationNotification($uid, 'content_admin', '已授予内容管理员权限');
+                jsonOut(true, '已授予内容管理员权限');
+                break;
+            case 'revoke_content_admin':
+                requireRoot();
+                $uid = (int)($_POST['user_id'] ?? 0);
+                $target = dbFetchOne($db, "SELECT id, username, role FROM users WHERE id=?", [$uid]);
+                if (!$target) jsonOut(false, '用户不存在');
+                dbQuery($db, "UPDATE users SET role='user', is_admin=0 WHERE id=? AND role='content_admin'", [$uid]);
+                createAuthorizationNotification($uid, 'content_admin_revoked', '内容管理员权限已撤销');
+                jsonOut(true, '已撤销内容管理员权限');
+                break;
+
+            // 兼容旧客户端：旧“设为管理员”不再允许绕过 root 授权规则。
             case 'make_admin':
-                if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
-                $uid = (int)$_POST['user_id'];
-                dbQuery($db, "UPDATE users SET is_admin=1 WHERE id=?", [$uid]);
-                jsonOut(true, "已设为管理员");
+                jsonOut(false, '请使用 root 授权功能');
                 break;
 
             // ==================== 删除用户 ====================
             case 'delete_user':
-                if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
-                $uid = (int)$_POST['user_id'];
+                requireRoot();
+                $uid = (int)($_POST['user_id'] ?? 0);
+                $target = dbFetchOne($db, "SELECT id, username, role, is_initial_root FROM users WHERE id=?", [$uid]);
+                if (!$target) jsonOut(false, '用户不存在');
+                if ((int)$target['is_initial_root'] === 1 || $target['username'] === 'lian') jsonOut(false, '初始 root 不可删除');
+                if ($target['role'] === 'root' && !isInitialRoot()) jsonOut(false, '只有初始 lian 可以删除其他 root');
                 dbQuery($db, "DELETE FROM users WHERE id=?", [$uid]);
+                log_admin_action('delete_user', $uid);
                 jsonOut(true, "用户已删除");
-                break;
-
-            // ==================== 清空所有用户 ====================
-            case 'clear_users':
-                $uid = requireAdmin();
-                $code = (string)($_POST['authorization_code'] ?? '');
-                $confirmed = ($_POST['final_confirm'] ?? '') === 'DELETE ALL USERS';
-                if (!consumeDangerChallenge('clear_users', $code, $confirmed)) {
-                    log_admin_action('danger_clear_users_rejected', $uid);
-                    jsonOut(false, "授权码错误、已过期或最终确认无效，未执行删除");
-                }
-                try {
-                    $db->exec('BEGIN IMMEDIATE');
-                    dbQuery($db, "DELETE FROM users");
-                    $db->exec('COMMIT');
-                } catch (Exception $e) {
-                    @$db->exec('ROLLBACK');
-                    log_admin_action('danger_clear_users_failed', $uid);
-                    jsonOut(false, "删除失败：" . $e->getMessage());
-                }
-                log_admin_action('danger_clear_users_success', $uid);
-                invalidateSession();
-                jsonOut(true, "所有用户已永久删除，请重新登录");
-                break;
-
-            // ==================== 重置数据库 ====================
-            case 'reset_db':
-                $uid = requireAdmin();
-                $code = (string)($_POST['authorization_code'] ?? '');
-                $confirmed = ($_POST['final_confirm'] ?? '') === 'RESET DATABASE';
-                if (!consumeDangerChallenge('reset_db', $code, $confirmed)) {
-                    log_admin_action('danger_reset_db_rejected', $uid);
-                    jsonOut(false, "授权码错误、已过期或最终确认无效，未执行重置");
-                }
-                $backupDir = __DIR__ . '/../data/backups';
-                if (!is_dir($backupDir)) @mkdir($backupDir, 0750, true);
-                $backupPath = $backupDir . '/exam_' . date('Ymd_His') . '_' . bin2hex(random_bytes(4)) . '.db';
-                if (!copy($dbFile, $backupPath)) {
-                    log_admin_action('danger_reset_db_backup_failed', $uid);
-                    jsonOut(false, "数据库备份失败，未执行重置");
-                }
-                try {
-                    $db->exec('BEGIN IMMEDIATE');
-                    foreach (['users', 'exam_data', 'questions', 'papers', 'paper_questions', 'exam_attempts', 'exam_answers', 'materials'] as $table) {
-                        $db->exec("DELETE FROM $table");
-                    }
-                    $db->exec('COMMIT');
-                } catch (Exception $e) {
-                    @$db->exec('ROLLBACK');
-                    log_admin_action('danger_reset_db_failed', $uid);
-                    jsonOut(false, "重置失败：" . $e->getMessage());
-                }
-                $matDir = __DIR__ . '/../materials';
-                if (is_dir($matDir)) {
-                    foreach (glob($matDir . '/mat_*') ?: [] as $file) {
-                        if (is_file($file)) @unlink($file);
-                    }
-                }
-                log_admin_action('danger_reset_db_success', $uid);
-                invalidateSession();
-                jsonOut(true, "数据库及资料已永久清空，请重新登录");
                 break;
 
             // =====================================================
@@ -1128,10 +1717,11 @@ if ($action) {
                 $qtype     = isset($_GET['qtype'])     ? sanitizeInput($_GET['qtype'])     : (isset($_POST['qtype'])     ? sanitizeInput($_POST['qtype'])     : '');
                 $keyword   = isset($_GET['keyword'])   ? sanitizeInput($_GET['keyword'])   : (isset($_POST['keyword'])   ? sanitizeInput($_POST['keyword'])   : '');
                 $educationLevel = validateEducationLevel($_GET['education_level'] ?? $_POST['education_level'] ?? '', '');
-                // 仅在“题目管理”范围（scope=manage_all）要求管理员必须选定学段；
-                // 浏览 Tab 中管理员也允许“全部”跨学段查看，避免下拉“全部”直接报错。
+                // 仅在“题目管理”范围（scope=manage_all）要求内容管理员权限；
+                // 普通用户只能浏览题目，不能通过伪造 scope 进入管理数据范围。
                 $scope = isset($_GET['scope']) ? (string)$_GET['scope'] : (isset($_POST['scope']) ? (string)$_POST['scope'] : '');
-                
+                if ($scope === 'manage_all') requireContentPermission('question_view');
+
                 $category  = validateQuestionCategory($_GET['category'] ?? $_POST['category'] ?? '', '');
                 $page      = max(1, (int)($_GET['page']   ?? $_POST['page']   ?? 1));
                 $page_size = max(1, min(100, (int)($_GET['page_size'] ?? $_POST['page_size'] ?? 10)));
@@ -1190,7 +1780,7 @@ if ($action) {
             // ---------- 新增题目 ----------
             case 'add_question':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireContentPermission('question_edit');
 
                 $subject     = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 $qtype       = sanitizeInput($_POST['question_type'] ?? '');
@@ -1244,12 +1834,14 @@ if ($action) {
             // ---------- 修改题目 ----------
             case 'update_question':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireContentPermission('question_edit');
 
                 $qid = (int)($_POST['id'] ?? 0);
                 if ($qid <= 0) jsonOut(false, "题目ID无效");
                 $existing = dbFetchOne($db, "SELECT id FROM questions WHERE id=?", [$qid]);
                 if (!$existing) jsonOut(false, "题目不存在");
+                $usedInAttempts = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM exam_answers WHERE question_id=?", [$qid])['c'] ?? 0);
+                if ($usedInAttempts > 0) jsonOut(false, '题目已有作答记录，不能修改');
 
                 $subject     = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 $qtype       = sanitizeInput($_POST['question_type'] ?? '');
@@ -1299,10 +1891,12 @@ if ($action) {
             // ---------- 删除题目 ----------
             case 'delete_question':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireContentPermission('question_edit');
                 $qid = (int)($_POST['id'] ?? 0);
                 if ($qid <= 0) jsonOut(false, "题目ID无效");
                 if (!dbFetchOne($db, "SELECT id FROM questions WHERE id=?", [$qid])) jsonOut(false, "题目不存在");
+                $usedInAttempts = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM exam_answers WHERE question_id=?", [$qid])['c'] ?? 0);
+                if ($usedInAttempts > 0) jsonOut(false, '题目已有作答记录，不能删除');
                 try {
                     $db->exec('BEGIN IMMEDIATE');
                     dbQuery($db, "DELETE FROM paper_questions WHERE question_id=?", [$qid]);
@@ -1319,7 +1913,7 @@ if ($action) {
 
             // ---------- 批量移动学段 ----------
             case 'bulk_move_questions':
-                requireAdmin();
+                requireContentPermission('question_edit');
                 $ids = json_decode($_POST['ids'] ?? '[]', true);
                 if (!is_array($ids) || count($ids) < 1 || count($ids) > 500) jsonOut(false, '请选择1-500道题目');
                 $ids = array_values(array_unique(array_filter(array_map('intval', $ids), fn($id) => $id > 0)));
@@ -1333,7 +1927,7 @@ if ($action) {
 
             // ---------- 批量修改分类 ----------
             case 'bulk_update_question_category':
-                requireAdmin();
+                requireContentPermission('question_edit');
                 $ids = json_decode($_POST['ids'] ?? '[]', true);
                 if (!is_array($ids) || count($ids) < 1 || count($ids) > 500) jsonOut(false, '请选择1-500道题目');
                 $ids = array_values(array_unique(array_filter(array_map('intval', $ids), fn($id) => $id > 0)));
@@ -1346,12 +1940,14 @@ if ($action) {
 
             // ---------- 批量删除题目及其关联记录 ----------
             case 'bulk_delete_questions':
-                requireAdmin();
+                requireContentPermission('question_edit');
                 $ids = json_decode($_POST['ids'] ?? '[]', true);
                 if (!is_array($ids) || count($ids) < 1 || count($ids) > 500) jsonOut(false, '请选择1-500道题目');
                 $ids = array_values(array_unique(array_filter(array_map('intval', $ids), fn($id) => $id > 0)));
                 if (!$ids) jsonOut(false, '题目ID无效');
                 $in = implode(',', array_fill(0, count($ids), '?'));
+                $usedCount = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM exam_answers WHERE question_id IN ($in)", $ids)['c'] ?? 0);
+                if ($usedCount > 0) jsonOut(false, '选中题目已有作答记录，不能批量删除');
                 try {
                     $db->exec('BEGIN IMMEDIATE');
                     dbQuery($db, "DELETE FROM paper_questions WHERE question_id IN ($in)", $ids);
@@ -1369,7 +1965,7 @@ if ($action) {
             // ---------- 批量导入（兼容 import_exam.json 结构） ----------
             case 'import_questions_json':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireContentPermission('question_import');
 
                 $rawJson = $_POST['json_data'] ?? '';
                 if (trim($rawJson) === '') jsonOut(false, "请提供JSON数据");
@@ -1577,7 +2173,7 @@ if ($action) {
             // ---------- 试卷列表 ----------
             case 'paper_list':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                if (isAdmin()) {
+                if (isRoot()) {
                     $rows = dbFetchAll($db, "SELECT * FROM papers ORDER BY id DESC");
                 } else {
                     $rows = dbFetchAll($db, "SELECT * FROM papers WHERE is_published=1 ORDER BY id DESC");
@@ -1600,8 +2196,8 @@ if ($action) {
                 $paper = dbFetchOne($db, "SELECT * FROM papers WHERE id=?", [$pid]);
                 if (!$paper) jsonOut(false, "试卷不存在");
 
-                // 学生只能看已发布的
-                if (!isAdmin() && !(int)$paper['is_published']) {
+                // 只有 root 可以查看草稿，其他用户只能查看已发布试卷。
+                if (!isRoot() && !(int)$paper['is_published']) {
                     jsonOut(false, "试卷不存在或未发布");
                 }
 
@@ -1625,8 +2221,8 @@ if ($action) {
                         $q['options']    = $q['options'] ? json_decode($q['options'], true) : null;
                         $q['difficulty'] = (int)$q['difficulty'];
                         $q['points']     = (float)$q['points'];
-                        // 学生查看试卷详情时不返回 correct_answer
-                        if (!isAdmin()) unset($q['correct_answer'], $q['explanation']);
+                        // 非 root 端不返回正确答案与解析。
+                        if (!isRoot()) unset($q['correct_answer'], $q['explanation']);
                         $questionsById[(int)$q['id']] = $q;
                     }
                 }
@@ -1645,7 +2241,7 @@ if ($action) {
             // ---------- 新建 / 更新试卷（同时重建关联） ----------
             case 'paper_save':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireRoot();
 
                 $pid        = (int)($_POST['paper_id'] ?? 0);
                 $name       = trim(sanitizeInput($_POST['name'] ?? ''));
@@ -1671,6 +2267,7 @@ if ($action) {
                         $pts = 1.0;
                     }
                     if ($id <= 0) continue;
+                    if (array_key_exists($id, array_column($normalized, 'id', 'id'))) jsonOut(false, '试卷中不能重复选择同一道题');
                     $normalized[] = ['id' => $id, 'points' => $pts, 'sort' => $idx++];
                 }
                 if (count($normalized) === 0) jsonOut(false, "请至少选择一道有效题目");
@@ -1683,6 +2280,13 @@ if ($action) {
                     jsonOut(false, "部分题目不存在，请刷新后重试");
                 }
 
+                if ($pid > 0) {
+                    if (!dbFetchOne($db, "SELECT id FROM papers WHERE id=?", [$pid])) {
+                        jsonOut(false, "试卷不存在，请刷新后重试");
+                    }
+                    $attemptCount = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM exam_attempts WHERE paper_id=?", [$pid])['c'] ?? 0);
+                    if ($attemptCount > 0) jsonOut(false, "此试卷已有作答记录，不能修改题目");
+                }
                 try {
                     $db->exec('BEGIN');
                     if ($pid > 0) {
@@ -1716,21 +2320,25 @@ if ($action) {
             // ---------- 发布 / 下架 / 删除 ----------
             case 'paper_publish':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireRoot();
                 $pid = (int)($_POST['paper_id'] ?? 0);
                 if ($pid <= 0) jsonOut(false, "试卷ID无效");
+                if (!dbFetchOne($db, "SELECT id FROM papers WHERE id=?", [$pid])) jsonOut(false, "试卷不存在，请刷新后重试");
                 // 必须至少有1道题
                 $cnt = (int)dbFetchOne($db, "SELECT COUNT(*) AS c FROM paper_questions WHERE paper_id=?", [$pid])['c'];
                 if ($cnt <= 0) jsonOut(false, "请先添加至少一道题目再发布");
                 dbQuery($db, "UPDATE papers SET is_published=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", [$pid]);
-                jsonOut(true, "已发布");
+                $published = dbFetchOne($db, "SELECT is_published FROM papers WHERE id=?", [$pid]);
+                if (!$published || (int)$published['is_published'] !== 1) jsonOut(false, "发布失败，请稍后重试");
+                jsonOut(true, "已发布", ['paper_id' => $pid]);
                 break;
 
             case 'paper_unpublish':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireRoot();
                 $pid = (int)($_POST['paper_id'] ?? 0);
                 if ($pid <= 0) jsonOut(false, "试卷ID无效");
+                if (!dbFetchOne($db, "SELECT id FROM papers WHERE id=?", [$pid])) jsonOut(false, "试卷不存在，请刷新后重试");
                 // 若已有已提交的 attempt，不允许下架（避免学生做了一半看不到）
                 $cnt = (int)dbFetchOne($db, "SELECT COUNT(*) AS c FROM exam_attempts WHERE paper_id=? AND status='submitted'", [$pid])['c'];
                 if ($cnt > 0) jsonOut(false, "已有学生完成此试卷，无法下架");
@@ -1740,9 +2348,10 @@ if ($action) {
 
             case 'paper_delete':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireRoot();
                 $pid = (int)($_POST['paper_id'] ?? 0);
                 if ($pid <= 0) jsonOut(false, "试卷ID无效");
+                if (!dbFetchOne($db, "SELECT id FROM papers WHERE id=?", [$pid])) jsonOut(false, "试卷不存在，请刷新后重试");
                 $cnt = (int)dbFetchOne($db, "SELECT COUNT(*) AS c FROM exam_attempts WHERE paper_id=?", [$pid])['c'];
                 if ($cnt > 0) jsonOut(false, "已有学生作答记录，仅允许下架，不允许删除");
                 try {
@@ -1879,6 +2488,16 @@ if ($action) {
                     }
                 }
 
+                $allowedQuestionPoints = examB_attemptQuestionPoints($db, $att);
+                $answerMap = [];
+                foreach ($answers as $entry) {
+                    if (!is_array($entry) || !isset($entry['question_id'])) continue;
+                    $qid = (int)$entry['question_id'];
+                    if (!array_key_exists($qid, $allowedQuestionPoints)) jsonOut(false, '提交中包含不属于本次作答的题目');
+                    $sa = $entry['student_answer'] ?? '';
+                    $answerMap[$qid] = is_array($sa) ? json_encode($sa, JSON_UNESCAPED_UNICODE) : (string)$sa;
+                }
+
                 // ===== 时长校验（服务端） =====
                 $duration = (int)$att['duration_minutes'];
                 $overdue = false;
@@ -1892,18 +2511,8 @@ if ($action) {
                 try {
                     $db->exec('BEGIN');
                     $nowDT = gmdate('Y-m-d H:i:s');
-                    // 写每题作答
-                    $map = [];
-                    foreach ($answers as $entry) {
-                        if (!is_array($entry) || !isset($entry['question_id'])) continue;
-                        $qid = (int)$entry['question_id'];
-                        $sa  = $entry['student_answer'] ?? '';
-                        // 数组（多空多选）转 JSON
-                        if (is_array($sa)) $sa = json_encode($sa, JSON_UNESCAPED_UNICODE);
-                        else $sa = (string)$sa;
-                        $map[$qid] = $sa;
-                    }
-                    foreach ($map as $qid => $sa) {
+                    // 写每题作答；题号已在事务外按本次 attempt 白名单校验。
+                    foreach ($answerMap as $qid => $sa) {
                         dbQuery($db,
                             "UPDATE exam_answers SET student_answer=? WHERE attempt_id=? AND question_id=?",
                             [$sa, $aid, $qid]
@@ -1951,14 +2560,23 @@ if ($action) {
 
                 $nowDT = gmdate('Y-m-d H:i:s');
                 $total = 0.0;
+                $allowedQuestionPoints = examB_attemptQuestionPoints($db, $att);
+                $gradeMap = [];
+                foreach ($grades as $g) {
+                    if (!is_array($g) || !isset($g['question_id'])) continue;
+                    $qid = (int)$g['question_id'];
+                    if (!array_key_exists($qid, $allowedQuestionPoints)) jsonOut(false, '自评中包含不属于本次作答的题目');
+                    $corr = isset($g['self_correct']) ? (int)$g['self_correct'] : null;
+                    $score = isset($g['self_score']) ? (float)$g['self_score'] : null;
+                    if ($corr !== null && $corr !== 0 && $corr !== 1) $corr = null;
+                    if ($score !== null && ($score < 0 || $score > $allowedQuestionPoints[$qid])) jsonOut(false, '自评分数超出题目分值');
+                    $gradeMap[$qid] = ['correct' => $corr, 'score' => $score];
+                }
                 try {
                     $db->exec('BEGIN');
-                    foreach ($grades as $g) {
-                        if (!is_array($g) || !isset($g['question_id'])) continue;
-                        $qid   = (int)$g['question_id'];
-                        $corr  = isset($g['self_correct']) ? (int)$g['self_correct'] : null;
-                        $score = isset($g['self_score']) ? (float)$g['self_score'] : null;
-                        if ($corr !== null && $corr !== 0 && $corr !== 1) $corr = null;
+                    foreach ($gradeMap as $qid => $grade) {
+                        $corr = $grade['correct'];
+                        $score = $grade['score'];
                         dbQuery($db,
                             "UPDATE exam_answers SET self_correct=?, self_score=?, judged_at=? WHERE attempt_id=? AND question_id=?",
                             [$corr, $score, $nowDT, $aid, $qid]
@@ -2109,6 +2727,15 @@ if ($action) {
                         }
                     }
                 }
+                $allowedQuestionPoints = examB_attemptQuestionPoints($db, $att);
+                $answerMap = [];
+                foreach ($answers as $entry) {
+                    if (!is_array($entry) || !isset($entry['question_id'])) continue;
+                    $qid = (int)$entry['question_id'];
+                    if (!array_key_exists($qid, $allowedQuestionPoints)) jsonOut(false, '提交中包含不属于本次作答的题目');
+                    $sa = $entry['student_answer'] ?? '';
+                    $answerMap[$qid] = is_array($sa) ? json_encode($sa, JSON_UNESCAPED_UNICODE) : (string)$sa;
+                }
                 // B2 时长校验：duration>0 才校验
                 $duration = (int)$att['duration_minutes'];
                 $overdue = false;
@@ -2120,12 +2747,7 @@ if ($action) {
                 try {
                     $db->exec('BEGIN');
                     $nowDT = gmdate('Y-m-d H:i:s');
-                    foreach ($answers as $entry) {
-                        if (!is_array($entry) || !isset($entry['question_id'])) continue;
-                        $qid = (int)$entry['question_id'];
-                        $sa  = $entry['student_answer'] ?? '';
-                        if (is_array($sa)) $sa = json_encode($sa, JSON_UNESCAPED_UNICODE);
-                        else $sa = (string)$sa;
+                    foreach ($answerMap as $qid => $sa) {
                         dbQuery($db,
                             "UPDATE exam_answers SET student_answer=? WHERE attempt_id=? AND question_id=?",
                             [$sa, $aid, $qid]
@@ -2172,14 +2794,23 @@ if ($action) {
                 if (!is_array($grades) || count($grades) === 0) jsonOut(false, "请提供自评数据");
                 $nowDT = gmdate('Y-m-d H:i:s');
                 $total = 0.0;
+                $allowedQuestionPoints = examB_attemptQuestionPoints($db, $att);
+                $gradeMap = [];
+                foreach ($grades as $g) {
+                    if (!is_array($g) || !isset($g['question_id'])) continue;
+                    $qid = (int)$g['question_id'];
+                    if (!array_key_exists($qid, $allowedQuestionPoints)) jsonOut(false, '自评中包含不属于本次作答的题目');
+                    $corr = isset($g['self_correct']) ? (int)$g['self_correct'] : null;
+                    $score = isset($g['self_score']) ? (float)$g['self_score'] : null;
+                    if ($corr !== null && $corr !== 0 && $corr !== 1) $corr = null;
+                    if ($score !== null && ($score < 0 || $score > $allowedQuestionPoints[$qid])) jsonOut(false, '自评分数超出题目分值');
+                    $gradeMap[$qid] = ['correct' => $corr, 'score' => $score];
+                }
                 try {
                     $db->exec('BEGIN');
-                    foreach ($grades as $g) {
-                        if (!is_array($g) || !isset($g['question_id'])) continue;
-                        $qid   = (int)$g['question_id'];
-                        $corr  = isset($g['self_correct']) ? (int)$g['self_correct'] : null;
-                        $score = isset($g['self_score']) ? (float)$g['self_score'] : null;
-                        if ($corr !== null && $corr !== 0 && $corr !== 1) $corr = null;
+                    foreach ($gradeMap as $qid => $grade) {
+                        $corr = $grade['correct'];
+                        $score = $grade['score'];
                         dbQuery($db,
                             "UPDATE exam_answers SET self_correct=?, self_score=?, judged_at=? WHERE attempt_id=? AND question_id=?",
                             [$corr, $score, $nowDT, $aid, $qid]
@@ -2232,7 +2863,7 @@ if ($action) {
             // ---------- 管理员上传 ----------
             case 'material_upload':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireContentPermission('material_manage');
                 if (empty($_FILES['file'])) jsonOut(false, "请选择文件");
                 $f = $_FILES['file'];
                 if (!is_uploaded_file($f['tmp_name']) || $f['error'] !== UPLOAD_ERR_OK) {
@@ -2294,7 +2925,7 @@ if ($action) {
 
             // ---------- 管理员编辑资料元数据 ----------
             case 'material_update':
-                requireAdmin();
+                requireContentPermission('material_manage');
                 $id = (int)($_POST['id'] ?? 0);
                 if ($id <= 0) jsonOut(false, '参数错误');
                 if (!dbFetchOne($db, 'SELECT id FROM materials WHERE id=?', [$id])) jsonOut(false, '资料不存在');
@@ -2312,7 +2943,7 @@ if ($action) {
             // ---------- 管理员删除 ----------
             case 'material_delete':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
-                requireAdmin();
+                requireContentPermission('material_manage');
                 $id = (int)($_POST['id'] ?? 0);
                 if ($id <= 0) jsonOut(false, "参数错误");
                 $mat = dbFetchOne($db, "SELECT * FROM materials WHERE id=?", [$id]);
@@ -2658,6 +3289,23 @@ function examB_getAttemptRow($db, int $aid): ?array {
     $r['paper_id'] = $r['paper_id'] ? (int)$r['paper_id'] : null;
     $r['self_score_total'] = $r['self_score_total'] !== null ? (float)$r['self_score_total'] : null;
     return $r;
+}
+
+/**
+ * 返回本次作答允许出现的题目及其最高自评分值。
+ * 这张白名单同时用于提交答案和自评，避免客户端伪造题号或分数。
+ */
+function examB_attemptQuestionPoints($db, array $attempt): array {
+    if (!empty($attempt['paper_id'])) {
+        $rows = dbFetchAll($db, "SELECT question_id, points FROM paper_questions WHERE paper_id=?", [(int)$attempt['paper_id']]);
+        $points = [];
+        foreach ($rows as $row) $points[(int)$row['question_id']] = max(0.0, (float)$row['points']);
+        return $points;
+    }
+    $rows = dbFetchAll($db, "SELECT ea.question_id, COALESCE(q.points, 1.0) AS points FROM exam_answers ea LEFT JOIN questions q ON q.id=ea.question_id WHERE ea.attempt_id=?", [(int)$attempt['id']]);
+    $points = [];
+    foreach ($rows as $row) $points[(int)$row['question_id']] = max(0.0, (float)$row['points']);
+    return $points;
 }
 
 /**

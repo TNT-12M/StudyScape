@@ -1,0 +1,1 @@
+import{B as e,F as t,Ot as n,m as r}from"./runtime-core.esm-bundler-xeKD6iRk.js";var i={__name:`AppCard`,props:{bordered:Boolean},setup(i){return(a,o)=>(t(),r(`div`,{class:n([`auto-bg`,{"card-border":i.bordered}])},[e(a.$slots,`default`)],2))}};export{i as t};

@@ -45,6 +45,12 @@ test/
 *答案*.json
 *试卷*.json
 
+# ===== OCR credentials and runtime files =====
+AccessKey .env
+新建文件夹/AccessKey.csv
+ocr/tmp/
+ocr/results/
+
 # ===== 密码/密钥类临时脚本 =====
 *password*.php
 *restore*.php
@@ -56,5 +62,13 @@ public/.user.ini
 # ===== 打包/构建产物 =====
 *.tar.gz
 update.tar.gz
+
+# ===== 前端本地依赖与重复构建目录 =====
+node_modules/
+vue-naive-admin/node_modules/
+vue-naive-admin/dist/
+
+# ===== OCR 运行结果（正式源码之外的运行数据） =====
+data/ocr_batches/
 
 .ssh_temp/

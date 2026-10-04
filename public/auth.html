@@ -340,7 +340,7 @@ async function doLogin() {
     localStorage.setItem('xb_user', JSON.stringify(ret.data.user));
     // 管理员进入唯一管理后台，普通用户进入首页
     setTimeout(() => {
-        location.href = ret.data && ret.data.user && ret.data.user.is_admin ? 'admin.html' : 'index.html';
+        location.href = ret.data && ret.data.user && ret.data.user.is_admin ? '/admin' : 'index.html';
     }, 500);
 }
 
