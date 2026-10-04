@@ -91,7 +91,7 @@ export const phpFeedbackApi = {
 export const phpNotificationApi = {
   list: data => phpAction('notification_list', data, { bypassCsrf: true }),
   unreadCount: () => phpAction('notification_unread_count', {}, { bypassCsrf: true }),
-  markRead: id => phpAction('notification_mark_read', id ? { id } : {}),
+  markRead: (id, relatedId) => phpAction('notification_mark_read', id ? { id, related_id: relatedId || 0 } : {}),
 }
 
 export const phpAdminFeedbackApi = {

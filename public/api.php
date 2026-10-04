@@ -392,6 +392,16 @@ try {
     )");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_announcements_published ON announcements(is_published, published_at DESC)");
 
+    // ---------- 公告已读记录表 ----------
+    // 公告是全局的，不每人插一条通知。通过此表记录用户读过哪些公告。
+    $db->exec("CREATE TABLE IF NOT EXISTS announcement_reads (
+        user_id INTEGER NOT NULL,
+        announcement_id INTEGER NOT NULL,
+        read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, announcement_id)
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_announcement_reads_user ON announcement_reads(user_id, read_at)");
+
     $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='roles_password_feedback_v1'");
     if (!$migration) {
         $db->exec('BEGIN IMMEDIATE');
@@ -1539,22 +1549,81 @@ if ($action) {
             case 'notification_unread_count':
                 if (!isLoggedIn()) jsonOut(false, '请先登录');
                 $uid = (int)getUid();
-                $unread = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM notifications WHERE user_id=? AND read_at IS NULL', [$uid])['c'] ?? 0);
+                // 未读数 = 个人未读通知 + 未读的已发布公告
+                $personalUnread = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM notifications WHERE user_id=? AND read_at IS NULL', [$uid])['c'] ?? 0);
+                $announcementUnread = (int)(dbFetchOne($db, "
+                    SELECT COUNT(*) AS c FROM announcements a
+                    WHERE a.is_published = 1
+                      AND NOT EXISTS (
+                        SELECT 1 FROM announcement_reads ar
+                        WHERE ar.user_id = ? AND ar.announcement_id = a.id
+                      )
+                ", [$uid])['c'] ?? 0);
+                $unread = $personalUnread + $announcementUnread;
                 if ($action === 'notification_unread_count') jsonOut(true, '', ['unread_count' => $unread]);
+
                 $page = max(1, (int)($_POST['page'] ?? $_GET['page'] ?? 1));
                 $size = max(1, min(50, (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 20)));
-                $items = dbFetchAll($db, 'SELECT id, type, title, body, related_id, read_at, created_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT ? OFFSET ?', [$uid, $size, ($page - 1) * $size]);
-                foreach ($items as &$item) { foreach (['read_at', 'created_at'] as $field) if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]); }
+
+                // 合并个人通知和公告，用 UNION ALL + 外层排序分页
+                $items = dbFetchAll($db, "
+                    SELECT id, type, title, body, related_id, read_at, created_at
+                    FROM (
+                        SELECT id, type, title, body, related_id, read_at, created_at
+                        FROM notifications
+                        WHERE user_id = ?
+
+                        UNION ALL
+
+                        SELECT
+                            a.id * -1 AS id,
+                            'announcement' AS type,
+                            a.title,
+                            a.content AS body,
+                            a.id AS related_id,
+                            ar.read_at,
+                            a.published_at AS created_at
+                        FROM announcements a
+                        LEFT JOIN announcement_reads ar
+                          ON ar.announcement_id = a.id AND ar.user_id = ?
+                        WHERE a.is_published = 1
+                    ) combined
+                    ORDER BY datetime(created_at) DESC, id DESC
+                    LIMIT ? OFFSET ?
+                ", [$uid, $uid, $size, ($page - 1) * $size]);
+
+                foreach ($items as &$item) {
+                    foreach (['read_at', 'created_at'] as $field) {
+                        if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]);
+                    }
+                    // id 为负数表示是公告，转回正数（保持唯一标识）
+                    $item['id'] = (int)$item['id'];
+                }
                 unset($item);
                 jsonOut(true, '', ['items' => $items, 'unread_count' => $unread]);
                 break;
 
             case 'notification_mark_read':
                 if (!isLoggedIn()) jsonOut(false, '请先登录');
-                $uid = (int)getUid();
+                $uid = (int)(getUid());
                 $id = (int)($_POST['id'] ?? 0);
-                if ($id > 0) dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?', [$id, $uid]);
-                else dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL', [$uid]);
+                if ($id > 0) {
+                    // 正 id 是个人通知
+                    dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?', [$id, $uid]);
+                } elseif ($id < 0) {
+                    // 负 id 是公告（related_id 是公告 id），插入已读记录
+                    $announcementId = (int)($_POST['related_id'] ?? 0);
+                    if ($announcementId > 0) {
+                        dbQuery($db, 'INSERT OR IGNORE INTO announcement_reads(user_id, announcement_id, read_at) VALUES(?, ?, CURRENT_TIMESTAMP)', [$uid, $announcementId]);
+                    }
+                } else {
+                    // 全部已读：个人通知 + 所有已发布公告
+                    dbQuery($db, 'UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL', [$uid]);
+                    dbQuery($db, "
+                        INSERT OR IGNORE INTO announcement_reads(user_id, announcement_id, read_at)
+                        SELECT ?, id, CURRENT_TIMESTAMP FROM announcements WHERE is_published = 1
+                    ", [$uid]);
+                }
                 jsonOut(true, '通知已读');
                 break;
 
@@ -1626,25 +1695,12 @@ if ($action) {
                 if (!$ann) jsonOut(false, '公告不存在');
                 if ($ann['is_published']) jsonOut(false, '该公告已发布');
 
-                $db->exec('BEGIN IMMEDIATE');
-                try {
-                    // 标记为已发布
-                    dbQuery($db, 'UPDATE announcements SET is_published=1, published_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$id]);
-                    // 给所有活跃用户发通知
-                    $users = dbFetchAll($db, 'SELECT id FROM users WHERE is_active=1');
-                    $notifiedCount = 0;
-                    foreach ($users as $u) {
-                        dbQuery($db, 'INSERT INTO notifications(user_id, type, title, body, related_id) VALUES(?, ?, ?, ?, ?)',
-                            [(int)$u['id'], 'announcement', $ann['title'], $ann['content'], $id]);
-                        $notifiedCount++;
-                    }
-                    $db->exec('COMMIT');
-                } catch (Exception $e) {
-                    @$db->exec('ROLLBACK');
-                    jsonOut(false, '发布失败：' . $e->getMessage());
-                }
-                log_admin_action('publish_announcement', $adminUid, ['id' => $id, 'notified_users' => $notifiedCount]);
-                jsonOut(true, "公告已发布，已通知 {$notifiedCount} 位用户", ['notified_users' => $notifiedCount]);
+                // 标记为已发布（公告是全局的，通过 notification_list 动态合并展示，
+                // 不再给每个用户物理插入通知记录，新注册用户也能看到历史公告）
+                dbQuery($db, 'UPDATE announcements SET is_published=1, published_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$id]);
+                $userCount = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM users WHERE is_active=1')['c'] ?? 0);
+                log_admin_action('publish_announcement', $adminUid, ['id' => $id, 'active_users' => $userCount]);
+                jsonOut(true, "公告已发布，所有用户均可在通知中心查看", ['active_users' => $userCount]);
                 break;
 
             case 'admin_access_stats':
