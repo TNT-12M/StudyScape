@@ -30,7 +30,7 @@
           </n-gi>
           <n-gi>
             <n-form-item label="昵称" path="nickname">
-              <n-input v-model:value="form.nickname" maxlength="32" show-count placeholder="请输入昵称" />
+              <n-input v-model:value="form.nickname" maxlength="20" show-count placeholder="中英文/数字/下划线，最多20字" />
             </n-form-item>
           </n-gi>
           <n-gi>
@@ -110,8 +110,9 @@ const rules = {
   nickname: {
     validator: (_, value) => {
       const text = String(value || '').trim()
-      if (text.length > 32) return new Error('昵称不能超过 32 个字符')
-      if (/[\u0000-\u001f\u007f]/.test(text)) return new Error('昵称不能包含控制字符')
+      if (text === '') return true
+      if ([...text].length > 20) return new Error('昵称不能超过 20 个字符')
+      if (!/^[\u4e00-\u9fa5a-zA-Z0-9_\s]+$/.test(text)) return new Error('昵称只能包含中文、英文、数字、下划线和空格')
       return true
     },
     trigger: ['blur', 'input'],

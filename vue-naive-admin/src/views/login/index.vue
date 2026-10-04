@@ -8,14 +8,14 @@
       <n-tabs v-model:value="mode" animated>
         <n-tab-pane name="login" tab="登录">
           <n-form class="login-form" @submit.prevent="login">
-            <n-form-item label="用户名"><n-input v-model:value="form.username" placeholder="请输入用户名" @keydown.enter="login" /></n-form-item>
+            <n-form-item label="用户名"><n-input v-model:value="form.username" placeholder="2-20字，中英文/数字/下划线" maxlength="20" @keydown.enter="login" /></n-form-item>
             <n-form-item label="密码"><n-input v-model:value="form.password" type="password" show-password-on="mousedown" placeholder="请输入密码" @keydown.enter="login" /></n-form-item>
             <n-button type="primary" block :loading="loading" attr-type="submit">登录</n-button>
           </n-form>
         </n-tab-pane>
         <n-tab-pane name="register" tab="注册">
           <n-form class="login-form" @submit.prevent="register">
-            <n-form-item label="用户名"><n-input v-model:value="form.username" placeholder="请输入用户名" /></n-form-item>
+            <n-form-item label="用户名"><n-input v-model:value="form.username" placeholder="2-20字，中英文/数字/下划线" maxlength="20" /></n-form-item>
             <n-form-item label="邮箱"><n-input v-model:value="form.email" placeholder="@example.com" /></n-form-item>
             <n-form-item label="密码"><n-input v-model:value="form.password" type="password" placeholder="至少 6 位" /></n-form-item>
             <div class="captcha-row"><n-input v-model:value="form.captcha" placeholder="验证码" /><img :src="captchaUrl" alt="验证码" title="点击刷新" @click="refreshCaptcha"></div>
@@ -64,6 +64,8 @@ async function login() {
 
 async function register() {
   if (!form.username || !form.email || !form.password || !form.captcha) return $message.warning('请完整填写注册信息')
+  if (!/^[\u4e00-\u9fa5a-zA-Z0-9_]+$/.test(form.username)) return $message.warning('用户名只能包含中文、英文、数字和下划线')
+  if (form.username.length < 2) return $message.warning('用户名至少 2 个字符')
   if (form.password.length < 6) return $message.warning('密码至少 6 位')
   loading.value = true
   try {

@@ -782,6 +782,22 @@ function sanitizeInput($v) {
     return htmlspecialchars(strip_tags(trim($v)), ENT_QUOTES, 'UTF-8');
 }
 
+/**
+ * 校验用户名：2-20 字符，仅允许中英文、数字、下划线
+ */
+function validateUsername(string $username): string {
+    $username = trim($username);
+    if ($username === '') jsonOut(false, '用户名不能为空');
+    $len = mb_strlen($username, 'UTF-8');
+    if ($len < 2) jsonOut(false, '用户名至少 2 个字符');
+    if ($len > 20) jsonOut(false, '用户名不能超过 20 个字符');
+    // 仅允许：中文、英文大小写、数字、下划线
+    if (!preg_match('/^[\x{4e00}-\x{9fa5}a-zA-Z0-9_]+$/u', $username)) {
+        jsonOut(false, '用户名只能包含中文、英文、数字和下划线，不支持特殊符号');
+    }
+    return $username;
+}
+
 function validateEducationLevel($value, string $default = 'junior'): string {
     $value = strtolower(trim((string)$value));
     if ($value === '') return $default;
@@ -830,8 +846,13 @@ function validateEmail($email) {
 function profileNickname(string $value): ?string {
     $value = trim(preg_replace('/[\\x00-\\x1F\\x7F]/u', '', $value) ?? '');
     if ($value === '') return null;
-    if (mb_strlen($value, 'UTF-8') > 32) {
-        jsonOut(false, '昵称不能超过 32 个字符');
+    $len = mb_strlen($value, 'UTF-8');
+    if ($len > 20) {
+        jsonOut(false, '昵称不能超过 20 个字符');
+    }
+    // 仅允许：中文、英文大小写、数字、下划线、空格
+    if (!preg_match('/^[\x{4e00}-\x{9fa5}a-zA-Z0-9_\s]+$/u', $value)) {
+        jsonOut(false, '昵称只能包含中文、英文、数字、下划线和空格，不支持特殊符号');
     }
     return $value;
 }
@@ -1186,7 +1207,7 @@ if ($action) {
         switch ($action) {
             // ==================== 用户注册 ====================
             case 'register':
-                $username = sanitizeInput($_POST['username'] ?? '');
+                $username = validateUsername((string)($_POST['username'] ?? ''));
                 $email = sanitizeInput($_POST['email'] ?? '');
                 $password = $_POST['password'] ?? '';
                 $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
@@ -1227,7 +1248,7 @@ if ($action) {
                         'throttle' => $status,
                     ]);
                 }
-                $username = sanitizeInput($_POST['username'] ?? '');
+                $username = trim((string)($_POST['username'] ?? ''));
                 $password = $_POST['password'] ?? '';
                 
                 if (empty($username) || empty($password)) {
@@ -1236,6 +1257,15 @@ if ($action) {
                     jsonOut(false, "用户名或密码错误，还可尝试 {$status['remaining']} 次", [
                         'throttle' => $status,
                     ]);
+                }
+                // 快速校验用户名格式（失败也算一次错误尝试，防止枚举）
+                if (!preg_match('/^[\x{4e00}-\x{9fa5}a-zA-Z0-9_@.]+$/u', $username)) {
+                    recordLoginFail();
+                    $status = getLoginThrottleStatus();
+                    $msg = $status['locked']
+                        ? "登录尝试次数过多，请 " . (int)ceil($status['lock_left'] / 60) . " 分钟后再试"
+                        : "用户名或密码错误，还可尝试 {$status['remaining']} 次";
+                    jsonOut(false, $msg, ['throttle' => $status]);
                 }
                 
                 $u = dbFetchOne($db, "SELECT * FROM users WHERE username=?", [$username]);
