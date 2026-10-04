@@ -112,7 +112,7 @@ const rules = {
       const text = String(value || '').trim()
       if (text === '') return true
       if ([...text].length > 20) return new Error('昵称不能超过 20 个字符')
-      if (!/^[\u4e00-\u9fa5a-zA-Z0-9_\s]+$/.test(text)) return new Error('昵称只能包含中文、英文、数字、下划线和空格')
+      if (!/^[\u4e00-\u9fa5a-zA-Z0-9_\s\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]+$/u.test(text)) return new Error('昵称只能包含中文、英文、数字、下划线、空格和表情符号')
       return true
     },
     trigger: ['blur', 'input'],

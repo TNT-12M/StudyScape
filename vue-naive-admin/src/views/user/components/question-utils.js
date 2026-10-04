@@ -120,8 +120,20 @@ export function sanitizeHtml(value) {
 
 export function renderQuestionContent(question) {
   const content = String(question?.content ?? '')
-  const html = question?.is_html || /<[a-z][\s\S]*>/i.test(content) ? sanitizeHtml(content) : escapeHtml(content)
+  const isHtml = question?.is_html || /<[a-z][\s\S]*>/i.test(content)
+  const html = isHtml ? sanitizeHtml(content) : escapeHtml(content).replace(/\n/g, '<br>')
   return renderMathInHtml(html).replace(/\{\{\s*(\d+)\s*\}\}/g, (_, number) => `<span class="question-blank">第${number}空</span>`)
+}
+
+// 提取纯文本（去掉所有 HTML 标签和多余空白），用于列表摘要显示
+export function plainTextSummary(value, limit = 80) {
+  const source = String(value || '')
+  const wrapper = document.createElement('div')
+  wrapper.innerHTML = /<[a-z][\s\S]*>/i.test(source) ? sanitizeHtml(source) : escapeHtml(source)
+  const text = wrapper.textContent || wrapper.innerText || ''
+  const trimmed = text.replace(/\s+/g, ' ').trim()
+  if (trimmed.length <= limit) return trimmed
+  return trimmed.slice(0, limit) + '…'
 }
 
 function looksLikeMath(value) {

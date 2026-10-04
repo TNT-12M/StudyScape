@@ -783,7 +783,7 @@ function sanitizeInput($v) {
 }
 
 /**
- * 校验用户名：2-20 字符，仅允许中英文、数字、下划线
+ * 校验用户名：2-20 字符，仅允许中英文、数字、下划线、emoji
  */
 function validateUsername(string $username): string {
     $username = trim($username);
@@ -791,9 +791,9 @@ function validateUsername(string $username): string {
     $len = mb_strlen($username, 'UTF-8');
     if ($len < 2) jsonOut(false, '用户名至少 2 个字符');
     if ($len > 20) jsonOut(false, '用户名不能超过 20 个字符');
-    // 仅允许：中文、英文大小写、数字、下划线
-    if (!preg_match('/^[\x{4e00}-\x{9fa5}a-zA-Z0-9_]+$/u', $username)) {
-        jsonOut(false, '用户名只能包含中文、英文、数字和下划线，不支持特殊符号');
+    // 仅允许：中文、英文大小写、数字、下划线、emoji（U+1F300-U+1FAFF 等常见表情区）
+    if (!preg_match('/^[\x{4e00}-\x{9fa5}a-zA-Z0-9_\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}\x{1F000}-\x{1F02F}\x{1F0A0}-\x{1F0FF}]+$/u', $username)) {
+        jsonOut(false, '用户名只能包含中文、英文、数字、下划线和表情符号');
     }
     return $username;
 }
@@ -850,9 +850,9 @@ function profileNickname(string $value): ?string {
     if ($len > 20) {
         jsonOut(false, '昵称不能超过 20 个字符');
     }
-    // 仅允许：中文、英文大小写、数字、下划线、空格
-    if (!preg_match('/^[\x{4e00}-\x{9fa5}a-zA-Z0-9_\s]+$/u', $value)) {
-        jsonOut(false, '昵称只能包含中文、英文、数字、下划线和空格，不支持特殊符号');
+    // 仅允许：中文、英文大小写、数字、下划线、空格、emoji
+    if (!preg_match('/^[\x{4e00}-\x{9fa5}a-zA-Z0-9_\s\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}\x{1F000}-\x{1F02F}\x{1F0A0}-\x{1F0FF}]+$/u', $value)) {
+        jsonOut(false, '昵称只能包含中文、英文、数字、下划线、空格和表情符号');
     }
     return $value;
 }
@@ -1259,7 +1259,8 @@ if ($action) {
                     ]);
                 }
                 // 快速校验用户名格式（失败也算一次错误尝试，防止枚举）
-                if (!preg_match('/^[\x{4e00}-\x{9fa5}a-zA-Z0-9_@.]+$/u', $username)) {
+                // 允许中英文、数字、下划线、emoji，以及邮箱登录的 @ 和 .
+                if (!preg_match('/^[\x{4e00}-\x{9fa5}a-zA-Z0-9_@.\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}]+$/u', $username)) {
                     recordLoginFail();
                     $status = getLoginThrottleStatus();
                     $msg = $status['locked']

@@ -64,7 +64,7 @@ async function login() {
 
 async function register() {
   if (!form.username || !form.email || !form.password || !form.captcha) return $message.warning('请完整填写注册信息')
-  if (!/^[\u4e00-\u9fa5a-zA-Z0-9_]+$/.test(form.username)) return $message.warning('用户名只能包含中文、英文、数字和下划线')
+  if (!/^[\u4e00-\u9fa5a-zA-Z0-9_\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]+$/u.test(form.username)) return $message.warning('用户名只能包含中文、英文、数字、下划线和表情符号')
   if (form.username.length < 2) return $message.warning('用户名至少 2 个字符')
   if (form.password.length < 6) return $message.warning('密码至少 6 位')
   loading.value = true

@@ -71,13 +71,19 @@ const columns = [{ type: 'selection' }, { title: 'ID', key: 'id', width: 70 }, {
 function defaultForm() { return { subject: '', education_level: 'junior', category: 'single', question_type: 'single', content: '', options: ['', '', '', ''], correct_answer: '', explanation: '', difficulty: 3, points: 1 } }
 function labelOf(type) { return typeOptions.find(item => item.value === type)?.label || type || '-' }
 function plainSummary(value, limit = 120) {
-  const text = String(value || '')
-    .replace(/<br\s*\/?>(?=\S)/gi, ' ')
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
-    .replace(/\s+/g, ' ').trim()
-  return Array.from(text).slice(0, limit).join('') + (Array.from(text).length > limit ? '…' : '')
+  const source = String(value || '')
+  // 有 HTML 标签就用 DOM 解析提取纯文本，比正则更彻底，不会残留 CSS 属性等垃圾
+  if (/<[a-z][\s\S]*>/i.test(source)) {
+    const wrapper = document.createElement('div')
+    wrapper.innerHTML = source
+    // 去掉所有 style 属性里的内容再取文本，防止 CSS 混入
+    wrapper.querySelectorAll('[style]').forEach(node => node.removeAttribute('style'))
+    const text = (wrapper.textContent || wrapper.innerText || '').replace(/\s+/g, ' ').trim()
+    return [...text].slice(0, limit).join('') + ([...text].length > limit ? '…' : '')
+  }
+  // 纯文本直接截取
+  const text = source.replace(/\s+/g, ' ').trim()
+  return [...text].slice(0, limit).join('') + ([...text].length > limit ? '…' : '')
 }
 function syncOptions(type) { if (type === 'fill' || type === 'short') form.options = [] ; else if (!form.options?.length) form.options = ['', '', '', ''] }
 async function loadStats() { try { stats.value = (await phpQuestionsApi.stats()).data || stats.value } catch (error) { message.error(error.message) } }
