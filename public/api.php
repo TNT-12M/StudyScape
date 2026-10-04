@@ -2973,12 +2973,20 @@ if ($action) {
                 // 50MB
                 $max = 50 * 1024 * 1024;
                 if ((int)$f['size'] > $max) jsonOut(false, "文件超过 50MB 上限");
-                // 扩展名白名单
+                // 扩展名白名单（以实际上传文件为准，防止伪造）
                 $allowedExts = ['pdf','doc','docx','txt','md','xls','xlsx','ppt','pptx'];
-                $origName = (string)$f['name'];
-                $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+                $realName = (string)$f['name'];
+                $ext = strtolower(pathinfo($realName, PATHINFO_EXTENSION));
                 if (!in_array($ext, $allowedExts, true)) {
                     jsonOut(false, "不允许的扩展名：$ext。仅允许：" . implode('/', $allowedExts));
+                }
+                // 显示文件名：优先用前端传入的 filename，否则用原始文件名
+                $customName = trim((string)($_POST['filename'] ?? ''));
+                $origName = $customName !== '' ? $customName : $realName;
+                // 确保扩展名一致（安全：扩展名始终以实际上传文件为准）
+                $origExt = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+                if ($origExt !== $ext) {
+                    $origName = preg_replace('/\.[^.]+$/', '', $origName) . '.' . $ext;
                 }
                 // MIME 粗略过滤（不强制，仅做参考）
                 $mime = '';
