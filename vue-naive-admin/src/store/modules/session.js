@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { phpAuthApi } from '@/api/php-modules'
+import { phpAuthApi, phpProfileApi } from '@/api/php-modules'
 import { clearPhpSessionState } from '@/api/php'
 
 export const useSessionStore = defineStore('php-session', {
@@ -37,6 +37,13 @@ export const useSessionStore = defineStore('php-session', {
       this.user = user || null
       this.ready = true
       this.checked = true
+    },
+    async updateProfile(data) {
+      const result = await phpProfileApi.update(data)
+      const user = result.data?.user
+      if (user?.id) this.setUser(user)
+      else await this.refresh()
+      return this.user
     },
     async logout() {
       try {

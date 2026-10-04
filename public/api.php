@@ -116,6 +116,10 @@ CREATE TABLE IF NOT EXISTS users (
     is_admin INTEGER DEFAULT 0,
     is_approved INTEGER DEFAULT 0,
     is_active INTEGER DEFAULT 1,
+    nickname TEXT DEFAULT NULL,
+    avatar TEXT DEFAULT NULL,
+    gender TEXT DEFAULT 'secret',
+    grade TEXT DEFAULT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_login DATETIME NULL
 );
@@ -312,6 +316,29 @@ try {
     try { $db->exec('ROLLBACK'); } catch (Exception $rb) {}
     error_log('education_level migration failed: ' . $e->getMessage());
     die(json_encode(['success' => false, 'message' => '学段字段迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
+}
+
+// 用户资料迁移：兼容已有 SQLite 数据库，旧用户资料保持为空。
+try {
+    $profileColumns = [
+        'nickname' => 'TEXT DEFAULT NULL',
+        'avatar' => 'TEXT DEFAULT NULL',
+        'gender' => "TEXT DEFAULT 'secret'",
+        'grade' => 'TEXT DEFAULT NULL',
+    ];
+    foreach ($profileColumns as $column => $definition) {
+        if (!tableHasColumn($db, 'users', $column)) {
+            $db->exec("ALTER TABLE users ADD COLUMN {$column} {$definition}");
+        }
+    }
+    $db->exec("UPDATE users SET gender='secret' WHERE gender IS NULL OR gender NOT IN ('secret','male','female')");
+    $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='user_profile_v1'");
+    if (!$migration) {
+        $db->exec("INSERT INTO schema_migrations(version) VALUES('user_profile_v1')");
+    }
+} catch (Throwable $e) {
+    error_log('user profile migration failed: ' . $e->getMessage());
+    die(json_encode(['success' => false, 'message' => '用户资料字段迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
 
 // 角色、初始 root、反馈回复与通知迁移。旧 is_admin=1 账号兼容迁移为 root。
@@ -790,6 +817,53 @@ function validateEmail($email) {
     return filter_var($email, FILTER_VALIDATE_EMAIL);
 }
 
+function profileNickname(string $value): ?string {
+    $value = trim(preg_replace('/[\\x00-\\x1F\\x7F]/u', '', $value) ?? '');
+    if ($value === '') return null;
+    if (mb_strlen($value, 'UTF-8') > 32) {
+        jsonOut(false, '昵称不能超过 32 个字符');
+    }
+    return $value;
+}
+
+function profileAvatar(string $value): ?string {
+    $value = trim($value);
+    if ($value === '') return null;
+    if (strlen($value) > 512 || preg_match('/[\\x00-\\x20<>"\\x7F]/', $value)) {
+        jsonOut(false, '头像链接格式不正确或长度过长');
+    }
+    $parts = parse_url($value);
+    $scheme = strtolower((string)($parts['scheme'] ?? ''));
+    $host = (string)($parts['host'] ?? '');
+    $path = strtolower((string)($parts['path'] ?? ''));
+    if (!filter_var($value, FILTER_VALIDATE_URL) || !in_array($scheme, ['http', 'https'], true) || $host === '' || isset($parts['user']) || isset($parts['pass'])) {
+        jsonOut(false, '头像必须是有效的 http 或 https 图片链接');
+    }
+    if (!preg_match('/\\.(?:jpe?g|png|gif|webp|avif)$/i', $path)) {
+        jsonOut(false, '头像链接必须指向 jpg、png、gif、webp 或 avif 图片');
+    }
+    return $value;
+}
+
+function profileGender(string $value): string {
+    $value = trim($value);
+    if ($value === '') return 'secret';
+    if (!in_array($value, ['secret', 'male', 'female'], true)) {
+        jsonOut(false, '性别选项无效');
+    }
+    return $value;
+}
+
+function profileGrade(string $value): ?string {
+    $value = trim($value);
+    if ($value === '') return null;
+    $grades = ['grade7', 'grade8', 'grade9', 'high1', 'high2', 'high3'];
+    if (!in_array($value, $grades, true)) {
+        jsonOut(false, '年级选项无效');
+    }
+    return $value;
+}
+
 function isLoggedIn(): bool {
     return currentUser() !== null;
 }
@@ -798,7 +872,7 @@ function currentUser(): ?array {
     global $db;
     $uid = (int)($_SESSION['user_id'] ?? 0);
     if ($uid <= 0 || !isset($db)) return null;
-    $user = dbFetchOne($db, "SELECT id, username, email, role, is_initial_root, is_admin, is_active, is_approved FROM users WHERE id=?", [$uid]);
+    $user = dbFetchOne($db, "SELECT id, username, email, nickname, avatar, gender, grade, role, is_initial_root, is_admin, is_active, is_approved FROM users WHERE id=?", [$uid]);
     if (!$user || !(int)$user['is_active']) {
         unset($_SESSION['user_id'], $_SESSION['username'], $_SESSION['is_admin'], $_SESSION['is_approved'], $_SESSION['role']);
         return null;
@@ -1148,6 +1222,10 @@ if ($action) {
                         'id' => $u['id'],
                         'username' => $u['username'],
                         'email' => $u['email'],
+                        'nickname' => $u['nickname'] ?? null,
+                        'avatar' => $u['avatar'] ?? null,
+                        'gender' => $u['gender'] ?? 'secret',
+                        'grade' => $u['grade'] ?? null,
                         'role' => $_SESSION['role'],
                         'is_initial_root' => (bool)($u['is_initial_root'] ?? false),
                         'is_admin' => in_array($_SESSION['role'], ['root', 'content_admin'], true),
@@ -1251,7 +1329,7 @@ if ($action) {
             // ==================== 检查会话 ====================
             case 'check_session':
                 if (isLoggedIn()) {
-                    $u = dbFetchOne($db, "SELECT id, username, email, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [getUid()]);
+                    $u = dbFetchOne($db, "SELECT id, username, email, nickname, avatar, gender, grade, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [getUid()]);
                     if ($u && (int)$u['is_active']) {
                         $u['role'] = $u['username'] === 'lian' ? 'root' : ($u['role'] ?? ((int)$u['is_admin'] ? 'root' : 'user'));
                         $u['is_initial_root'] = $u['username'] === 'lian' ? 1 : (int)($u['is_initial_root'] ?? 0);
@@ -1267,12 +1345,34 @@ if ($action) {
                 jsonOut(false, "未登录");
                 break;
 
+            // ==================== 更新当前用户资料 ====================
+            case 'update_profile':
+                if (strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') jsonOut(false, '请使用 POST 更新资料');
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $nickname = profileNickname((string)($_POST['nickname'] ?? ''));
+                $avatar = profileAvatar((string)($_POST['avatar'] ?? ''));
+                $gender = profileGender((string)($_POST['gender'] ?? 'secret'));
+                $grade = profileGrade((string)($_POST['grade'] ?? ''));
+                dbQuery($db, 'UPDATE users SET nickname=?, avatar=?, gender=?, grade=? WHERE id=?', [$nickname, $avatar, $gender, $grade, $uid]);
+                $updated = dbFetchOne($db, "SELECT id, username, email, nickname, avatar, gender, grade, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [$uid]);
+                if (!$updated || !(int)$updated['is_active']) jsonOut(false, '用户资料更新失败');
+                $updated['role'] = $updated['username'] === 'lian' ? 'root' : ($updated['role'] ?? ((int)$updated['is_admin'] ? 'root' : 'user'));
+                $updated['is_initial_root'] = $updated['username'] === 'lian' ? 1 : (int)($updated['is_initial_root'] ?? 0);
+                $updated['is_admin'] = in_array($updated['role'], ['root', 'content_admin'], true) ? 1 : 0;
+                $_SESSION['username'] = $updated['username'];
+                $_SESSION['role'] = $updated['role'];
+                $_SESSION['is_admin'] = (bool)$updated['is_admin'];
+                $_SESSION['is_approved'] = (bool)$updated['is_approved'];
+                jsonOut(true, '资料已保存', ['user' => formatUserTimestamps($updated)]);
+                break;
+
             // ==================== 用户控制台 ====================
             case 'get_dashboard':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
                 $uid = getUid();
                 // 不返回 password 字段
-                $user = dbFetchOne($db, "SELECT id, username, email, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [$uid]);
+                $user = dbFetchOne($db, "SELECT id, username, email, nickname, avatar, gender, grade, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [$uid]);
                 $rootDashboard = isRoot();
                 $examSql = $rootDashboard
                     ? "SELECT json_content FROM exam_data WHERE type='exam'"

@@ -17,7 +17,7 @@
     <section class="admin-main">
       <header class="admin-header">
         <span>管理后台</span>
-        <div class="admin-user"><n-popover trigger="click" placement="bottom-end" @update:show="value => value && loadNotifications()"><template #trigger><n-badge :value="unreadCount" :max="99"><n-button quaternary size="small">通知</n-button></n-badge></template><n-space vertical style="max-width:320px"><n-text v-if="!notifications.length" depth="3">暂无通知</n-text><n-list v-else size="small"><n-list-item v-for="item in notifications" :key="item.id"><n-thing :title="item.title" :description="item.body" /></n-list-item></n-list><n-button v-if="unreadCount" size="small" @click="readNotifications">全部标记已读</n-button></n-space></n-popover><span>{{ session.user?.username }} · {{ session.isRoot ? 'root' : '内容管理员' }}</span><n-button quaternary size="small" @click="logout">退出</n-button></div>
+        <div class="admin-user"><n-popover trigger="click" placement="bottom-end" @update:show="value => value && loadNotifications()"><template #trigger><n-badge :value="unreadCount" :max="99"><n-button quaternary size="small">通知</n-button></n-badge></template><n-space vertical style="max-width:320px"><n-text v-if="!notifications.length" depth="3">暂无通知</n-text><n-list v-else size="small"><n-list-item v-for="item in notifications" :key="item.id"><n-thing :title="item.title" :description="item.body" /></n-list-item></n-list><n-button v-if="unreadCount" size="small" @click="readNotifications">全部标记已读</n-button></n-space></n-popover><SessionProfileLink to="/admin/profile" /><span>{{ session.isRoot ? 'root' : '内容管理员' }}</span><n-button quaternary size="small" @click="logout">退出</n-button></div>
       </header>
       <main class="admin-content"><RouterView /></main>
     </section>
@@ -26,6 +26,7 @@
 
 <script setup>
 import { phpNotificationApi } from '@/api/php-modules'
+import { SessionProfileLink } from '@/layouts/components'
 import { useSessionStore } from '@/store'
 
 const router = useRouter()

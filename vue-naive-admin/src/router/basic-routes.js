@@ -24,6 +24,7 @@ export const basicRoutes = [
       { name: 'AppQuestions', path: 'questions', component: () => import('@/views/user/questions/index.vue'), meta: { title: '题库浏览' } },
       { name: 'AppFeedback', path: 'feedback', component: () => import('@/views/user/feedback/index.vue'), meta: { title: '开发者反馈' } },
       { name: 'AppAttempts', path: 'attempts', component: () => import('@/views/user/attempts/index.vue'), meta: { title: '学习记录' } },
+      { name: 'AppProfile', path: 'profile', component: () => import('@/views/shared/profile/index.vue'), meta: { title: '个人资料' } },
     ],
   },
   {
@@ -40,6 +41,7 @@ export const basicRoutes = [
       { name: 'AdminFeedback', path: 'feedback', component: () => import('@/views/admin/feedback/index.vue'), meta: { title: '开发者反馈', requiresRoot: true } },
       { name: 'AdminAnnouncements', path: 'announcements', component: () => import('@/views/admin/announcements/index.vue'), meta: { title: '公告管理', requiresRoot: true } },
       { name: 'AdminOcr', path: 'ocr', component: () => import('@/views/admin/ocr/index.vue'), meta: { title: '智能 OCR 审核', requiresPermission: 'question_import' } },
+      { name: 'AdminProfile', path: 'profile', component: () => import('@/views/shared/profile/index.vue'), meta: { title: '个人资料' } },
     ],
   },
   { name: '403', path: '/403', component: () => import('@/views/error-page/403.vue'), meta: { title: '没有权限', layout: 'empty', public: true } },

@@ -16,6 +16,10 @@ export const phpPublicApi = {
   overview: () => phpAction('public_overview', {}, { bypassCsrf: true }),
 }
 
+export const phpProfileApi = {
+  update: data => phpAction('update_profile', data),
+}
+
 export const phpDashboardApi = {
   get: () => phpAction('get_dashboard'),
 }
