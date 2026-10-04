@@ -48,23 +48,52 @@ def client():
     return OcrClient(config)
 
 
+def _as_dict(value):
+    """确保返回值是 dict：字符串先 JSON 解析；list 取首元素或返回空 dict。"""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        # list 通常意味着单元素被包了一层；取第一个非空 dict
+        for item in value:
+            if isinstance(item, dict):
+                return item
+        return {}
+    return {}
+
+
 def parse_data(response):
     raw = response.to_map()
-    body = raw.get("body", {})
+    body = raw.get("body", {}) if isinstance(raw, dict) else {}
+    if not isinstance(body, dict):
+        body = {}
     data = body.get("Data")
     if not data:
         raise RuntimeError("Alibaba OCR response did not contain Data")
-    return json.loads(data) if isinstance(data, str) else data
+    result = _as_dict(data)
+    if not result:
+        raise RuntimeError("Alibaba OCR Data 格式异常，无法解析为题目结构")
+    return result
 
 
 def render_pdf(path):
+    # PyMuPDF 新版推荐 pymupdf，兼容旧版 fitz
     try:
-        import fitz
-    except ImportError as exc:
-        raise RuntimeError("PDF processing requires PyMuPDF: install package pymupdf") from exc
-    document = fitz.open(path)
+        import pymupdf as fitz_mod
+    except ImportError:
+        try:
+            import fitz as fitz_mod
+        except ImportError as exc:
+            raise RuntimeError("PDF processing requires PyMuPDF: install package pymupdf") from exc
+    document = fitz_mod.open(path)
     for page in document:
-        pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        pixmap = page.get_pixmap(matrix=fitz_mod.Matrix(2, 2), alpha=False)
         yield pixmap.tobytes("png")
     document.close()
 
