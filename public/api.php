@@ -1489,8 +1489,15 @@ if ($action) {
                 $uid = (int)getUid();
                 $content = trim((string)($_POST['content'] ?? ''));
                 $contact = trim((string)($_POST['contact'] ?? ''));
-                if ($content === '' || mb_strlen($content) < 2 || mb_strlen($content) > 2000) jsonOut(false, '反馈内容需为2-2000个字符');
-                if (mb_strlen($contact) > 200) jsonOut(false, '联系方式过长');
+                // 过滤 HTML/PHP 标签，防止 XSS
+                $content = strip_tags($content);
+                $contact = strip_tags($contact);
+                if ($content === '' || mb_strlen($content, 'UTF-8') < 2) jsonOut(false, '反馈内容至少 2 个字符');
+                if (mb_strlen($content, 'UTF-8') > 300) jsonOut(false, '反馈内容不能超过 300 个字符');
+                if (mb_strlen($contact, 'UTF-8') > 50) jsonOut(false, '联系方式不能超过 50 个字符');
+                // 禁止纯特殊符号 / 控制字符
+                if (preg_match('/[\\x00-\\x1F\\x7F]/u', $content)) jsonOut(false, '反馈内容包含非法字符');
+                if (preg_match('/[\\x00-\\x1F\\x7F]/u', $contact)) jsonOut(false, '联系方式包含非法字符');
                 $user = currentUser();
                 [$dayStart, $dayEnd] = chinaTodayUtcBounds();
                 try {
@@ -1551,8 +1558,8 @@ if ($action) {
                 $id = (int)($_POST['id'] ?? 0);
                 $actionName = trim((string)($_POST['feedback_action'] ?? $_POST['action_type'] ?? ''));
                 $status = trim((string)($_POST['status'] ?? ''));
-                $note = trim((string)($_POST['admin_note'] ?? ''));
-                if ($id <= 0 || mb_strlen($note) > 2000) jsonOut(false, '参数无效');
+                $note = trim(strip_tags((string)($_POST['admin_note'] ?? '')));
+                if ($id <= 0 || mb_strlen($note, 'UTF-8') > 500) jsonOut(false, '参数无效或备注过长');
                 $feedback = dbFetchOne($db, 'SELECT id, user_id, status FROM user_feedback WHERE id=?', [$id]);
                 if (!$feedback) jsonOut(false, '反馈不存在');
                 if ($actionName === 'adopt') {

@@ -9,10 +9,10 @@
       </n-alert>
       <n-form ref="formRef" :model="form" :rules="rules" label-placement="top" @submit.prevent="submit">
         <n-form-item label="反馈内容" path="content">
-          <n-input v-model:value="form.content" type="textarea" :rows="8" maxlength="2000" show-count placeholder="请描述你遇到的问题或建议" />
+          <n-input v-model:value="form.content" type="textarea" :rows="6" maxlength="300" show-count placeholder="请描述你遇到的问题或建议（最多300字）" />
         </n-form-item>
         <n-form-item label="联系方式（可选）" path="contact">
-          <n-input v-model:value="form.contact" maxlength="200" placeholder="邮箱、手机号或其他方便联系你的方式" />
+          <n-input v-model:value="form.contact" maxlength="50" placeholder="邮箱或其他联系方式（最多50字）" />
         </n-form-item>
         <n-space justify="end">
           <n-button :disabled="submitting" @click="reset">
@@ -47,8 +47,21 @@ const feedbackItems = ref([])
 const submitting = ref(false)
 const form = reactive({ content: '', contact: '' })
 const rules = {
-  content: { required: true, message: '请填写反馈内容', trigger: ['blur', 'input'] },
-  contact: { max: 200, message: '联系方式不能超过 200 个字符', trigger: ['blur', 'input'] },
+  content: [
+    { required: true, message: '请填写反馈内容', trigger: ['blur', 'input'] },
+    {
+      validator: (_, value) => {
+        const text = String(value || '').trim()
+        if (text.length < 2) return new Error('反馈内容至少 2 个字符')
+        if ([...text].length > 300) return new Error('反馈内容不能超过 300 个字符')
+        // 检测 HTML 标签
+        if (/<[a-z][\s\S]*>/i.test(text)) return new Error('反馈内容不能包含 HTML 标签')
+        return true
+      },
+      trigger: ['blur', 'input'],
+    },
+  ],
+  contact: { max: 50, message: '联系方式不能超过 50 个字符', trigger: ['blur', 'input'] },
 }
 
 function reset() {
