@@ -59,11 +59,45 @@
         </n-space>
       </n-form>
     </n-card>
+
+    <n-card title="修改密码" :bordered="false" style="margin-top: 16px;">
+      <n-form
+        ref="pwdFormRef"
+        :model="pwdForm"
+        :rules="pwdRules"
+        label-placement="left"
+        label-width="100"
+        require-mark-placement="right-hanging"
+        @submit.prevent="changePassword"
+      >
+        <n-grid :cols="1" :y-gap="18">
+          <n-gi>
+            <n-form-item label="当前密码" path="old_password">
+              <n-input v-model:value="pwdForm.old_password" type="password" show-password-on="mousedown" placeholder="请输入当前密码" />
+            </n-form-item>
+          </n-gi>
+          <n-gi>
+            <n-form-item label="新密码" path="new_password">
+              <n-input v-model:value="pwdForm.new_password" type="password" show-password-on="mousedown" placeholder="至少 6 位" />
+            </n-form-item>
+          </n-gi>
+          <n-gi>
+            <n-form-item label="确认新密码" path="confirm_password">
+              <n-input v-model:value="pwdForm.confirm_password" type="password" show-password-on="mousedown" placeholder="再次输入新密码" />
+            </n-form-item>
+          </n-gi>
+        </n-grid>
+        <n-space justify="end">
+          <n-button attr-type="submit" type="primary" :loading="pwdSaving">修改密码</n-button>
+        </n-space>
+      </n-form>
+    </n-card>
   </AppPage>
 </template>
 
 <script setup>
 import { useSessionStore } from '@/store'
+import { phpProfileApi } from '@/api/php-modules'
 
 const session = useSessionStore()
 const formRef = ref(null)
@@ -74,6 +108,64 @@ const form = reactive({
   gender: 'secret',
   grade: null,
 })
+
+// ===== 修改密码 =====
+const pwdFormRef = ref(null)
+const pwdSaving = ref(false)
+const pwdForm = reactive({
+  old_password: '',
+  new_password: '',
+  confirm_password: '',
+})
+
+const pwdRules = {
+  old_password: {
+    required: true,
+    message: '请输入当前密码',
+    trigger: 'blur',
+  },
+  new_password: {
+    validator: (_, value) => {
+      if (!value) return new Error('请输入新密码')
+      if (value.length < 6) return new Error('新密码至少 6 位')
+      if (value === pwdForm.old_password) return new Error('新密码不能与旧密码相同')
+      return true
+    },
+    trigger: 'blur',
+  },
+  confirm_password: {
+    validator: (_, value) => {
+      if (!value) return new Error('请再次输入新密码')
+      if (value !== pwdForm.new_password) return new Error('两次输入的密码不一致')
+      return true
+    },
+    trigger: 'blur',
+  },
+}
+
+async function changePassword() {
+  try {
+    await pwdFormRef.value?.validate()
+    pwdSaving.value = true
+    await phpProfileApi.changePassword({
+      old_password: pwdForm.old_password,
+      new_password: pwdForm.new_password,
+      confirm_password: pwdForm.confirm_password,
+    })
+    // 修改成功后清空表单
+    pwdForm.old_password = ''
+    pwdForm.new_password = ''
+    pwdForm.confirm_password = ''
+    $message.success('密码修改成功，请牢记新密码')
+  }
+  catch (error) {
+    if (error?.errors) return
+    $message.error(error.message || '密码修改失败')
+  }
+  finally {
+    pwdSaving.value = false
+  }
+}
 
 const genderOptions = [
   { label: '保密', value: 'secret' },

@@ -1978,6 +1978,57 @@ if ($action) {
                 ]);
                 break;
 
+            // ==================== 修改当前用户密码 ====================
+            case 'change_password':
+                if (strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') jsonOut(false, '请使用 POST');
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $oldPassword = (string)($_POST['old_password'] ?? '');
+                $newPassword = (string)($_POST['new_password'] ?? '');
+                $confirmPassword = (string)($_POST['confirm_password'] ?? '');
+
+                if (empty($oldPassword) || empty($newPassword) || empty($confirmPassword)) {
+                    jsonOut(false, '请完整填写所有密码字段');
+                }
+                if ($newPassword !== $confirmPassword) {
+                    jsonOut(false, '两次输入的新密码不一致');
+                }
+                if (strlen($newPassword) < 6) {
+                    jsonOut(false, '新密码至少 6 位');
+                }
+                if ($newPassword === $oldPassword) {
+                    jsonOut(false, '新密码不能与旧密码相同');
+                }
+
+                // 验证旧密码
+                $userRow = dbFetchOne($db, 'SELECT password, username FROM users WHERE id=?', [$uid]);
+                if (!$userRow) jsonOut(false, '用户不存在');
+                $storedPwd = $userRow['password'] ?? '';
+                $oldPwdValid = false;
+                if (str_starts_with($storedPwd, 'enc:v1:')) {
+                    $decrypted = @decryptPassword($storedPwd);
+                    if ($decrypted !== false && $decrypted === $oldPassword) $oldPwdValid = true;
+                } elseif ($storedPwd !== '') {
+                    if ($storedPwd === $oldPassword) $oldPwdValid = true;
+                }
+                if (!$oldPwdValid) {
+                    jsonOut(false, '旧密码不正确');
+                }
+
+                // 更新密码
+                $encryptedNew = encryptPassword($newPassword);
+                dbQuery($db, 'UPDATE users SET password=?, updated_at=? WHERE id=?', [$encryptedNew, time(), $uid]);
+
+                // 修改密码后，重新生成 session id 并刷新管理员指纹
+                session_regenerate_id(true);
+                $_SESSION['user_id'] = $uid;
+                if (!empty($_SESSION['is_admin']) && $_SESSION['is_admin']) {
+                    $_SESSION['admin_fp'] = generateAdminFingerprint();
+                }
+
+                jsonOut(true, '密码修改成功');
+                break;
+
             // ==================== 用户控制台 ====================
             case 'get_dashboard':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");

@@ -20,6 +20,7 @@ export const phpPublicApi = {
 
 export const phpProfileApi = {
   update: data => phpAction('update_profile', data),
+  changePassword: data => phpAction('change_password', data),
 }
 
 export const phpDashboardApi = {

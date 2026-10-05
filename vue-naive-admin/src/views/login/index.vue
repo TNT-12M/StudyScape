@@ -74,6 +74,7 @@ const loading = ref(false)
 const form = reactive({ username: '', password: '' })
 
 async function login() {
+  if (loading.value) return
   if (!form.username || !form.password) return $message.warning('请输入用户名和密码')
   loading.value = true
   try {
@@ -85,9 +86,18 @@ async function login() {
     const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
       ? route.query.redirect
       : null
-    router.replace(redirect || (user.is_admin ? '/admin' : '/app'))
+    const target = redirect || (user.is_admin ? '/admin' : '/app')
+    // 确保 DOM 更新后再跳转，避免路由守卫读取到旧状态
+    await nextTick()
+    await router.replace(target)
+    // 兜底：如果跳转后路径仍然不对（极端竞态），强制再推一次
+    if (router.currentRoute.value.path !== target && !router.currentRoute.value.path.startsWith(target)) {
+      await router.push(target)
+    }
   }
-  catch (error) { $message.error(error.message || '登录失败') }
+  catch (error) {
+    $message.error(error.message || '登录失败')
+  }
   finally { loading.value = false }
 }
 
