@@ -16,7 +16,20 @@
       </n-card>
       <n-card title="题目列表" segmented>
         <template #header-extra><n-space><n-button :disabled="!selectedIds.length" @click="bulkCategory">批量改分类</n-button><n-button :disabled="!selectedIds.length" @click="bulkMove">批量移动学段</n-button><n-button type="error" :disabled="!selectedIds.length" @click="bulkDelete">批量删除</n-button></n-space></template>
-        <n-data-table v-model:checked-row-keys="selectedIds" :columns="columns" :data="questions" :row-key="row => row.id" :loading="loading" :pagination="pagination" :scroll-x="1200" remote @update:page="handlePageChange" @update:page-size="handlePageSizeChange" />
+        <n-data-table v-model:checked-row-keys="selectedIds" :columns="columns" :data="questions" :row-key="row => row.id" :loading="loading" :pagination="pagination" :scroll-x="1200" remote :expanded-row-keys="expandedRowKeys" @update:expanded-row-keys="keys => expandedRowKeys = keys" @update:page="handlePageChange" @update:page-size="handlePageSizeChange">
+          <template #expanded-row="{ row }">
+            <div class="expanded-content">
+              <div class="expanded-section">
+                <div class="expanded-label">题干</div>
+                <div class="question-preview question-preview--inline" v-html="renderFullContent(row.content)" />
+              </div>
+              <div v-if="row.explanation" class="expanded-section">
+                <div class="expanded-label">解析</div>
+                <div class="question-preview question-preview--inline" v-html="renderFullContent(row.explanation)" />
+              </div>
+            </div>
+          </template>
+        </n-data-table>
         <n-empty v-if="!loading && !questions.length" description="当前筛选条件下没有题目" />
       </n-card>
     </n-space>
@@ -27,7 +40,7 @@
         <n-form-item label="题干" path="content">
           <n-tabs v-model:value="contentMode" type="segment" size="small">
             <n-tab-pane name="preview" tab="预览">
-              <div class="question-preview" v-html="form.content || '<span class=\"question-placeholder\">暂无题干内容</span>'" />
+              <div class="question-preview" v-html="previewContent" />
             </n-tab-pane>
             <n-tab-pane name="source" tab="编辑源码">
               <n-input v-model:value="form.content" type="textarea" :rows="8" placeholder="请输入题干文本或 HTML 内容" />
@@ -52,11 +65,13 @@
 <script setup>
 import { NButton, NSelect, NSpace } from 'naive-ui'
 import { phpQuestionsApi } from '@/api/php-modules'
+import { sanitizeHtml, renderMathInHtml } from '@/views/user/components/question-utils'
 
 const message = window.$message
 const dialog = window.$dialog
 const questions = ref([])
 const selectedIds = ref([])
+const expandedRowKeys = ref([])
 const loading = ref(false)
 const saving = ref(false)
 const importing = ref(false)
@@ -75,11 +90,26 @@ const typeOptions = [{ label: '单选题', value: 'single' }, { label: '多选�
 const categoryOptions = typeOptions
 const subjectOptions = computed(() => subjects.value.map(item => ({ label: item, value: item })))
 const statCards = computed(() => [{ label: '题目总数', value: stats.value.total || 0 }, { label: '科目数', value: stats.value.by_subject?.length || 0 }, { label: '题型数', value: stats.value.by_type?.length || 0 }, { label: '当前页', value: questions.value.length }])
+const previewContent = computed(() => {
+  const content = form.content || ''
+  if (!content.trim()) return '<span class="question-placeholder">暂无题干内容</span>'
+  return renderMathInHtml(sanitizeHtml(content))
+})
 const rules = { subject: { required: true, message: '请输入科目' }, education_level: { required: true, message: '请选择学段' }, content: { required: true, message: '请输入题干' }, correct_answer: { required: true, message: '请输入答案' } }
-const columns = [{ type: 'selection' }, { title: 'ID', key: 'id', width: 70 }, { title: '科目', key: 'subject', width: 100 }, { title: '学段', key: 'education_level', render: row => row.education_level === 'senior' ? '高中' : '初中', width: 80 }, { title: '题型', key: 'question_type', render: row => labelOf(row.question_type), width: 100 }, { title: '题干摘要', key: 'content', width: 560, render: row => h('span', { class: 'question-summary', title: plainSummary(row.content, 240) }, plainSummary(row.content, 120)) }, { title: '难度', key: 'difficulty', width: 75 }, { title: '分值', key: 'points', width: 70 }, { title: '操作', key: 'actions', width: 150, render: row => h(NSpace, null, { default: () => [h(NButton, { size: 'small', onClick: () => openEdit(row.id) }, { default: () => '查看/编辑' }), h(NButton, { size: 'small', type: 'error', onClick: () => removeQuestion(row.id) }, { default: () => '删除' })] }) }]
+const columns = [{ type: 'selection' }, { title: '展开', key: 'expand', width: 60, render: row => h(NButton, { size: 'small', quaternary: true, onClick: () => toggleExpand(row.id) }, { default: () => expandedRowKeys.value.includes(row.id) ? '收起' : '展开' }) }, { title: 'ID', key: 'id', width: 70 }, { title: '科目', key: 'subject', width: 100 }, { title: '学段', key: 'education_level', render: row => row.education_level === 'senior' ? '高中' : '初中', width: 80 }, { title: '题型', key: 'question_type', render: row => labelOf(row.question_type), width: 100 }, { title: '题干摘要', key: 'content', width: 560, render: row => h('span', { class: 'question-summary', title: plainSummary(row.content, 240) }, plainSummary(row.content, 120)) }, { title: '难度', key: 'difficulty', width: 75 }, { title: '分值', key: 'points', width: 70 }, { title: '操作', key: 'actions', width: 150, render: row => h(NSpace, null, { default: () => [h(NButton, { size: 'small', onClick: () => openEdit(row.id) }, { default: () => '查看/编辑' }), h(NButton, { size: 'small', type: 'error', onClick: () => removeQuestion(row.id) }, { default: () => '删除' })] }) }]
 
 function defaultForm() { return { subject: '', education_level: 'junior', category: 'single', question_type: 'single', content: '', options: ['', '', '', ''], correct_answer: '', explanation: '', difficulty: 3, points: 1 } }
 function labelOf(type) { return typeOptions.find(item => item.value === type)?.label || type || '-' }
+function toggleExpand(id) {
+  const idx = expandedRowKeys.value.indexOf(id)
+  if (idx >= 0) expandedRowKeys.value.splice(idx, 1)
+  else expandedRowKeys.value.push(id)
+}
+function renderFullContent(value) {
+  const content = String(value || '')
+  if (!content.trim()) return '<span style="color:var(--n-text-color-3)">暂无内容</span>'
+  return renderMathInHtml(sanitizeHtml(content))
+}
 function plainSummary(value, limit = 120) {
   const source = String(value || '')
   const wrapper = document.createElement('div')
@@ -118,4 +148,9 @@ onMounted(async () => { await Promise.all([loadStats(), reloadSubjects()]); awai
 .question-preview :deep(table) { max-width: 100%; overflow: auto; border-collapse: collapse; }
 .question-preview :deep(td), .question-preview :deep(th) { border: 1px solid var(--n-border-color); padding: 4px 8px; }
 .question-placeholder { color: var(--n-text-color-3); }
+.expanded-content { padding: 12px 20px; background: var(--n-color-fill-soft); border-radius: 4px; }
+.expanded-section { margin-bottom: 12px; }
+.expanded-section:last-child { margin-bottom: 0; }
+.expanded-label { font-size: 12px; color: var(--n-text-color-3); margin-bottom: 6px; font-weight: 500; }
+.question-preview--inline { min-height: auto; max-height: none; padding: 10px 12px; background: var(--n-color); }
 </style>

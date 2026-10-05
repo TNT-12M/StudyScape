@@ -25,6 +25,9 @@
           <span>开发者反馈</span>
         </RouterLink>
       </nav>
+      <RouterLink v-if="session.isAdmin" class="back-admin" to="/admin">
+        <span>进入管理后台</span>
+      </RouterLink>
     </aside>
     <section class="user-main">
       <header class="user-header">
@@ -47,6 +50,8 @@
 </template>
 
 <script setup>
+import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { phpNotificationApi } from '@/api/php-modules'
 import { SessionProfileLink } from '@/layouts/components'
 import { useSessionStore } from '@/store'
@@ -88,6 +93,9 @@ async function logout() {
   padding: 26px 14px;
   background: #172033;
   color: #fff;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
 }
 .user-brand {
   padding: 0 14px 30px;
@@ -120,6 +128,21 @@ async function logout() {
 }
 .user-menu a:hover,
 .user-menu a.is-active {
+  color: #fff;
+  background: #2a3957;
+}
+.back-admin {
+  margin-top: auto;
+  padding: 11px 14px;
+  color: #b9c3d6;
+  text-decoration: none;
+  border-radius: 6px;
+  font-size: 13px;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+.back-admin:hover {
   color: #fff;
   background: #2a3957;
 }
@@ -190,6 +213,11 @@ async function logout() {
     flex: 0 0 auto;
     padding: 9px 12px;
     white-space: nowrap;
+  }
+  .back-admin {
+    margin-top: 8px;
+    padding: 9px 12px;
+    text-align: center;
   }
   .user-header {
     padding: 0 16px;

@@ -402,6 +402,18 @@ try {
     )");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_announcement_reads_user ON announcement_reads(user_id, read_at)");
 
+    // ---------- 用户名修改记录表 ----------
+    // 每月最多 5 次，防止恶意刷用户名占用
+    $db->exec("CREATE TABLE IF NOT EXISTS username_change_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        old_username TEXT NOT NULL,
+        new_username TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_username_change_user ON username_change_log(user_id, created_at DESC)");
+    $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_username_change_old ON username_change_log(old_username, created_at)");
+
     $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='roles_password_feedback_v1'");
     if (!$migration) {
         $db->exec('BEGIN IMMEDIATE');
@@ -783,6 +795,45 @@ function sanitizeInput($v) {
 }
 
 /**
+ * 安全的 HTML 内容过滤：保留图片、表格等安全标签，移除 XSS 风险
+ * 用于题干、解析、选项等可能包含 HTML/图片的字段
+ */
+function sanitizeHtmlContent($v) {
+    $v = trim((string)$v);
+    if ($v === '') return '';
+
+    // 先移除所有 script/style/iframe 等危险标签及其内容
+    $v = preg_replace('/<\s*script[^>]*>.*?<\s*\/\s*script\s*>/is', '', $v);
+    $v = preg_replace('/<\s*style[^>]*>.*?<\s*\/\s*style\s*>/is', '', $v);
+    $v = preg_replace('/<\s*iframe[^>]*>.*?<\s*\/\s*iframe\s*>/is', '', $v);
+
+    // 允许的安全标签
+    $allowedTags = '<img><div><span><p><br><hr><table><thead><tbody><tr><td><th><ul><ol><li><strong><em><b><i><u><sub><sup><pre><code><blockquote>';
+    $v = strip_tags($v, $allowedTags);
+
+    // 移除所有 on* 事件属性（onclick, onerror, onload 等）
+    $v = preg_replace('/\son[a-z]+\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)/i', '', $v);
+
+    // 移除 javascript: 和 data:text/html 协议的 src/href
+    $v = preg_replace('/\s(src|href)\s*=\s*"\s*javascript:[^"]*"/i', '', $v);
+    $v = preg_replace("/\s(src|href)\s*=\s*'\s*javascript:[^']*'/i", '', $v);
+    $v = preg_replace('/\s(src|href)\s*=\s*"\s*data:text\/html[^"]*"/i', '', $v);
+    $v = preg_replace("/\s(src|href)\s*=\s*'\s*data:text\/html[^']*'/i", '', $v);
+
+    // 确保 img 的 src 只允许 data:image 和 http(s) 协议
+    if (preg_match_all('/<img[^>]*src\s*=\s*"([^"]*)"[^>]*>/i', $v, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $m) {
+            $src = $m[1];
+            if (!preg_match('/^(data:image\/|https?:\/\/|\/)/i', $src)) {
+                $v = str_replace($m[0], '', $v);
+            }
+        }
+    }
+
+    return $v;
+}
+
+/**
  * 校验用户名：2-20 字符，仅允许中英文、数字、下划线、emoji
  */
 function validateUsername(string $username): string {
@@ -960,6 +1011,15 @@ function chinaTodayUtcBounds(): array {
     $utc = new DateTimeZone('UTC');
     $start = new DateTimeImmutable('today', $china);
     $end = $start->modify('+1 day');
+    return [$start->setTimezone($utc)->format('Y-m-d H:i:s'), $end->setTimezone($utc)->format('Y-m-d H:i:s')];
+}
+
+// 当前自然月（北京时间）的 UTC 起止时间
+function currentMonthUtcBounds(): array {
+    $china = new DateTimeZone('Asia/Shanghai');
+    $utc = new DateTimeZone('UTC');
+    $start = new DateTimeImmutable('first day of this month midnight', $china);
+    $end = new DateTimeImmutable('first day of next month midnight', $china);
     return [$start->setTimezone($utc)->format('Y-m-d H:i:s'), $end->setTimezone($utc)->format('Y-m-d H:i:s')];
 }
 
@@ -1442,6 +1502,42 @@ if ($action) {
                 $avatar = profileAvatar((string)($_POST['avatar'] ?? ''));
                 $gender = profileGender((string)($_POST['gender'] ?? 'secret'));
                 $grade = profileGrade((string)($_POST['grade'] ?? ''));
+
+                // 用户名修改（可选）
+                $newUsername = trim((string)($_POST['username'] ?? ''));
+                $currentUser = dbFetchOne($db, 'SELECT username FROM users WHERE id=?', [$uid]);
+                $usernameChanged = false;
+                if ($newUsername !== '' && $currentUser && $newUsername !== $currentUser['username']) {
+                    // root 账号用户名不可修改
+                    if ($currentUser['username'] === 'lian') {
+                        jsonOut(false, 'root 账号用户名不可修改');
+                    }
+                    // 校验格式
+                    $newUsername = validateUsername($newUsername);
+                    // 检查本月修改次数（自然月，最多 5 次）
+                    [$monthStart, $monthEnd] = currentMonthUtcBounds();
+                    $changeCount = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM username_change_log WHERE user_id=? AND created_at>=? AND created_at<?', [$uid, $monthStart, $monthEnd])['c'] ?? 0);
+                    if ($changeCount >= 5) {
+                        jsonOut(false, '本月修改用户名次数已达上限（每月最多 5 次），请下月再试');
+                    }
+                    // 检查重名
+                    $exist = dbFetchOne($db, 'SELECT id FROM users WHERE username=?', [$newUsername]);
+                    if ($exist) {
+                        jsonOut(false, '该用户名已被占用');
+                    }
+                    // 执行修改 + 记录日志
+                    $db->exec('BEGIN IMMEDIATE');
+                    try {
+                        dbQuery($db, 'UPDATE users SET username=? WHERE id=?', [$newUsername, $uid]);
+                        dbQuery($db, 'INSERT INTO username_change_log(user_id, old_username, new_username) VALUES(?,?,?)', [$uid, $currentUser['username'], $newUsername]);
+                        $db->exec('COMMIT');
+                        $usernameChanged = true;
+                    } catch (Throwable $e) {
+                        @$db->exec('ROLLBACK');
+                        jsonOut(false, '用户名修改失败：' . $e->getMessage());
+                    }
+                }
+
                 dbQuery($db, 'UPDATE users SET nickname=?, avatar=?, gender=?, grade=? WHERE id=?', [$nickname, $avatar, $gender, $grade, $uid]);
                 $updated = dbFetchOne($db, "SELECT id, username, email, nickname, avatar, gender, grade, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [$uid]);
                 if (!$updated || !(int)$updated['is_active']) jsonOut(false, '用户资料更新失败');
@@ -1452,7 +1548,13 @@ if ($action) {
                 $_SESSION['role'] = $updated['role'];
                 $_SESSION['is_admin'] = (bool)$updated['is_admin'];
                 $_SESSION['is_approved'] = (bool)$updated['is_approved'];
-                jsonOut(true, '资料已保存', ['user' => formatUserTimestamps($updated)]);
+                // 返回本月剩余修改次数
+                [$monthStart, $monthEnd] = currentMonthUtcBounds();
+                $changeCount = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM username_change_log WHERE user_id=? AND created_at>=? AND created_at<?', [$uid, $monthStart, $monthEnd])['c'] ?? 0);
+                jsonOut(true, $usernameChanged ? '资料已保存，用户名已更新' : '资料已保存', [
+                    'user' => formatUserTimestamps($updated),
+                    'username_change_remaining' => max(0, 5 - $changeCount),
+                ]);
                 break;
 
             // ==================== 用户控制台 ====================
@@ -2129,10 +2231,10 @@ if ($action) {
 
                 $subject     = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 $qtype       = sanitizeInput($_POST['question_type'] ?? '');
-                $content     = sanitizeInput($_POST['content'] ?? '');
+                $content     = sanitizeHtmlContent($_POST['content'] ?? '');
                 $optionsRaw  = $_POST['options'] ?? '[]';
                 $answer      = sanitizeInput($_POST['correct_answer'] ?? '');
-                $explanation = sanitizeInput($_POST['explanation'] ?? '');
+                $explanation = sanitizeHtmlContent($_POST['explanation'] ?? '');
                 $difficulty  = (int)($_POST['difficulty'] ?? 1);
                 $points      = (float)($_POST['points'] ?? 1.0);
                 $rawEducationLevel = trim((string)($_POST['education_level'] ?? ''));
@@ -2170,8 +2272,9 @@ if ($action) {
                 }
 
                 $optionsJson = $options ? json_encode($options, JSON_UNESCAPED_UNICODE) : null;
-                dbQuery($db, "INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [$subject, $qtype, $category, $educationLevel, $content, $optionsJson, $answer, $explanation, $difficulty, $points]);
+                $isHtml = preg_match('/<[a-z][\s\S]*>/i', $content) ? 1 : 0;
+                dbQuery($db, "INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [$subject, $qtype, $category, $educationLevel, $content, $optionsJson, $answer, $explanation, $difficulty, $points, $isHtml]);
                 $newId = (int)$db->lastInsertRowID();
                 jsonOut(true, "题目已保存", ['id' => $newId]);
                 break;
@@ -2190,10 +2293,10 @@ if ($action) {
 
                 $subject     = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 $qtype       = sanitizeInput($_POST['question_type'] ?? '');
-                $content     = sanitizeInput($_POST['content'] ?? '');
+                $content     = sanitizeHtmlContent($_POST['content'] ?? '');
                 $optionsRaw  = $_POST['options'] ?? '[]';
                 $answer      = sanitizeInput($_POST['correct_answer'] ?? '');
-                $explanation = sanitizeInput($_POST['explanation'] ?? '');
+                $explanation = sanitizeHtmlContent($_POST['explanation'] ?? '');
                 $difficulty  = (int)($_POST['difficulty'] ?? 1);
                 $points      = (float)($_POST['points'] ?? 1.0);
                 $rawEducationLevel = trim((string)($_POST['education_level'] ?? ''));
@@ -2228,8 +2331,9 @@ if ($action) {
                 }
 
                 $optionsJson = $options ? json_encode($options, JSON_UNESCAPED_UNICODE) : null;
-                dbQuery($db, "UPDATE questions SET subject=?, question_type=?, category=?, education_level=?, content=?, options=?, correct_answer=?, explanation=?, difficulty=?, points=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    [$subject, $qtype, $category, $educationLevel, $content, $optionsJson, $answer, $explanation, $difficulty, $points, $qid]);
+                $isHtml = preg_match('/<[a-z][\s\S]*>/i', $content) ? 1 : 0;
+                dbQuery($db, "UPDATE questions SET subject=?, question_type=?, category=?, education_level=?, content=?, options=?, correct_answer=?, explanation=?, difficulty=?, points=?, is_html=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    [$subject, $qtype, $category, $educationLevel, $content, $optionsJson, $answer, $explanation, $difficulty, $points, $isHtml, $qid]);
                 jsonOut(true, "题目已更新");
                 break;
 

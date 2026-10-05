@@ -50,6 +50,8 @@ AccessKey .env
 新建文件夹/AccessKey.csv
 ocr/tmp/
 ocr/results/
+ocr/__pycache__/
+__pycache__/
 
 # ===== 密码/密钥类临时脚本 =====
 *password*.php

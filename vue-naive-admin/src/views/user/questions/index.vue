@@ -48,7 +48,7 @@
 <script setup>
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { phpQuestionsApi } from '@/api/php-modules'
-import { sanitizeHtml } from '@/views/user/components/question-utils'
+import { sanitizeHtml, renderMathInHtml } from '@/views/user/components/question-utils'
 
 const questions = ref([])
 const subjects = ref([])
@@ -80,9 +80,8 @@ const columns = [
 ]
 
 function renderContent(row) {
-  if (row.is_html)
-    return h('div', { class: 'question-content', innerHTML: sanitizeHtml(row.content || '') })
-  return h('div', { class: 'question-content' }, row.content || '')
+  const content = row.content || ''
+  return h('div', { class: 'question-content', innerHTML: renderMathInHtml(sanitizeHtml(content)) })
 }
 
 function formatOptions(options) {
