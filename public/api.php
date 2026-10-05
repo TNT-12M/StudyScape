@@ -3496,6 +3496,11 @@ if ($action) {
 
                 $list = [];
                 foreach ($rows as $r) {
+                    $scenarios = [];
+                    if (!empty($r['scenarios'])) {
+                        $decoded = json_decode($r['scenarios'], true);
+                        if (is_array($decoded)) $scenarios = $decoded;
+                    }
                     $list[] = [
                         'id' => (int)$r['id'],
                         'ip' => $r['ip'],
@@ -3507,6 +3512,7 @@ if ($action) {
                         'location' => $r['location'] ?? '',
                         'last_seen' => $r['last_seen'] ?? '',
                         'first_detected' => $r['first_detected'] ?? '',
+                        'scenarios' => $scenarios,
                         'users' => $userMap[$r['ip']] ?? [],
                     ];
                 }
