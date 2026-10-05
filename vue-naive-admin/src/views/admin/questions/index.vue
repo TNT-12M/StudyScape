@@ -16,7 +16,7 @@
       </n-card>
       <n-card title="题目列表" segmented>
         <template #header-extra><n-space><n-button :disabled="!selectedIds.length" @click="bulkCategory">批量改分类</n-button><n-button :disabled="!selectedIds.length" @click="bulkMove">批量移动学段</n-button><n-button type="error" :disabled="!selectedIds.length" @click="bulkDelete">批量删除</n-button></n-space></template>
-        <n-data-table v-model:checked-row-keys="selectedIds" :columns="columns" :data="questions" :row-key="row => row.id" :loading="loading" :pagination="pagination" :scroll-x="1200" remote :expanded-row-keys="expandedRowKeys" @update:expanded-row-keys="keys => expandedRowKeys = keys" @update:page="handlePageChange" @update:page-size="handlePageSizeChange">
+        <n-data-table v-model:checked-row-keys="selectedIds" :columns="columns" :data="questions" :row-key="row => row.id" :loading="loading" :pagination="pagination" :scroll-x="1400" remote :expanded-row-keys="expandedRowKeys" @update:expanded-row-keys="keys => expandedRowKeys = keys" @update:page="handlePageChange" @update:page-size="handlePageSizeChange">
           <template #expanded-row="{ row }">
             <div class="expanded-content">
               <div class="expanded-section">
