@@ -2481,6 +2481,10 @@ $csrfBypass = [
     'public_overview',
     'record_visit',
     'admin_access_stats',
+    // 安全监控读接口
+    'security_scan_status',
+    'security_ip_list',
+    'security_scan_check',
     // 已移除的历史危险 action 直接返回“功能已移除”，不要求旧客户端提供 CSRF。
     'admin_danger_challenge',
     'clear_users',

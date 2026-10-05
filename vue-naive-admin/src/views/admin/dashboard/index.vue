@@ -112,7 +112,7 @@
               <div class="sec-stat-label">高度可疑</div>
             </div>
             <div class="sec-stat sec-stat--info">
-              <div class="sec-stat-value">{{ secStatus.last_scan?.total_ip_count ?? '-' }}</div>
+              <div class="sec-stat-value">{{ secStatus.total_ip_count ?? '-' }}</div>
               <div class="sec-stat-label">总 IP 数</div>
             </div>
           </div>
@@ -450,7 +450,9 @@ async function loadSecStatus() {
     const result = await phpAdminApi.securityScanStatus()
     secStatus.value = result.data || {}
   }
-  catch (e) { /* 忽略 */ }
+  catch (e) {
+    console.error('[安全监控] 加载状态失败:', e)
+  }
 }
 
 async function loadSecIpList() {
@@ -464,7 +466,9 @@ async function loadSecIpList() {
     secIpList.value = result.data?.list || []
     secTotal.value = result.data?.total || 0
   }
-  catch (e) { /* 忽略 */ }
+  catch (e) {
+    console.error('[安全监控] 加载IP列表失败:', e)
+  }
   finally {
     secLoading.value = false
   }
