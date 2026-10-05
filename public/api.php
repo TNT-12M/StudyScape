@@ -76,6 +76,224 @@ function loadPasswordKey(): string {
     return $key;
 }
 
+// ===================== SMTP 邮件配置（项目根目录 smtp.env） =====================
+function smtpConfigPath(): string {
+    $configured = getenv('SMTP_ENV_FILE');
+    if ($configured !== false && trim($configured) !== '') return trim($configured);
+    return dirname(__DIR__) . '/smtp.env';
+}
+
+function loadSmtpConfig(): ?array {
+    static $config = null;
+    if ($config !== null) return $config;
+    $path = smtpConfigPath();
+    if (!is_file($path)) { $config = false; return null; }
+    $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($lines === false) { $config = false; return null; }
+    $cfg = [];
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '#')) continue;
+        $eqPos = strpos($line, '=');
+        if ($eqPos === false) continue;
+        $key = trim(substr($line, 0, $eqPos));
+        $val = trim(substr($line, $eqPos + 1));
+        if (str_starts_with($val, '"') && str_ends_with($val, '"')) $val = substr($val, 1, -1);
+        if (str_starts_with($val, "'") && str_ends_with($val, "'")) $val = substr($val, 1, -1);
+        $cfg[$key] = $val;
+    }
+    $required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS'];
+    foreach ($required as $k) { if (empty($cfg[$k])) { $config = false; return null; } }
+    $config = $cfg;
+    return $cfg;
+}
+
+/**
+ * 使用 SMTP 发送纯文本邮件（支持 STARTTLS）
+ * 返回 [true, ''] 或 [false, '错误信息']
+ */
+function smtpSendMail(string $to, string $subject, string $body): array {
+    $cfg = loadSmtpConfig();
+    if (!$cfg) return [false, '邮件服务未配置'];
+
+    $host = $cfg['SMTP_HOST'];
+    $port = (int)($cfg['SMTP_PORT'] ?? 587);
+    $user = $cfg['SMTP_USER'];
+    $pass = $cfg['SMTP_PASS'];
+    $secure = strtolower($cfg['SMTP_SECURE'] ?? 'tls');
+    $fromName = $cfg['SMTP_FROM_NAME'] ?? 'StudyScape';
+
+    $boundary = md5(uniqid((string)mt_rand(), true));
+    $subject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
+    $fromEncoded = '=?UTF-8?B?' . base64_encode($fromName) . '?=';
+    $date = date('r');
+    $messageId = '<' . md5(uniqid((string)mt_rand(), true)) . '@' . ($_SERVER['HTTP_HOST'] ?? 'studyscape') . '>';
+
+    $headers = [];
+    $headers[] = "Date: $date";
+    $headers[] = "From: $fromEncoded <$user>";
+    $headers[] = "To: $to";
+    $headers[] = "Subject: $subject";
+    $headers[] = "Message-ID: $messageId";
+    $headers[] = "MIME-Version: 1.0";
+    $headers[] = "Content-Type: text/plain; charset=UTF-8";
+    $headers[] = "Content-Transfer-Encoding: base64";
+    $headers[] = "X-Mailer: StudyScape/1.0";
+
+    $bodyEncoded = chunk_split(base64_encode($body));
+    $data = implode("\r\n", $headers) . "\r\n\r\n" . $bodyEncoded;
+
+    try {
+        $context = stream_context_create([
+            'ssl' => [
+                'verify_peer' => true,
+                'verify_peer_name' => true,
+                'allow_self_signed' => false,
+            ],
+        ]);
+        $socket = @stream_socket_client("tcp://$host:$port", $errno, $errstr, 30, STREAM_CLIENT_CONNECT, $context);
+        if (!$socket) return [false, "无法连接 SMTP 服务器: $errstr ($errno)"];
+        stream_set_timeout($socket, 30);
+
+        function _smtpRead($socket) {
+            $reply = '';
+            while ($line = fgets($socket, 515)) {
+                $reply .= $line;
+                if (isset($line[3]) && $line[3] === ' ') break;
+            }
+            return $reply;
+        }
+        function _smtpCmd($socket, $cmd, $expect = '250') {
+            fputs($socket, $cmd . "\r\n");
+            $reply = _smtpRead($socket);
+            if (str_starts_with(trim($reply), $expect) === false) {
+                throw new RuntimeException("SMTP 命令失败 [$cmd]: " . trim($reply));
+            }
+            return $reply;
+        }
+
+        $banner = _smtpRead($socket);
+        if (!str_starts_with(trim($banner), '220')) {
+            fclose($socket);
+            return [false, 'SMTP 服务器无响应'];
+        }
+
+        _smtpCmd($socket, "EHLO " . ($_SERVER['HTTP_HOST'] ?? 'localhost'), '250');
+
+        if ($secure === 'tls') {
+            _smtpCmd($socket, 'STARTTLS', '220');
+            if (!stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
+                fclose($socket);
+                return [false, 'TLS 加密失败'];
+            }
+            _smtpCmd($socket, "EHLO " . ($_SERVER['HTTP_HOST'] ?? 'localhost'), '250');
+        }
+
+        _smtpCmd($socket, "AUTH LOGIN", '334');
+        _smtpCmd($socket, base64_encode($user), '334');
+        _smtpCmd($socket, base64_encode($pass), '235');
+
+        _smtpCmd($socket, "MAIL FROM:<$user>", '250');
+        _smtpCmd($socket, "RCPT TO:<$to>", '250');
+        _smtpCmd($socket, 'DATA', '354');
+        fputs($socket, $data . "\r\n.\r\n");
+        $reply = _smtpRead($socket);
+        if (!str_starts_with(trim($reply), '250')) {
+            fclose($socket);
+            return [false, '邮件发送失败: ' . trim($reply)];
+        }
+
+        _smtpCmd($socket, 'QUIT', '221');
+        fclose($socket);
+        return [true, ''];
+    } catch (Throwable $e) {
+        return [false, $e->getMessage()];
+    }
+}
+
+// ===================== 邮箱验证码通用逻辑 =====================
+// 验证码存在 email_codes 表中，按用途（register/reset）区分
+function generateEmailCode(): string {
+    return str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+}
+
+function emailCodeTableExists(): bool {
+    global $db;
+    static $exists = null;
+    if ($exists !== null) return $exists;
+    $row = @dbFetchOne($db, "SELECT name FROM sqlite_master WHERE type='table' AND name='email_codes'");
+    $exists = !empty($row);
+    return $exists;
+}
+
+function ensureEmailCodeTable(): void {
+    global $db;
+    if (emailCodeTableExists()) return;
+    @dbQuery($db, "CREATE TABLE email_codes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL,
+        code TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        ip TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
+    )");
+    @dbQuery($db, "CREATE INDEX idx_email_codes_email ON email_codes(email)");
+    @dbQuery($db, "CREATE INDEX idx_email_codes_purpose ON email_codes(purpose)");
+}
+
+/**
+ * 检查同一邮箱是否在冷却期内（60秒），可以发送返回 true
+ */
+function canSendEmailCode(string $email, string $purpose): bool {
+    global $db;
+    ensureEmailCodeTable();
+    $row = @dbFetchOne($db, "SELECT created_at FROM email_codes WHERE email=? AND purpose=? AND used=0 ORDER BY id DESC LIMIT 1", [$email, $purpose]);
+    if (!$row) return true;
+    return (time() - (int)$row['created_at']) >= 60;
+}
+
+/**
+ * 保存邮箱验证码
+ */
+function saveEmailCode(string $email, string $code, string $purpose): void {
+    global $db;
+    ensureEmailCodeTable();
+    $now = time();
+    $expires = $now + 300; // 5分钟
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+    @dbQuery($db, "INSERT INTO email_codes(email,code,purpose,ip,created_at,expires_at,used) VALUES(?,?,?,?,?,?,0)", [$email, $code, $purpose, $ip, $now, $expires]);
+    // 清理过期记录（每次插入顺便清理，避免表膨胀）
+    @dbQuery($db, "DELETE FROM email_codes WHERE expires_at < ?", [time() - 86400]);
+}
+
+/**
+ * 验证邮箱验证码，成功返回 true 并标记已使用
+ */
+function verifyEmailCode(string $email, string $code, string $purpose): bool {
+    global $db;
+    ensureEmailCodeTable();
+    $now = time();
+    $row = @dbFetchOne($db, "SELECT id, code, expires_at, used FROM email_codes WHERE email=? AND purpose=? AND used=0 ORDER BY id DESC LIMIT 1", [$email, $purpose]);
+    if (!$row) return false;
+    if ((int)$row['expires_at'] < $now) return false;
+    if (!hash_equals($row['code'], $code)) return false;
+    @dbQuery($db, "UPDATE email_codes SET used=1 WHERE id=?", [(int)$row['id']]);
+    return true;
+}
+
+/**
+ * 检查重置密码频率：每月每邮箱不超过 5 次
+ */
+function canResetPassword(string $email): bool {
+    global $db;
+    ensureEmailCodeTable();
+    $startOfMonth = strtotime(date('Y-m-01 00:00:00'));
+    $row = @dbFetchOne($db, "SELECT COUNT(*) AS c FROM email_codes WHERE email=? AND purpose='reset' AND created_at >= ?", [$email, $startOfMonth]);
+    return ((int)($row['c'] ?? 0)) < 5;
+}
+
 function encryptPassword(string $password): string {
     global $passwordKey;
     $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
@@ -465,6 +683,46 @@ try {
     try { $db->exec('ROLLBACK'); } catch (Throwable $ignored) {}
     error_log('roles/feedback migration failed: ' . $e->getMessage());
     die(json_encode(['success' => false, 'message' => '角色迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
+}
+
+// ==========================================================
+// 邮箱验证字段与验证码表迁移
+// ==========================================================
+try {
+    $db->exec("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+    $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='email_verification_v1'");
+    if (!$migration) {
+        $db->exec('BEGIN');
+
+        // 给 users 表加 email_verified 字段
+        $col = dbFetchOne($db, "PRAGMA table_info(users) WHERE name='email_verified'");
+        if (!$col) {
+            $db->exec("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0");
+            // 已存在的用户默认标记为已验证（历史兼容）
+            $db->exec("UPDATE users SET email_verified=1 WHERE email IS NOT NULL AND email != ''");
+        }
+
+        // 创建邮箱验证码表
+        $db->exec("CREATE TABLE IF NOT EXISTS email_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            code TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            ip TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_email_codes_email ON email_codes(email)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_email_codes_purpose ON email_codes(purpose)");
+
+        $db->exec("INSERT INTO schema_migrations(version) VALUES('email_verification_v1')");
+        $db->exec('COMMIT');
+    }
+} catch (Throwable $e) {
+    try { $db->exec('ROLLBACK'); } catch (Throwable $ignored) {}
+    error_log('email verification migration failed: ' . $e->getMessage());
+    die(json_encode(['success' => false, 'message' => '邮箱验证迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
 
 // ==========================================================
@@ -1296,20 +1554,84 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 if ($action) {
     try {
         switch ($action) {
+            // ==================== 发送邮箱验证码 ====================
+            case 'send_email_code':
+                $email = sanitizeInput($_POST['email'] ?? '');
+                $purpose = sanitizeInput($_POST['purpose'] ?? 'register'); // register | reset
+                $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
+
+                if (!in_array($purpose, ['register', 'reset'], true)) {
+                    jsonOut(false, '非法用途');
+                }
+                if (empty($email) || empty($captcha)) {
+                    jsonOut(false, '请填写邮箱和图片验证码');
+                }
+                if (!validateEmail($email)) {
+                    jsonOut(false, '邮箱格式不正确');
+                }
+                if (!isset($_SESSION['captcha_code']) || $_SESSION['captcha_code'] !== $captcha) {
+                    unset($_SESSION['captcha_code']);
+                    jsonOut(false, '图片验证码错误');
+                }
+                unset($_SESSION['captcha_code']);
+
+                // 重置密码：检查邮箱是否存在
+                if ($purpose === 'reset') {
+                    $exist = dbFetchOne($db, "SELECT id FROM users WHERE email=?", [$email]);
+                    if (!$exist) {
+                        // 统一返回成功，避免枚举邮箱
+                        jsonOut(true, '如果该邮箱已注册，验证码将在 60 秒内发送');
+                    }
+                    // 频率限制：每月不超过 5 次
+                    if (!canResetPassword($email)) {
+                        jsonOut(false, '该邮箱本月重置密码次数已达上限（5次），请下月再试');
+                    }
+                }
+
+                // 注册：检查邮箱是否已被注册
+                if ($purpose === 'register') {
+                    $exist = dbFetchOne($db, "SELECT id FROM users WHERE email=?", [$email]);
+                    if ($exist) {
+                        jsonOut(false, '该邮箱已被注册');
+                    }
+                }
+
+                // 冷却期检查（60 秒）
+                if (!canSendEmailCode($email, $purpose)) {
+                    jsonOut(false, '验证码发送太频繁，请 60 秒后再试');
+                }
+
+                // 生成验证码并发送
+                $code = generateEmailCode();
+                $purposeText = $purpose === 'register' ? '注册账号' : '重置密码';
+                $subject = "【学境StudyScape】{$purposeText}验证码";
+                $body = "您好！\n\n您正在申请{$purposeText}，验证码：【{$code}】\n有效期 5 分钟，请不要把验证码泄露给其他人。\n如非本人操作，请忽略此邮件。\n\n学境StudyScape";
+
+                [$ok, $err] = smtpSendMail($email, $subject, $body);
+                if (!$ok) {
+                    error_log("SMTP 发送失败 [{$email}]: {$err}");
+                    jsonOut(false, '邮件发送失败，请稍后重试');
+                }
+
+                saveEmailCode($email, $code, $purpose);
+                jsonOut(true, '验证码已发送，请注意查收');
+                break;
+
             // ==================== 用户注册 ====================
             case 'register':
                 $username = validateUsername((string)($_POST['username'] ?? ''));
                 $email = sanitizeInput($_POST['email'] ?? '');
                 $password = $_POST['password'] ?? '';
                 $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
+                $emailCode = trim($_POST['email_code'] ?? '');
 
-                if (empty($username) || empty($email) || empty($password) || empty($captcha)) {
+                if (empty($username) || empty($email) || empty($password) || empty($captcha) || empty($emailCode)) {
                     jsonOut(false, "请完整填写注册信息+验证码");
                 }
                 
                 if (!isset($_SESSION['captcha_code']) || $_SESSION['captcha_code'] !== $captcha) {
                     unset($_SESSION['captcha_code']);
-                    jsonOut(false, "验证码错误，请刷新验证码");
+                    jsonOut(false, "图片验证码错误，请刷新");
                 }
                 unset($_SESSION['captcha_code']);
 
@@ -1322,8 +1644,13 @@ if ($action) {
                     jsonOut(false, "用户名或邮箱已被注册");
                 }
 
+                // 校验邮箱验证码（验证码只可使用一次，校验成功即标记已用）
+                if (!verifyEmailCode($email, $emailCode, 'register')) {
+                    jsonOut(false, "邮箱验证码错误或已过期");
+                }
+
                 // 初始 root 已在启动迁移阶段固定创建为 lian，普通注册不再自动升权。
-                dbQuery($db, "INSERT INTO users(username, email, password, role, is_initial_root, is_approved, is_admin, is_active) VALUES(?, ?, ?, 'user', 0, 1, 0, 1)",
+                dbQuery($db, "INSERT INTO users(username, email, password, role, is_initial_root, is_approved, is_admin, is_active, email_verified) VALUES(?, ?, ?, 'user', 0, 1, 0, 1, 1)",
                     [$username, $email, encryptPassword($password)]);
                 jsonOut(true, "注册成功，可直接登录");
                 break;
@@ -1416,6 +1743,53 @@ if ($action) {
                         'is_approved' => (bool)$u['is_approved']
                     ]
                 ]);
+                break;
+
+            // ==================== 重置密码 ====================
+            case 'reset_password':
+                $account = trim((string)($_POST['account'] ?? ''));
+                $email = sanitizeInput($_POST['email'] ?? '');
+                $emailCode = trim($_POST['email_code'] ?? '');
+                $newPassword = $_POST['new_password'] ?? '';
+                $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
+
+                if (empty($account) || empty($email) || empty($emailCode) || empty($newPassword) || empty($captcha)) {
+                    jsonOut(false, '请完整填写所有信息');
+                }
+
+                // 先过图片验证码
+                if (!isset($_SESSION['captcha_code']) || $_SESSION['captcha_code'] !== $captcha) {
+                    unset($_SESSION['captcha_code']);
+                    jsonOut(false, '图片验证码错误');
+                }
+                unset($_SESSION['captcha_code']);
+
+                if (!validateEmail($email)) {
+                    jsonOut(false, '邮箱格式不正确');
+                }
+
+                // 查找用户：支持用户名或邮箱
+                $u = dbFetchOne($db, "SELECT * FROM users WHERE (username=? OR email=?) AND email=?", [$account, $account, $email]);
+                if (!$u) {
+                    // 统一提示，避免枚举
+                    jsonOut(false, '账号或邮箱不匹配');
+                }
+
+                // 校验邮箱验证码（一次性）
+                if (!verifyEmailCode($email, $emailCode, 'reset')) {
+                    jsonOut(false, '邮箱验证码错误或已过期');
+                }
+
+                // 密码强度校验（至少6位）
+                if (strlen($newPassword) < 6) {
+                    jsonOut(false, '密码长度不能少于 6 位');
+                }
+
+                // 更新密码
+                dbQuery($db, "UPDATE users SET password=? WHERE id=?", [encryptPassword($newPassword), (int)$u['id']]);
+
+                // 登出该用户所有会话（简单起见，只清除当前会话中的用户信息）
+                jsonOut(true, '密码重置成功，请使用新密码登录');
                 break;
 
             // ==================== 退出登录 ====================

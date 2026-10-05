@@ -29,6 +29,8 @@ php.ini
 *.ini.local
 .env
 .env.local
+smtp.env
+AccessKey .env
 
 # ===== 临时/补丁脚本（开发期一次性脚本，不入库）=====
 patch_*.php

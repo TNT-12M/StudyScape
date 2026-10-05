@@ -6,6 +6,8 @@ export const phpAuthApi = {
   logout: () => phpAction('logout'),
   checkSession: () => phpAction('check_session', {}, { bypassCsrf: true }),
   captchaUrl: () => getCaptchaUrl(),
+  sendEmailCode: data => phpAction('send_email_code', data, { bypassCsrf: true }),
+  resetPassword: data => phpAction('reset_password', data, { bypassCsrf: true }),
 }
 
 export const phpVisitApi = {
