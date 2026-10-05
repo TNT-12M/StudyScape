@@ -698,7 +698,7 @@ function phpSecurityScan(string $logPath, int $scanId): array {
         $scanId
     ]);
 
-    return ['success' => true, 'message' => "扫描完成，发现 " . count($suspicious) . " 个异常 IP（${duration}s）", 'total' => count($suspicious), 'duration' => $duration];
+    return ['success' => true, 'message' => "扫描完成，发现 " . count($suspicious) . " 个异常 IP（{$duration}s）", 'total' => count($suspicious), 'duration' => $duration];
 }
 
 /**
@@ -722,6 +722,83 @@ function _insertPhpSecurityNotification($db, $ipData, $location, $scenarioNames 
         date('Y-m-d H:i:s')
     ]);
 }
+
+/**
+ * 异步触发地理位置补全（Python 脚本，后台运行）
+ * 扫描完成后调用，补全异常 IP 的地理位置信息
+ * 静默失败，不影响主流程
+ */
+function _triggerGeoLookup() {
+    global $db;
+    if (!$db) return;
+
+    $dbPath = realpath(__DIR__ . '/../exam.db');
+    if (!$dbPath) return;
+
+    $scriptPath = realpath(__DIR__ . '/../security/geo_lookup.py');
+    if (!$scriptPath) return;
+
+    // 检查是否还有未补全的 IP，没有就不启动了
+    $row = dbFetchOne($db, "SELECT COUNT(*) AS c FROM security_ips WHERE location = '' OR location IS NULL");
+    if (!$row || $row['c'] == 0) return;
+
+    // 检查上一次 geo 查找是否还在运行（通过扫描日志中的 geo_lookup 标记）
+    // 简化处理：直接后台启动，Python 脚本自己会处理限速和错误
+    $cmd = sprintf('python3 %s %s > /dev/null 2>&1 &', escapeshellarg($scriptPath), escapeshellarg($dbPath));
+
+    // 尝试多种启动方式
+    $launched = false;
+    $errors = [];
+
+    // 方式1: proc_open（最可靠）
+    if (function_exists('proc_open')) {
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['file', '/dev/null', 'w'],
+            2 => ['file', '/dev/null', 'w'],
+        ];
+        $proc = @proc_open($cmd, $descriptors, $pipes);
+        if (is_resource($proc)) {
+            proc_close($proc);
+            $launched = true;
+        } else {
+            $errors[] = 'proc_open 失败';
+        }
+    } else {
+        $errors[] = 'proc_open 被禁用';
+    }
+
+    // 方式2: shell_exec + nohup
+    if (!$launched && function_exists('shell_exec')) {
+        $cmd2 = sprintf('nohup python3 %s %s > /dev/null 2>&1 &', escapeshellarg($scriptPath), escapeshellarg($dbPath));
+        $result = @shell_exec($cmd2);
+        $launched = true; // shell_exec 无法可靠判断是否成功，假设成功
+    }
+
+    // 方式3: exec
+    if (!$launched && function_exists('exec')) {
+        $cmd3 = sprintf('python3 %s %s > /dev/null 2>&1 &', escapeshellarg($scriptPath), escapeshellarg($dbPath));
+        @exec($cmd3);
+        $launched = true;
+    }
+
+    // 方式4: popen
+    if (!$launched && function_exists('popen')) {
+        $cmd4 = sprintf('python3 %s %s &', escapeshellarg($scriptPath), escapeshellarg($dbPath));
+        $handle = @popen($cmd4, 'r');
+        if ($handle) {
+            pclose($handle);
+            $launched = true;
+        }
+    }
+
+    // 静默失败，不记录也不通知（地理位置是锦上添花的功能）
+    // error_log 一下方便排查
+    if (!$launched) {
+        error_log('geo lookup trigger failed: ' . implode(', ', $errors));
+    }
+}
+
 // 非登录/注册等关键操作时，静默触发（忽略异常）
 // （伪 Cron 触发在数据库初始化 + 迁移完成之后，见下方）
 
@@ -3259,6 +3336,9 @@ if ($action) {
 
                 $result = phpSecurityScan($logPath, $scanId);
                 $lastScan = dbFetchOne($db, "SELECT * FROM security_scan_log WHERE id=?", [$scanId]);
+
+                // 异步触发地理位置补全（后台 Python 脚本，不阻塞返回）
+                _triggerGeoLookup();
 
                 jsonOut($result['success'], $result['message'], [
                     'last_scan' => $lastScan,
