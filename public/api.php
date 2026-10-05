@@ -62,12 +62,25 @@ function triggerSecurityScan(bool $force = false): void {
     if ($force) $scanInterval = 0;
 
     // 检查最近的扫描状态
-    $lastScan = dbFetchOne($db, "SELECT started_at, status FROM security_scan_log WHERE scan_type='nginx_log' ORDER BY id DESC LIMIT 1");
+    $lastScan = dbFetchOne($db, "SELECT id, started_at, status FROM security_scan_log WHERE scan_type='nginx_log' ORDER BY id DESC LIMIT 1");
     if (!$force && $lastScan) {
         $lastTime = strtotime($lastScan['started_at'] ?? '');
         if ($lastTime && (time() - $lastTime) < $scanInterval) return; // 没到时间，跳过
-        // 如果上一次还在 running，也不重复触发
-        if ($lastScan['status'] === 'running') return;
+        // 如果上一次还在 running，且不超过 10 分钟，不重复触发
+        // 如果超过 10 分钟还在 running，认为是卡住了，允许重新触发
+        if ($lastScan['status'] === 'running' && $lastTime && (time() - $lastTime) < 600) return;
+    }
+
+    // 如果上次是 running 且卡住了，先标记为失败
+    if ($lastScan && $lastScan['status'] === 'running') {
+        $lastTime = strtotime($lastScan['started_at'] ?? '');
+        if (!$lastTime || (time() - $lastTime) >= 600) {
+            dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=?", [
+                date('Y-m-d H:i:s'),
+                '扫描超时（超过10分钟未完成），已自动重置',
+                $lastScan['id']
+            ]);
+        }
     }
 
     // 插入一条扫描记录，标记为 running（防止并发重复触发）

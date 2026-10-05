@@ -75,11 +75,12 @@ def has_scan_pattern(path):
 def get_ip_location(ip):
     """查询 IP 地理位置，失败返回空字符串。
     使用 ip-api.com 免费接口（非商业用途，每分钟 45 次限制）。
+    超时 2 秒，避免拖慢扫描。
     """
     try:
         url = f"http://ip-api.com/json/{urllib.parse.quote(ip)}?lang=zh-CN&fields=status,country,regionName,city,isp"
         req = urllib.request.Request(url, headers={'User-Agent': 'StudyScape-Security/1.0'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=2) as resp:
             data = json.loads(resp.read().decode('utf-8'))
         if data.get('status') == 'success':
             parts = []
@@ -93,6 +94,33 @@ def get_ip_location(ip):
     return ''
 
 
+def update_scan_status(db_path, status, result_info='', total_ip_count=0, abnormal_ip_count=0):
+    """更新扫描状态到数据库（失败时也调用，确保前端能看到错误）"""
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM security_scan_log WHERE scan_type='nginx_log' AND status='running' ORDER BY id DESC LIMIT 1")
+        row = cursor.fetchone()
+        if row:
+            cursor.execute(f'''
+                UPDATE security_scan_log
+                SET status=?, finished_at=?, result_info=?,
+                    total_ip_count=?, abnormal_ip_count=?
+                WHERE id=?
+            ''', [
+                status,
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                result_info,
+                total_ip_count,
+                abnormal_ip_count,
+                row[0]
+            ])
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"更新扫描状态失败: {e}")
+
+
 def main():
     if len(sys.argv) < 3:
         print("用法: log_monitor.py <日志文件路径> <数据库文件路径>")
@@ -103,10 +131,23 @@ def main():
 
     if not log_path.exists():
         print(f"日志文件不存在: {log_path}")
+        update_scan_status(db_path, 'failed', f'日志文件不存在: {log_path}')
         sys.exit(1)
     if not db_path.exists():
         print(f"数据库文件不存在: {db_path}")
         sys.exit(1)
+
+    try:
+        _main(log_path, db_path)
+    except Exception as e:
+        import traceback
+        error_msg = f'{e}\n{traceback.format_exc()}'
+        print(f"扫描出错: {error_msg}")
+        update_scan_status(db_path, 'failed', f'脚本异常: {e}')
+        sys.exit(1)
+
+
+def _main(log_path, db_path):
 
     # 时间窗口：最近 24 小时
     cutoff = datetime.now() - timedelta(hours=WINDOW_HOURS)
