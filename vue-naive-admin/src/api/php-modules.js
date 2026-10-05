@@ -118,6 +118,7 @@ export const phpAdminApi = {
   accessStats: () => phpAction('admin_access_stats', {}, { bypassCsrf: true }),
   statistics: () => phpAction('admin_access_stats', {}, { bypassCsrf: true }),
   securityScanStatus: () => phpAction('security_scan_status', {}, { bypassCsrf: true }),
+  securityScanQuick: () => phpAction('security_scan_quick', {}),
   securityScanForce: () => phpAction('security_scan_force', {}),
   securityScanCheck: () => phpAction('security_scan_check', {}),
   securityIpList: data => phpAction('security_ip_list', data),

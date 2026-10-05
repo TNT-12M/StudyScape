@@ -221,15 +221,215 @@ function triggerSecurityScan(bool $force = false): array {
 
     if (!$launched) {
         error_log('security scan trigger failed: ' . implode('; ', $errors));
+        // Python 启动失败，降级用纯 PHP 版扫描（同步执行，保证可用）
+        $phpResult = phpSecurityScan($logPath, $scanId);
+        if ($phpResult['success']) {
+            return ['success' => true, 'message' => '扫描完成（PHP模式，Python启动失败已自动降级）', 'scan_id' => $scanId, 'skipped' => false];
+        }
         dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=?", [
             date('Y-m-d H:i:s'),
-            '启动失败: ' . implode('; ', $errors),
+            '启动失败: ' . implode('; ', $errors) . ' | PHP降级也失败: ' . $phpResult['message'],
             $scanId
         ]);
         return ['success' => false, 'message' => '启动失败: ' . implode('; ', $errors), 'scan_id' => $scanId, 'skipped' => false];
     }
 
     return ['success' => true, 'message' => "扫描已启动（$launchMethod）", 'scan_id' => $scanId, 'skipped' => false];
+}
+
+/**
+ * 纯 PHP 版安全扫描（不依赖 Python，作为降级方案）
+ * 解析 Nginx 访问日志，统计异常 IP，写入数据库
+ * 不查询地理位置（避免外网请求拖慢速度）
+ */
+function phpSecurityScan(string $logPath, int $scanId): array {
+    global $db;
+    if (!$db) return ['success' => false, 'message' => '数据库未连接'];
+    if (!file_exists($logPath)) return ['success' => false, 'message' => '日志文件不存在: ' . $logPath];
+
+    $apiThreshold = 1000;       // API 请求阈值
+    $scanThreshold = 20;        // 扫描特征阈值
+    $windowHours = 24;          // 时间窗口
+    $cutoff = time() - $windowHours * 3600;
+
+    // 加载白名单
+    $whitelist = [];
+    $envFile = dirname(__DIR__) . '/security.env';
+    if (file_exists($envFile)) {
+        $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (str_starts_with($line, 'SECURITY_WHITELIST_IPS=')) {
+                $ips = explode(',', substr($line, 23));
+                foreach ($ips as $ip) {
+                    $ip = trim($ip);
+                    if ($ip) $whitelist[$ip] = true;
+                }
+            }
+        }
+    }
+
+    // 扫描特征路径
+    $scanPatterns = [
+        'wp-', 'wordpress', 'xmlrpc', 'admin/', 'administrator',
+        '.env', '.git', '.svn', 'config', 'phpmyadmin', 'pma',
+        'backup', 'bak', 'sql', 'login', 'register', 'api/',
+        '?id=', '?page=', '?cat=', '/etc/passwd', 'union select',
+        '<script', 'alert(', 'eval(', 'base64', 'cmd=', 'exec=',
+    ];
+
+    // 逐行解析日志
+    $ipStats = [];
+    $lineCount = 0;
+    $handle = @fopen($logPath, 'r');
+    if (!$handle) return ['success' => false, 'message' => '无法打开日志文件'];
+
+    // Nginx combined 格式正则
+    $pattern = '/^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+) [^"]*" (\d+) \d+ "[^"]*" "[^"]*"/';
+
+    while (!feof($handle)) {
+        $line = fgets($handle);
+        if ($line === false) break;
+        $lineCount++;
+
+        if (!preg_match($pattern, $line, $m)) continue;
+
+        $ip = $m[1];
+        $timeStr = $m[2];
+        $path = $m[4];
+        $status = $m[5];
+
+        // 解析时间（格式：05/Oct/2026:19:51:12 +0800）
+        $ts = DateTime::createFromFormat('d/M/Y:H:i:s O', $timeStr);
+        if (!$ts) continue;
+        $timestamp = $ts->getTimestamp();
+        if ($timestamp < $cutoff) continue;
+
+        // 跳过白名单和内网 IP
+        if (isset($whitelist[$ip])) continue;
+        if (str_starts_with($ip, '127.') || str_starts_with($ip, '192.168.') || str_starts_with($ip, '10.')) continue;
+
+        if (!isset($ipStats[$ip])) {
+            $ipStats[$ip] = [
+                'api_count' => 0,
+                'scan_count' => 0,
+                'total_count' => 0,
+                'status_404' => 0,
+                'last_seen' => 0,
+            ];
+        }
+        $ipStats[$ip]['total_count']++;
+        $ipStats[$ip]['last_seen'] = max($ipStats[$ip]['last_seen'], $timestamp);
+
+        // API 请求
+        if (str_contains($path, '/api.php') || str_starts_with($path, '/api/')) {
+            $ipStats[$ip]['api_count']++;
+        }
+
+        // 404
+        if ($status === '404') {
+            $ipStats[$ip]['status_404']++;
+        }
+
+        // 扫描特征
+        $pathLower = strtolower($path);
+        foreach ($scanPatterns as $pattern) {
+            if (str_contains($pathLower, $pattern)) {
+                $ipStats[$ip]['scan_count']++;
+                break;
+            }
+        }
+    }
+    fclose($handle);
+
+    // 筛选异常 IP
+    $suspicious = [];
+    foreach ($ipStats as $ip => $stat) {
+        if ($stat['api_count'] >= $apiThreshold) {
+            $risk = ($stat['scan_count'] >= $scanThreshold) ? 'high' : 'medium';
+            $suspicious[] = [
+                'ip' => $ip,
+                'api_count' => $stat['api_count'],
+                'scan_count' => $stat['scan_count'],
+                'total_count' => $stat['total_count'],
+                'status_404' => $stat['status_404'],
+                'risk_level' => $risk,
+                'last_seen' => date('Y-m-d H:i:s', $stat['last_seen']),
+            ];
+        }
+    }
+
+    // 按 API 请求数降序
+    usort($suspicious, fn($a, $b) => $b['api_count'] - $a['api_count']);
+
+    // 写入数据库
+    $now = date('Y-m-d H:i:s');
+    $newCount = 0;
+
+    foreach ($suspicious as $item) {
+        // 检查是否已存在
+        $row = dbFetchOne($db, "SELECT id, risk_level, notified, location FROM security_ips WHERE ip=?", [$item['ip']]);
+
+        if ($row) {
+            dbQuery($db, "UPDATE security_ips SET api_count=?, scan_count=?, total_count=?, status_404=?, risk_level=?, last_seen=?, updated_at=? WHERE ip=?", [
+                $item['api_count'], $item['scan_count'], $item['total_count'],
+                $item['status_404'], $item['risk_level'], $item['last_seen'],
+                $now, $item['ip']
+            ]);
+            // 如果需要发通知（首次或升级到high）
+            if (($row['risk_level'] !== 'high' && $item['risk_level'] === 'high') || !$row['notified']) {
+                dbQuery($db, "UPDATE security_ips SET notified=1 WHERE ip=?", [$item['ip']]);
+                _insertPhpSecurityNotification($db, $item, $row['location'] ?? '');
+                $newCount++;
+            }
+        } else {
+            dbQuery($db, "INSERT INTO security_ips(ip, api_count, scan_count, total_count, status_404, risk_level, location, last_seen, first_detected, updated_at, notified) VALUES(?,?,?,?,?,?,?,?,?,?,1)", [
+                $item['ip'], $item['api_count'], $item['scan_count'], $item['total_count'],
+                $item['status_404'], $item['risk_level'], '', $item['last_seen'], $now, $now
+            ]);
+            _insertPhpSecurityNotification($db, $item, '');
+            $newCount++;
+        }
+    }
+
+    // 清理过期 IP
+    if ($suspicious) {
+        $placeholders = implode(',', array_fill(0, count($suspicious), '?'));
+        $ipList = array_column($suspicious, 'ip');
+        dbQuery($db, "DELETE FROM security_ips WHERE ip NOT IN ($placeholders) AND last_seen < ?", array_merge($ipList, [date('Y-m-d H:i:s', time() - 48 * 3600)]));
+    }
+
+    // 更新扫描状态
+    dbQuery($db, "UPDATE security_scan_log SET status='finished', finished_at=?, total_ip_count=?, abnormal_ip_count=?, result_info=? WHERE id=?", [
+        $now,
+        count($ipStats),
+        count($suspicious),
+        "PHP模式：处理 $lineCount 行日志，发现 " . count($suspicious) . " 个异常 IP，已发送 $newCount 条通知",
+        $scanId
+    ]);
+
+    return ['success' => true, 'message' => "扫描完成，发现 " . count($suspicious) . " 个异常 IP", 'total' => count($suspicious)];
+}
+
+/**
+ * 插入安全预警站内通知（PHP版用，复用通知逻辑）
+ */
+function _insertPhpSecurityNotification($db, $ipData, $location) {
+    // 找 root 用户
+    $root = dbFetchOne($db, "SELECT id FROM users WHERE is_initial_root=1 OR username='lian' LIMIT 1");
+    if (!$root) return;
+
+    $riskLabel = $ipData['risk_level'] === 'high' ? '高度可疑' : '异常';
+    $locStr = $location ? "，地理位置：$location" : '';
+    $body = "【安全预警】检测到异常 IP {$ipData['ip']}，24 小时内 API 请求 {$ipData['api_count']} 次，{$riskLabel}（扫描特征 {$ipData['scan_count']} 次，404 {$ipData['status_404']} 次）{$locStr}。最近活跃：{$ipData['last_seen']}";
+
+    dbQuery($db, "INSERT INTO notifications(user_id, title, body, type, created_at) VALUES(?,?,?,?,?)", [
+        $root['id'],
+        "安全预警：异常 IP {$ipData['ip']}",
+        $body,
+        'security',
+        date('Y-m-d H:i:s')
+    ]);
 }
 // 非登录/注册等关键操作时，静默触发（忽略异常）
 // （伪 Cron 触发在数据库初始化 + 迁移完成之后，见下方）
@@ -2722,6 +2922,37 @@ if ($action) {
                     'skipped' => $result['skipped'],
                     'launch_info' => $result['message'],
                     'debug' => $debug,
+                ]);
+                break;
+
+            // 快速扫描（纯 PHP 模式，同步执行，秒级出结果）
+            case 'security_scan_quick':
+                requireAdmin();
+                $logPath = '/www/wwwlogs/120.79.161.207.log';
+                $envFile = dirname(__DIR__) . '/security.env';
+                if (file_exists($envFile)) {
+                    $envLines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                    foreach ($envLines as $line) {
+                        if (str_starts_with(trim($line), '#')) continue;
+                        if (str_starts_with($line, 'NGINX_LOG_PATH=')) {
+                            $logPath = trim(substr($line, 15));
+                        }
+                    }
+                }
+
+                // 先插入一条 running 记录
+                dbQuery($db, "INSERT INTO security_scan_log(scan_type, started_at, status) VALUES('nginx_log', ?, 'running')", [
+                    date('Y-m-d H:i:s')
+                ]);
+                $scanId = $db->lastInsertRowID();
+
+                $result = phpSecurityScan($logPath, $scanId);
+                $lastScan = dbFetchOne($db, "SELECT * FROM security_scan_log WHERE id=?", [$scanId]);
+
+                jsonOut($result['success'], $result['message'], [
+                    'last_scan' => $lastScan,
+                    'scan_id' => $scanId,
+                    'mode' => 'php',
                 ]);
                 break;
 

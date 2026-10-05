@@ -73,9 +73,17 @@
               <n-tag v-else-if="secStatus.last_scan.status === 'finished'" size="small" type="success" round>已完成</n-tag>
               <n-tag v-else-if="secStatus.last_scan.status === 'failed'" size="small" type="error" round>失败</n-tag>
             </span>
-            <n-button size="small" type="primary" :loading="secScanning" @click="forceScan">
+            <n-button size="small" type="primary" :loading="secScanning" @click="quickScan">
               立即扫描
             </n-button>
+            <n-tooltip trigger="hover" placement="bottom">
+              <template #trigger>
+                <n-button size="small" :loading="secScanningFull" @click="forceScan" quaternary>
+                  完整扫描
+                </n-button>
+              </template>
+              Python 模式，含 IP 地理位置查询（较慢）
+            </n-tooltip>
             <n-button size="small" :loading="secChecking" @click="runCheck">
               自检
             </n-button>
@@ -353,6 +361,7 @@ const secStatus = ref({})
 const secIpList = ref([])
 const secLoading = ref(false)
 const secScanning = ref(false)
+const secScanningFull = ref(false)
 const secChecking = ref(false)
 const checkResult = ref(null)
 const checkVisible = ref(false)
@@ -437,11 +446,30 @@ async function loadSecIpList() {
   }
 }
 
-async function forceScan() {
+// 快速扫描（PHP模式，同步执行，秒级出结果）
+async function quickScan() {
   secScanning.value = true
   try {
+    const result = await phpAdminApi.securityScanQuick()
+    await loadSecStatus()
+    await loadSecIpList()
+    const count = secStatus.value.total_abnormal ?? 0
+    $message.success(count > 0 ? `扫描完成，发现 ${count} 个异常 IP` : '扫描完成，未发现异常 IP')
+  }
+  catch (e) {
+    console.error('快速扫描失败:', e)
+    $message.error(e.message || '扫描失败')
+  }
+  finally {
+    secScanning.value = false
+  }
+}
+
+async function forceScan() {
+  secScanningFull.value = true
+  try {
     const result = await phpAdminApi.securityScanForce()
-    $message.success(result.launch_info || '安全扫描已启动，正在后台处理...')
+    $message.success(result.launch_info || '完整扫描已启动，正在后台处理...')
     // 打印调试信息到 console
     if (result.debug) {
       console.log('[安全扫描调试信息]', result.debug)
@@ -466,7 +494,7 @@ async function forceScan() {
             const reason = secStatus.value.last_scan?.result_info || '未知原因'
             $message.warning('扫描失败：' + reason)
           }
-          secScanning.value = false
+          secScanningFull.value = false
           return
         }
         // 继续轮询（只查状态，不刷列表，减少请求次数）
@@ -474,12 +502,12 @@ async function forceScan() {
           setTimeout(poll, interval)
         } else {
           // 超时了
-          secScanning.value = false
+          secScanningFull.value = false
           $message.warning('扫描仍在进行中（补充地理位置信息较慢），请稍后刷新查看')
         }
       } catch (e) {
         console.error('轮询扫描状态出错:', e)
-        secScanning.value = false
+        secScanningFull.value = false
       }
     }
     poll() // 立即开始第一次轮询
@@ -487,7 +515,7 @@ async function forceScan() {
   catch (e) {
     console.error('启动扫描失败:', e)
     $message.error(e.message || '启动扫描失败')
-    secScanning.value = false
+    secScanningFull.value = false
   }
 }
 
