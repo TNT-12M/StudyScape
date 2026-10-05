@@ -77,21 +77,13 @@ function loadPasswordKey(): string {
 }
 
 function encryptPassword(string $password): string {
-    // 使用 bcrypt 哈希（单向，不可逆），远比对称加密安全
-    // PASSWORD_BCRYPT 自动加盐，cost=10 平衡安全与性能
-    $hash = password_hash($password, PASSWORD_BCRYPT, ['cost' => 10]);
-    if ($hash === false) {
-        // bcrypt 不可用时降级到 libsodium 对称加密
-        global $passwordKey;
-        $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-        $cipher = sodium_crypto_secretbox($password, $nonce, $passwordKey);
-        return 'enc:v1:' . base64_encode($nonce . $cipher);
-    }
-    return 'bcrypt:v2:' . $hash;
+    global $passwordKey;
+    $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+    $cipher = sodium_crypto_secretbox($password, $nonce, $passwordKey);
+    return 'enc:v1:' . base64_encode($nonce . $cipher);
 }
 
 function decryptPassword(string $stored): ?string {
-    // 仅用于旧格式密码的迁移验证；bcrypt 哈希无法解密
     global $passwordKey;
     if (!str_starts_with($stored, 'enc:v1:')) return null;
     $payload = base64_decode(substr($stored, 7), true);
@@ -106,30 +98,11 @@ function decryptPassword(string $stored): ?string {
     }
 }
 
-function passwordNeedsRehash(string $stored): bool {
-    // 非 bcrypt v2 格式都需要升级
-    return !str_starts_with($stored, 'bcrypt:v2:');
-}
-
-function rehashPasswordIfNeeded(int $userId, string $stored, string $plainPassword): void {
-    if (!passwordNeedsRehash($stored)) return;
-    global $db;
-    $newHash = encryptPassword($plainPassword);
-    @dbQuery($db, "UPDATE users SET password=? WHERE id=?", [$newHash, $userId]);
-}
-
 function passwordMatches(string $stored, string $candidate): bool {
-    // bcrypt 哈希格式（推荐）
-    if (str_starts_with($stored, 'bcrypt:v2:')) {
-        $hash = substr($stored, 10);
-        return password_verify($candidate, $hash);
-    }
-    // 旧的对称加密格式（兼容）
     if (str_starts_with($stored, 'enc:v1:')) {
         $plain = decryptPassword($stored);
         return $plain !== null && hash_equals($plain, $candidate);
     }
-    // 原始明文（极旧格式，兼容）
     return hash_equals($stored, $candidate);
 }
 
@@ -1397,8 +1370,10 @@ if ($action) {
                         : "用户名或密码错误，还可尝试 {$status['remaining']} 次";
                     jsonOut(false, $msg, ['throttle' => $status]);
                 }
-                // 兼容历史明文/旧加密账号：验证成功后立即升级为 bcrypt 哈希。
-                rehashPasswordIfNeeded((int)$u['id'], (string)$u['password'], $password);
+                // 兼容历史明文账号：验证成功后立即改写为密文。
+                if (!str_starts_with((string)$u['password'], 'enc:v1:')) {
+                    dbQuery($db, "UPDATE users SET password=? WHERE id=?", [encryptPassword($password), (int)$u['id']]);
+                }
 
                 if (!$u['is_active']) {
                     recordLoginFail();
