@@ -1907,6 +1907,19 @@ if ($action) {
                 }
                 $trend = [];
                 $todayUv = 0; $uv7d = 0; $peak = ['date' => null, 'uv' => 0];
+                // 题库分布（科目维度）
+                $bySubjectRows = dbFetchAll($db, 'SELECT subject, COUNT(*) AS c FROM questions GROUP BY subject ORDER BY c DESC LIMIT 8');
+                $by_subject = [];
+                foreach ($bySubjectRows as $r) {
+                    $by_subject[] = ['subject' => $r['subject'] ?: '未分类', 'count' => (int)$r['c']];
+                }
+                // 题库分布（题型维度）
+                $byTypeRows = dbFetchAll($db, "SELECT question_type, COUNT(*) AS c FROM questions GROUP BY question_type");
+                $typeLabels = ['single' => '单选题', 'multiple' => '多选题', 'judge' => '判断题', 'fill' => '填空题'];
+                $by_type = [];
+                foreach ($byTypeRows as $r) {
+                    $by_type[] = ['type' => $r['question_type'], 'label' => $typeLabels[$r['question_type']] ?? $r['question_type'], 'count' => (int)$r['c']];
+                }
                 if (isRoot()) {
                     for ($i = 6; $i >= 0; $i--) {
                         $date = $today->modify('-' . $i . ' days')->format('Y-m-d');
@@ -1919,7 +1932,7 @@ if ($action) {
                     $open = dbFetchOne($db, "SELECT COUNT(*) AS c FROM user_feedback WHERE status IN ('open','processing')");
                     $metrics['feedback_open_count'] = (int)($open['c'] ?? 0);
                 }
-                jsonOut(true, '', array_merge($metrics, ['timezone' => 'Asia/Shanghai', 'today' => ['date' => $today->format('Y-m-d'), 'uv' => $todayUv], 'summary' => ['uv_7d' => $uv7d, 'average_uv' => round($uv7d / 7, 2), 'peak_uv' => (int)$peak['uv'], 'peak_date' => $peak['date']], 'trend' => $trend]));
+                jsonOut(true, '', array_merge($metrics, ['timezone' => 'Asia/Shanghai', 'today' => ['date' => $today->format('Y-m-d'), 'uv' => $todayUv], 'summary' => ['uv_7d' => $uv7d, 'average_uv' => round($uv7d / 7, 2), 'peak_uv' => (int)$peak['uv'], 'peak_date' => $peak['date']], 'trend' => $trend, 'by_subject' => $by_subject, 'by_type' => $by_type]));
                 break;
 
             // ==================== OCR 批次审核 ====================
