@@ -16,7 +16,7 @@
       </n-card>
       <n-card title="题目列表" segmented>
         <template #header-extra><n-space><n-button :disabled="!selectedIds.length" @click="bulkCategory">批量改分类</n-button><n-button :disabled="!selectedIds.length" @click="bulkMove">批量移动学段</n-button><n-button type="error" :disabled="!selectedIds.length" @click="bulkDelete">批量删除</n-button></n-space></template>
-        <n-data-table v-model:checked-row-keys="selectedIds" :columns="columns" :data="questions" :row-key="row => row.id" :loading="loading" :pagination="pagination" :scroll-x="1400" remote :expanded-row-keys="expandedRowKeys" @update:expanded-row-keys="keys => expandedRowKeys = keys" @update:page="handlePageChange" @update:page-size="handlePageSizeChange">
+        <n-data-table v-model:checked-row-keys="selectedIds" :columns="columns" :data="questions" :row-key="row => Number(row.id)" :loading="loading" :pagination="pagination" :scroll-x="1400" remote :expanded-row-keys="expandedRowKeys" @update:expanded-row-keys="keys => expandedRowKeys = keys" @update:page="handlePageChange" @update:page-size="handlePageSizeChange">
           <template #expanded-row="{ row }">
             <div class="expanded-content">
               <div class="expanded-section">
@@ -174,10 +174,53 @@ function handlePageSizeChange(size) { pagination.pageSize = size; pagination.pag
 function openCreate() { Object.assign(form, defaultForm()); editingId.value = null; contentMode.value = 'source'; showEditor.value = true }
 async function openEdit(id) { try { const result = await phpQuestionsApi.get(id); const q = result.data.question; Object.assign(form, { ...defaultForm(), ...q, options: Array.isArray(q.options) ? q.options.map(item => String(item).replace(/^[A-Z]\.\s*/, '')) : [] }); editingId.value = id; contentMode.value = 'preview'; showEditor.value = true } catch (error) { message.error(error.message) } }
 async function saveQuestion() { saving.value = true; try { const payload = { ...form, id: editingId.value || undefined, options: JSON.stringify((form.question_type === 'fill' || form.question_type === 'short') ? [] : form.options.filter(Boolean)) }; await (editingId.value ? phpQuestionsApi.update(payload) : phpQuestionsApi.add(payload)); message.success('题目已保存'); showEditor.value = false; await Promise.all([loadQuestions(), loadStats()]) } catch (error) { message.error(error.message) } finally { saving.value = false } }
-function removeQuestion(id) { dialog.warning({ title: '删除题目', content: '删除后会同步清理试卷关联，确定继续吗？', positiveText: '删除', negativeText: '取消', onPositiveClick: async () => { try { await phpQuestionsApi.remove(id); message.success('已删除'); await Promise.all([loadQuestions(), loadStats()]) } catch (error) { message.error(error.message) } } }) }
+function removeQuestion(id) {
+  const qid = Number(id)
+  dialog.warning({
+    title: '删除题目',
+    content: `确定删除 ID 为 ${qid} 的题目吗？删除后会同步清理试卷关联，且不可恢复。`,
+    positiveText: '确认删除',
+    negativeText: '取消',
+    positiveButtonProps: { type: 'error' },
+    onPositiveClick: () => {
+      return phpQuestionsApi.remove(qid)
+        .then(() => {
+          message.success('删除成功')
+          selectedIds.value = selectedIds.value.filter(x => Number(x) !== qid)
+          Promise.all([loadQuestions(), loadStats()])
+        })
+        .catch(err => {
+          message.error(err.message || '删除失败')
+          return false // 保留对话框
+        })
+    },
+  })
+}
 async function bulkCategory() { const category = await chooseValue('修改分类', categoryOptions); if (!category) return; try { await phpQuestionsApi.bulkCategory({ ids: selectedIds.value, category }); selectedIds.value = []; message.success('批量修改成功'); await loadQuestions() } catch (error) { message.error(error.message) } }
 async function bulkMove() { const education_level = await chooseValue('移动到学段', levelOptions); if (!education_level) return; try { await phpQuestionsApi.bulkMove({ ids: selectedIds.value, education_level }); selectedIds.value = []; message.success('批量移动成功'); await loadQuestions() } catch (error) { message.error(error.message) } }
-function bulkDelete() { dialog.warning({ title: '批量删除', content: `将删除 ${selectedIds.value.length} 道题目及关联记录，确定继续吗？`, positiveText: '删除', negativeText: '取消', onPositiveClick: async () => { try { await phpQuestionsApi.bulkRemove({ ids: selectedIds.value }); selectedIds.value = []; message.success('批量删除成功'); await Promise.all([loadQuestions(), loadStats()]) } catch (error) { message.error(error.message) } } }) }
+function bulkDelete() {
+  const ids = selectedIds.value.map(Number)
+  if (!ids.length) return message.warning('请先选择要删除的题目')
+  dialog.warning({
+    title: '批量删除',
+    content: `将删除选中的 ${ids.length} 道题目及关联记录，此操作不可撤销，确定继续吗？`,
+    positiveText: '确认删除',
+    negativeText: '取消',
+    positiveButtonProps: { type: 'error' },
+    onPositiveClick: () => {
+      return phpQuestionsApi.bulkRemove({ ids })
+        .then(() => {
+          message.success(`成功删除 ${ids.length} 道题目`)
+          selectedIds.value = []
+          Promise.all([loadQuestions(), loadStats()])
+        })
+        .catch(err => {
+          message.error(err.message || '批量删除失败')
+          return false // 保留对话框
+        })
+    },
+  })
+}
 async function chooseValue(title, options) { let selected = ''; const confirmed = await new Promise(resolve => dialog.create({ title, content: () => h(NSelect, { value: selected, options, placeholder: '请选择', 'onUpdate:value': value => { selected = value } }), positiveText: '确定', negativeText: '取消', onPositiveClick: () => resolve(true), onNegativeClick: () => resolve(false) })); return confirmed ? selected : '' }
 async function readQuestionFile({ file }) { importForm.json_data = await file.file.text(); return false }
 async function readAnswerFile({ file }) { try { importForm.answerData = JSON.parse(await file.file.text()); message.success('答案文件已读取') } catch { message.error('答案 JSON 格式错误') }; return false }

@@ -2778,8 +2778,6 @@ if ($action) {
                 $qid = (int)($_POST['id'] ?? 0);
                 if ($qid <= 0) jsonOut(false, "题目ID无效");
                 if (!dbFetchOne($db, "SELECT id FROM questions WHERE id=?", [$qid])) jsonOut(false, "题目不存在");
-                $usedInAttempts = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM exam_answers WHERE question_id=?", [$qid])['c'] ?? 0);
-                if ($usedInAttempts > 0) jsonOut(false, '题目已有作答记录，不能删除');
                 try {
                     $db->exec('BEGIN IMMEDIATE');
                     dbQuery($db, "DELETE FROM paper_questions WHERE question_id=?", [$qid]);
@@ -2829,8 +2827,6 @@ if ($action) {
                 $ids = array_values(array_unique(array_filter(array_map('intval', $ids), fn($id) => $id > 0)));
                 if (!$ids) jsonOut(false, '题目ID无效');
                 $in = implode(',', array_fill(0, count($ids), '?'));
-                $usedCount = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM exam_answers WHERE question_id IN ($in)", $ids)['c'] ?? 0);
-                if ($usedCount > 0) jsonOut(false, '选中题目已有作答记录，不能批量删除');
                 try {
                     $db->exec('BEGIN IMMEDIATE');
                     dbQuery($db, "DELETE FROM paper_questions WHERE question_id IN ($in)", $ids);
