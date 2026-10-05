@@ -56,13 +56,30 @@
             </template>
             <n-space vertical style="max-width:340px">
               <n-text v-if="!notifications.length" depth="3">暂无通知</n-text>
-              <div v-else class="notify-list-wrap">
-                <n-list size="small">
-                  <n-list-item v-for="item in notifications" :key="item.id">
-                    <n-thing :title="item.title" :description="item.body" />
-                  </n-list-item>
-                </n-list>
-              </div>
+              <template v-else>
+                <!-- 公告（置顶） -->
+                <div v-if="announcements.length" class="notify-section">
+                  <n-text depth="3" style="font-size:12px">📢 公告</n-text>
+                  <div class="notify-list-wrap notify-list-wrap--sm">
+                    <n-list size="small">
+                      <n-list-item v-for="item in announcements" :key="'ann-'+item.id">
+                        <n-thing :title="item.title" :description="item.body" />
+                      </n-list-item>
+                    </n-list>
+                  </div>
+                </div>
+                <!-- 普通通知 -->
+                <div v-if="personalNotifs.length" class="notify-section">
+                  <n-text depth="3" style="font-size:12px">🔔 通知</n-text>
+                  <div class="notify-list-wrap">
+                    <n-list size="small">
+                      <n-list-item v-for="item in personalNotifs" :key="'not-'+item.id">
+                        <n-thing :title="item.title" :description="item.body" />
+                      </n-list-item>
+                    </n-list>
+                  </div>
+                </div>
+              </template>
               <n-button v-if="unreadCount" size="small" @click="readNotifications">全部标记已读</n-button>
             </n-space>
           </n-popover>
@@ -77,7 +94,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { phpNotificationApi } from '@/api/php-modules'
 import { SessionProfileLink } from '@/layouts/components'
 import { useSessionStore } from '@/store'
@@ -87,6 +104,15 @@ const session = useSessionStore()
 const notifications = ref([])
 const unreadCount = ref(0)
 const mobileSidebarOpen = ref(false)
+
+// 公告（置顶）
+const announcements = computed(() =>
+  notifications.value.filter(n => n.type === 'announcement').slice(0, 3)
+)
+// 普通通知（安全预警等）
+const personalNotifs = computed(() =>
+  notifications.value.filter(n => n.type !== 'announcement')
+)
 
 function closeOnMobile() {
   if (window.innerWidth <= 768) mobileSidebarOpen.value = false
@@ -98,7 +124,7 @@ function handleResize() {
 
 async function loadNotifications() {
   try {
-    const result = await phpNotificationApi.list({ page: 1, page_size: 10 })
+    const result = await phpNotificationApi.list({ page: 1, page_size: 20 })
     notifications.value = result.data?.items || []
     unreadCount.value = Number(result.data?.unread_count || 0)
   } catch { /* 通知失败不阻断后台 */ }
@@ -310,10 +336,14 @@ async function logout() {
   .admin-user { gap: 6px; }
 }
 /* 通知列表滚动 */
+.notify-section { display: flex; flex-direction: column; gap: 4px; }
 .notify-list-wrap {
-  max-height: 60vh;
+  max-height: 50vh;
   overflow-y: auto;
   overflow-x: hidden;
+}
+.notify-list-wrap--sm {
+  max-height: 20vh;
 }
 .notify-list-wrap :deep(.n-list-item) {
   padding: 10px 4px;
