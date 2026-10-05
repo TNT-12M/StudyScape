@@ -446,10 +446,10 @@ async function forceScan() {
     if (result.debug) {
       console.log('[安全扫描调试信息]', result.debug)
     }
-    // 如果是跳过（已经在运行中），也开始轮询
     // 轮询扫描状态，直到完成或超时
+    // 注意：扫描中只查状态，不刷列表，避免频繁请求
     const maxWait = 60000 // 最多等 60 秒（主流程应该几秒就完了）
-    const interval = 2000 // 每 2 秒查一次
+    const interval = 5000 // 每 5 秒查一次状态（避免过于频繁）
     const startTime = Date.now()
 
     const poll = async () => {
@@ -457,7 +457,7 @@ async function forceScan() {
         await loadSecStatus()
         const status = secStatus.value.last_scan?.status
         if (status === 'finished' || status === 'failed') {
-          // 扫描完成，刷新列表
+          // 扫描完成，刷新一次列表
           await loadSecIpList()
           if (status === 'finished') {
             const count = secStatus.value.total_abnormal ?? 0
@@ -469,9 +469,7 @@ async function forceScan() {
           secScanning.value = false
           return
         }
-        // 还在扫描中，刷新一下列表（让用户看到最新数据）
-        try { await loadSecIpList() } catch (_) {}
-        // 继续轮询
+        // 继续轮询（只查状态，不刷列表，减少请求次数）
         if (Date.now() - startTime < maxWait) {
           setTimeout(poll, interval)
         } else {

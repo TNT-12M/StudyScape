@@ -25,6 +25,24 @@ API_THRESHOLD = 1000          # 24h 内 API 请求阈值，超过标记异常
 SCAN_PATH_THRESHOLD = 20      # 扫描特征路径数量阈值，超过标记高度可疑
 WINDOW_HOURS = 24             # 统计时间窗口（小时）
 
+# IP 白名单：这些 IP 不参与异常检测（如管理员自己的 IP、内网 IP 等）
+# 可通过 security.env 文件中的 SECURITY_WHITELIST_IPS 配置，逗号分隔
+WHITELIST_IPS = set()
+env_path = Path(__file__).resolve().parent.parent / 'security.env'
+if env_path.exists():
+    try:
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('SECURITY_WHITELIST_IPS='):
+                    ips = line[len('SECURITY_WHITELIST_IPS='):].split(',')
+                    for ip in ips:
+                        ip = ip.strip()
+                        if ip:
+                            WHITELIST_IPS.add(ip)
+    except Exception:
+        pass
+
 # 常见扫描/漏洞探测路径特征
 SCAN_PATTERNS = [
     r'\.env', r'\.git', r'\.svn', r'\.htaccess', r'\.htpasswd',
@@ -217,6 +235,10 @@ def _main(log_path, db_path):
     # 筛选异常 IP
     suspicious_ips = []
     for ip, stat in ip_stats.items():
+        # 跳过白名单 IP
+        if ip in WHITELIST_IPS:
+            continue
+
         # 跳过内网 IP
         if ip.startswith('127.') or ip.startswith('192.168.') or ip.startswith('10.') or ip.startswith('172.16.'):
             continue
