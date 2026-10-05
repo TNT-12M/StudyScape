@@ -62,6 +62,48 @@
           </n-card>
         </n-gi>
       </n-grid>
+
+      <!-- 安全监控：异常 IP -->
+      <n-card v-if="session.isRoot" title="安全监控 · 异常请求 IP" segmented>
+        <template #header-extra>
+          <div class="sec-header">
+            <span v-if="secStatus.last_scan" class="sec-scan-time">
+              上次扫描：{{ formatScanTime(secStatus.last_scan.finished_at || secStatus.last_scan.started_at) }}
+              <n-tag v-if="secStatus.last_scan.status === 'running'" size="small" type="info" round>扫描中</n-tag>
+              <n-tag v-else-if="secStatus.last_scan.status === 'finished'" size="small" type="success" round>已完成</n-tag>
+              <n-tag v-else-if="secStatus.last_scan.status === 'failed'" size="small" type="error" round>失败</n-tag>
+            </span>
+            <n-button size="small" type="primary" :loading="secScanning" @click="forceScan">
+              立即扫描
+            </n-button>
+          </div>
+        </template>
+        <n-space vertical size="medium">
+          <div class="sec-summary">
+            <div class="sec-stat sec-stat--warn">
+              <div class="sec-stat-value">{{ secStatus.total_abnormal ?? 0 }}</div>
+              <div class="sec-stat-label">异常 IP 总数</div>
+            </div>
+            <div class="sec-stat sec-stat--danger">
+              <div class="sec-stat-value">{{ secStatus.high_risk ?? 0 }}</div>
+              <div class="sec-stat-label">高度可疑</div>
+            </div>
+            <div class="sec-stat sec-stat--info">
+              <div class="sec-stat-value">{{ secStatus.last_scan?.total_ip_count ?? '-' }}</div>
+              <div class="sec-stat-label">总 IP 数</div>
+            </div>
+          </div>
+          <n-data-table
+            :columns="secColumns"
+            :data="secIpList"
+            :pagination="secPaginationProps"
+            :loading="secLoading"
+            :bordered="false"
+            size="small"
+            scroll-x="900"
+          />
+        </n-space>
+      </n-card>
     </n-space>
   </AppPage>
 </template>
@@ -290,6 +332,117 @@ async function loadStatistics() {
 }
 
 onMounted(loadStatistics)
+
+// ========== 安全监控 ==========
+const secStatus = ref({})
+const secIpList = ref([])
+const secLoading = ref(false)
+const secScanning = ref(false)
+const secPage = ref(1)
+const secPageSize = ref(10)
+const secTotal = ref(0)
+
+const secColumns = [
+  { title: 'IP 地址', key: 'ip', width: 150, fixed: 'left' },
+  { title: '风险等级', key: 'risk_level', width: 100, render: row => {
+    if (row.risk_level === 'high') return h('n-tag', { type: 'error', size: 'small', round: true }, { default: () => '高度可疑' })
+    return h('n-tag', { type: 'warning', size: 'small', round: true }, { default: () => '异常' })
+  }},
+  { title: 'API 请求', key: 'api_count', width: 100, render: row => row.api_count?.toLocaleString() },
+  { title: '扫描特征', key: 'scan_count', width: 100, render: row => row.scan_count?.toLocaleString() },
+  { title: '404 次数', key: 'status_404', width: 100, render: row => row.status_404?.toLocaleString() },
+  { title: '地理位置', key: 'location', ellipsis: { tooltip: true } },
+  { title: '关联用户', key: 'users', width: 180, render: row => {
+    if (!row.users?.length) return h('span', { style: 'color: var(--n-text-color-3)' }, '无')
+    return h('div', { class: 'sec-users' }, row.users.map(u =>
+      h('n-tag', { size: 'small', style: 'margin-right: 4px; margin-bottom: 4px;' }, { default: () => u.username })
+    ))
+  }},
+  { title: '最近活跃', key: 'last_seen', width: 160, render: row => formatTimeAgo(row.last_seen) },
+]
+
+const secPaginationProps = computed(() => ({
+  page: secPage.value,
+  pageSize: secPageSize.value,
+  itemCount: secTotal.value,
+  showSizePicker: false,
+  onChange: (page) => { secPage.value = page; loadSecIpList() },
+}))
+
+function formatTimeAgo(t) {
+  if (!t) return '-'
+  try {
+    const d = new Date(t.replace(' ', 'T'))
+    if (isNaN(d.getTime())) return t
+    const now = new Date()
+    const diff = (now - d) / 1000
+    if (diff < 0) return t.slice(5, 16)
+    if (diff < 60) return '刚刚'
+    if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+    if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
+    if (diff < 86400 * 7) return `${Math.floor(diff / 86400)} 天前`
+    return t.slice(0, 16) // YYYY-MM-DD HH:mm
+  }
+  catch {
+    return t
+  }
+}
+
+function formatScanTime(t) {
+  if (!t) return '从未扫描'
+  return formatTimeAgo(t)
+}
+
+async function loadSecStatus() {
+  if (!session.isRoot) return
+  try {
+    const result = await phpAdminApi.securityScanStatus()
+    secStatus.value = result.data || {}
+  }
+  catch (e) { /* 忽略 */ }
+}
+
+async function loadSecIpList() {
+  if (!session.isRoot) return
+  secLoading.value = true
+  try {
+    const result = await phpAdminApi.securityIpList({
+      page: secPage.value,
+      page_size: secPageSize.value,
+    })
+    secIpList.value = result.data?.list || []
+    secTotal.value = result.data?.total || 0
+  }
+  catch (e) { /* 忽略 */ }
+  finally {
+    secLoading.value = false
+  }
+}
+
+async function forceScan() {
+  secScanning.value = true
+  try {
+    await phpAdminApi.securityScanForce()
+    $message.success('安全扫描已启动，请稍后刷新查看结果')
+    // 5 秒后刷新状态
+    setTimeout(() => {
+      loadSecStatus()
+      loadSecIpList()
+    }, 5000)
+  }
+  catch (e) {
+    $message.error(e.message || '启动扫描失败')
+  }
+  finally {
+    secScanning.value = false
+  }
+}
+
+// 管理员才加载安全数据
+if (session.isRoot) {
+  loadSecStatus()
+  loadSecIpList()
+}
 </script>
 
 <style scoped>
@@ -412,9 +565,61 @@ onMounted(loadStatistics)
   font-weight: 500;
 }
 
+/* ========== 安全监控样式 ========== */
+.sec-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.sec-scan-time {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sec-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.sec-stat {
+  text-align: center;
+  padding: 16px 12px;
+  border-radius: 10px;
+  background: var(--n-color-hover);
+}
+.sec-stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.sec-stat-label {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  margin-top: 4px;
+}
+.sec-stat--warn .sec-stat-value {
+  color: #F6A623;
+}
+.sec-stat--danger .sec-stat-value {
+  color: #E8463A;
+}
+.sec-stat--info .sec-stat-value {
+  color: #3C2ECA;
+}
+.sec-users {
+  display: flex;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 640px) {
   .trend-chart { height: 240px; }
   .chart-wrap--sm .subject-chart { height: 240px; }
   .stat-value { font-size: 20px; }
+  .sec-summary { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .sec-stat { padding: 12px 8px; }
+  .sec-stat-value { font-size: 22px; }
 }
 </style>

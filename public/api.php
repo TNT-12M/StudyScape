@@ -51,6 +51,96 @@ session_set_cookie_params([
 ]);
 session_start();
 
+// ===== 伪 Cron：Nginx 日志安全扫描（每 30 分钟一次） =====
+// 任意请求进来时检查上次扫描时间，超时则异步拉起 Python 脚本
+// 扫描间隔 30 分钟，避免频繁消耗服务器资源
+function triggerSecurityScan(bool $force = false): void {
+    global $db;
+    if (!$db) return;
+
+    $scanInterval = 1800; // 30 分钟
+    if ($force) $scanInterval = 0;
+
+    // 检查最近的扫描状态
+    $lastScan = dbFetchOne($db, "SELECT started_at, status FROM security_scan_log WHERE scan_type='nginx_log' ORDER BY id DESC LIMIT 1");
+    if (!$force && $lastScan) {
+        $lastTime = strtotime($lastScan['started_at'] ?? '');
+        if ($lastTime && (time() - $lastTime) < $scanInterval) return; // 没到时间，跳过
+        // 如果上一次还在 running，也不重复触发
+        if ($lastScan['status'] === 'running') return;
+    }
+
+    // 插入一条扫描记录，标记为 running（防止并发重复触发）
+    dbQuery($db, "INSERT INTO security_scan_log(scan_type, started_at, status) VALUES('nginx_log', ?, 'running')", [
+        date('Y-m-d H:i:s')
+    ]);
+
+    // 日志文件路径（宝塔默认路径，可通过 .env 配置）
+    $logPath = '/www/wwwlogs/120.79.161.207.log';
+    $envFile = dirname(__DIR__) . '/security.env';
+    if (file_exists($envFile)) {
+        $envLines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($envLines as $line) {
+            if (str_starts_with(trim($line), '#')) continue;
+            if (str_starts_with($line, 'NGINX_LOG_PATH=')) {
+                $logPath = trim(substr($line, 15));
+            }
+        }
+    }
+
+    if (!file_exists($logPath)) {
+        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE scan_type='nginx_log' AND status='running' ORDER BY id DESC LIMIT 1", [
+            date('Y-m-d H:i:s'),
+            '日志文件不存在: ' . $logPath
+        ]);
+        return;
+    }
+
+    $dbPath = dirname(__DIR__) . '/data/exam.db';
+    $scriptPath = dirname(__DIR__) . '/security/log_monitor.py';
+    if (!file_exists($scriptPath)) {
+        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE scan_type='nginx_log' AND status='running' ORDER BY id DESC LIMIT 1", [
+            date('Y-m-d H:i:s'),
+            '扫描脚本不存在: ' . $scriptPath
+        ]);
+        return;
+    }
+
+    // 异步拉起 Python 脚本（不阻塞当前请求）
+    $pythonBin = 'python3';
+    $cmd = sprintf(
+        '%s %s %s %s > /dev/null 2>&1 &',
+        escapeshellcmd($pythonBin),
+        escapeshellarg($scriptPath),
+        escapeshellarg($logPath),
+        escapeshellarg($dbPath)
+    );
+
+    // Windows 下用不同方式
+    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+        $pythonBin = 'python';
+        $cmd = sprintf(
+            'start /B "" %s %s %s %s',
+            $pythonBin,
+            escapeshellarg($scriptPath),
+            escapeshellarg($logPath),
+            escapeshellarg($dbPath)
+        );
+    }
+
+    try {
+        pclose(popen($cmd, 'r'));
+    } catch (Throwable $e) {
+        error_log('security scan trigger failed: ' . $e->getMessage());
+        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE scan_type='nginx_log' AND status='running' ORDER BY id DESC LIMIT 1", [
+            date('Y-m-d H:i:s'),
+            '启动失败: ' . $e->getMessage()
+        ]);
+    }
+}
+// 非登录/注册等关键操作时，静默触发（忽略异常）
+// （伪 Cron 触发在数据库初始化 + 迁移完成之后，见下方）
+
 /**
  * 生成管理员会话指纹，绑定用户代理和IP前缀，防止 Session 劫持
  * 管理员登录时生成，每次管理员操作都校验
@@ -763,6 +853,78 @@ try {
     try { $db->exec('ROLLBACK'); } catch (Throwable $ignored) {}
     error_log('email verification migration failed: ' . $e->getMessage());
     die(json_encode(['success' => false, 'message' => '邮箱验证迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
+}
+
+// ==========================================================
+// security_v1 迁移：登录 IP 记录 + 安全 IP 表
+// ==========================================================
+try {
+    $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='security_v1'");
+    if (!$migration) {
+        $db->exec('BEGIN');
+
+        // 给 users 表加 last_login_ip / last_login_time 字段
+        $cols = @dbFetchAll($db, "PRAGMA table_info(users)");
+        $hasIp = false; $hasTime = false;
+        foreach ($cols as $c) {
+            if ($c['name'] === 'last_login_ip') $hasIp = true;
+            if ($c['name'] === 'last_login_time') $hasTime = true;
+        }
+        if (!$hasIp) {
+            $db->exec("ALTER TABLE users ADD COLUMN last_login_ip TEXT NOT NULL DEFAULT ''");
+        }
+        if (!$hasTime) {
+            $db->exec("ALTER TABLE users ADD COLUMN last_login_time TEXT DEFAULT ''");
+        }
+
+        // 安全 IP 表（异常/可疑 IP）
+        $db->exec("CREATE TABLE IF NOT EXISTS security_ips (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL UNIQUE,
+            api_count INTEGER NOT NULL DEFAULT 0,
+            scan_count INTEGER NOT NULL DEFAULT 0,
+            total_count INTEGER NOT NULL DEFAULT 0,
+            status_404 INTEGER NOT NULL DEFAULT 0,
+            risk_level TEXT NOT NULL DEFAULT 'medium',
+            location TEXT NOT NULL DEFAULT '',
+            last_seen TEXT,
+            first_detected TEXT,
+            updated_at TEXT,
+            notified INTEGER NOT NULL DEFAULT 0
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_security_ips_risk ON security_ips(risk_level)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_security_ips_last_seen ON security_ips(last_seen)");
+
+        // 安全扫描状态表（记录上次扫描时间等）
+        $db->exec("CREATE TABLE IF NOT EXISTS security_scan_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_type TEXT NOT NULL DEFAULT 'nginx_log',
+            started_at TEXT,
+            finished_at TEXT,
+            status TEXT NOT NULL DEFAULT 'idle',
+            result_info TEXT NOT NULL DEFAULT '',
+            total_ip_count INTEGER NOT NULL DEFAULT 0,
+            abnormal_ip_count INTEGER NOT NULL DEFAULT 0
+        )");
+
+        $db->exec("INSERT INTO schema_migrations(version) VALUES('security_v1')");
+        $db->exec('COMMIT');
+    }
+} catch (Throwable $e) {
+    try { $db->exec('ROLLBACK'); } catch (Throwable $ignored) {}
+    error_log('security migration failed: ' . $e->getMessage());
+    die(json_encode(['success' => false, 'message' => '安全模块迁移失败'], JSON_UNESCAPED_UNICODE));
+}
+
+// ===== 伪 Cron 触发：Nginx 日志安全扫描（每 30 分钟一次） =====
+// 迁移完成后才触发，确保表已存在
+try {
+    $action = $_GET['action'] ?? $_POST['action'] ?? '';
+    if ($action !== 'captcha' && $action !== 'static' && $_SERVER['REQUEST_METHOD'] !== 'OPTIONS') {
+        @triggerSecurityScan(false);
+    }
+} catch (Throwable $ignored) {
+    // 扫描失败不影响主流程
 }
 
 // ==========================================================
@@ -1699,8 +1861,8 @@ if ($action) {
                 }
 
                 // 初始 root 已在启动迁移阶段固定创建为 lian，普通注册不再自动升权。
-                dbQuery($db, "INSERT INTO users(username, email, password, role, is_initial_root, is_approved, is_admin, is_active, email_verified) VALUES(?, ?, ?, 'user', 0, 1, 0, 1, 1)",
-                    [$username, $email, encryptPassword($password)]);
+                dbQuery($db, "INSERT INTO users(username, email, password, role, is_initial_root, is_approved, is_admin, is_active, email_verified, last_login_ip, last_login_time) VALUES(?, ?, ?, 'user', 0, 1, 0, 1, 1, ?, ?)",
+                    [$username, $email, encryptPassword($password), $_SERVER['REMOTE_ADDR'] ?? '', date('Y-m-d H:i:s')]);
                 jsonOut(true, "注册成功，可直接登录");
                 break;
 
@@ -1775,7 +1937,11 @@ if ($action) {
                     $_SESSION['admin_fp'] = generateAdminFingerprint();
                 }
                 
-                dbQuery($db, "UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?", [$u['id']]);
+                dbQuery($db, "UPDATE users SET last_login=CURRENT_TIMESTAMP, last_login_ip=?, last_login_time=? WHERE id=?", [
+                    $_SERVER['REMOTE_ADDR'] ?? '',
+                    date('Y-m-d H:i:s'),
+                    $u['id']
+                ]);
 
                 jsonOut(true, "登录成功", [
                     'user' => [
@@ -2407,6 +2573,90 @@ if ($action) {
                     $metrics['feedback_open_count'] = (int)($open['c'] ?? 0);
                 }
                 jsonOut(true, '', array_merge($metrics, ['timezone' => 'Asia/Shanghai', 'today' => ['date' => $today->format('Y-m-d'), 'uv' => $todayUv], 'summary' => ['uv_7d' => $uv7d, 'average_uv' => round($uv7d / 7, 2), 'peak_uv' => (int)$peak['uv'], 'peak_date' => $peak['date']], 'trend' => $trend, 'by_subject' => $by_subject, 'by_type' => $by_type]));
+                break;
+
+            // ==================== 安全监控 ====================
+            case 'security_scan_status':
+                requireAdmin();
+                $lastScan = dbFetchOne($db, "SELECT * FROM security_scan_log WHERE scan_type='nginx_log' ORDER BY id DESC LIMIT 1");
+                $ipCount = dbFetchOne($db, "SELECT COUNT(*) AS c FROM security_ips");
+                $highCount = dbFetchOne($db, "SELECT COUNT(*) AS c FROM security_ips WHERE risk_level='high'");
+                jsonOut(true, '', [
+                    'last_scan' => $lastScan,
+                    'total_abnormal' => (int)($ipCount['c'] ?? 0),
+                    'high_risk' => (int)($highCount['c'] ?? 0),
+                ]);
+                break;
+
+            case 'security_scan_force':
+                requireAdmin();
+                @triggerSecurityScan(true);
+                $lastScan = dbFetchOne($db, "SELECT * FROM security_scan_log WHERE scan_type='nginx_log' ORDER BY id DESC LIMIT 1");
+                jsonOut(true, '已启动安全扫描，请稍后查看结果', [
+                    'last_scan' => $lastScan,
+                ]);
+                break;
+
+            case 'security_ip_list':
+                requireAdmin();
+                $page = max(1, (int)($_POST['page'] ?? 1));
+                $pageSize = min(100, max(10, (int)($_POST['page_size'] ?? 20)));
+                $offset = ($page - 1) * $pageSize;
+                $risk = $_POST['risk_level'] ?? '';
+
+                $where = '';
+                $params = [];
+                if ($risk === 'high' || $risk === 'medium') {
+                    $where = "WHERE risk_level=?";
+                    $params[] = $risk;
+                }
+
+                $totalRow = dbFetchOne($db, "SELECT COUNT(*) AS c FROM security_ips $where", $params);
+                $total = (int)($totalRow['c'] ?? 0);
+
+                $rows = dbFetchAll($db, "SELECT * FROM security_ips $where ORDER BY api_count DESC LIMIT ? OFFSET ?", array_merge($params, [$pageSize, $offset]));
+
+                // 关联用户（通过 last_login_ip 匹配）
+                $ips = array_column($rows, 'ip');
+                $userMap = [];
+                if ($ips) {
+                    $placeholders = implode(',', array_fill(0, count($ips), '?'));
+                    $userRows = dbFetchAll($db, "SELECT id, username, nickname, email, last_login_ip FROM users WHERE last_login_ip IN ($placeholders)", $ips);
+                    foreach ($userRows as $u) {
+                        $ip = $u['last_login_ip'];
+                        if (!isset($userMap[$ip])) $userMap[$ip] = [];
+                        $userMap[$ip][] = [
+                            'id' => (int)$u['id'],
+                            'username' => $u['username'],
+                            'nickname' => $u['nickname'] ?? '',
+                            'email' => $u['email'] ?? '',
+                        ];
+                    }
+                }
+
+                $list = [];
+                foreach ($rows as $r) {
+                    $list[] = [
+                        'id' => (int)$r['id'],
+                        'ip' => $r['ip'],
+                        'api_count' => (int)$r['api_count'],
+                        'scan_count' => (int)$r['scan_count'],
+                        'total_count' => (int)$r['total_count'],
+                        'status_404' => (int)$r['status_404'],
+                        'risk_level' => $r['risk_level'],
+                        'location' => $r['location'] ?? '',
+                        'last_seen' => $r['last_seen'] ?? '',
+                        'first_detected' => $r['first_detected'] ?? '',
+                        'users' => $userMap[$r['ip']] ?? [],
+                    ];
+                }
+
+                jsonOut(true, '', [
+                    'list' => $list,
+                    'total' => $total,
+                    'page' => $page,
+                    'page_size' => $pageSize,
+                ]);
                 break;
 
             // ==================== OCR 批次审核 ====================
