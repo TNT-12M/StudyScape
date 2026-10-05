@@ -96,7 +96,7 @@ function triggerSecurityScan(bool $force = false): void {
         return;
     }
 
-    $dbPath = dirname(__DIR__) . '/data/exam.db';
+    $dbPath = dirname(__DIR__) . '/exam.db';
     $scriptPath = dirname(__DIR__) . '/security/log_monitor.py';
     if (!file_exists($scriptPath)) {
         dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=(SELECT MAX(id) FROM security_scan_log WHERE scan_type='nginx_log' AND status='running')", [
@@ -2611,7 +2611,7 @@ if ($action) {
                         }
                     }
                 }
-                $dbPath = dirname(__DIR__) . '/data/exam.db';
+                $dbPath = dirname(__DIR__) . '/exam.db';
                 $scriptPath = dirname(__DIR__) . '/security/log_monitor.py';
                 $pythonBin = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' ? 'python' : 'python3';
 
