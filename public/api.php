@@ -1516,6 +1516,8 @@ $csrfBypass = [
     'register',
     'captcha',
     'check_session',
+    'send_email_code',
+    'reset_password',
     'question_stats',
     'get_subjects',
     'list_questions',
