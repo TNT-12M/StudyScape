@@ -8,6 +8,103 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
+// ====== 漏桶算法：安全场景检测引擎（类定义放最前面，确保可用） ======
+
+/**
+ * 标准漏桶（速率型检测）
+ * 事件持续灌入，超过容量则溢出（触发告警）
+ * 用于：API 速率滥用、登录爆破等短时间高频请求
+ */
+class LeakyBucket {
+    public $capacity;      // 桶容量
+    public $leakRate;    // 漏出速率（每秒漏几个）
+    public $level = 0;   // 当前水位
+    public $lastLeakAt;  // 上次漏出时间戳
+    public $overflowed = false; // 是否已溢出
+
+    public function __construct($capacity, $leakPerSeconds, $startTime) {
+        $this->capacity = $capacity;
+        $this->leakRate = $capacity / $leakPerSeconds; // 每秒漏出量
+        $this->lastLeakAt = $startTime;
+    }
+
+    /** 添加一个事件，返回是否溢出 */
+    public function add($timestamp) {
+        if ($this->overflowed) return true;
+
+        // 先漏出（按时间差计算）
+        $elapsed = $timestamp - $this->lastLeakAt;
+        if ($elapsed > 0) {
+            $this->level = max(0, $this->level - $elapsed * $this->leakRate);
+            $this->lastLeakAt = $timestamp;
+        }
+
+        // 加水
+        $this->level++;
+
+        if ($this->level >= $this->capacity) {
+            $this->overflowed = true;
+            return true;
+        }
+        return false;
+    }
+}
+
+/**
+ * 去重漏桶（扫描型检测）
+ * 统计不同值的数量，达到阈值就溢出
+ * 用于：路径扫描（不同404 URL数量）、端口扫描等
+ */
+class UniqBucket {
+    public $threshold;     // 阈值
+    public $values = []; // 去重集合
+    public $overflowed = false;
+
+    public function __construct($threshold) {
+        $this->threshold = $threshold;
+    }
+
+    /** 添加一个值，返回是否溢出 */
+    public function add($value) {
+        if ($this->overflowed) return true;
+        $this->values[$value] = true;
+        if (count($this->values) >= $this->threshold) {
+            $this->overflowed = true;
+            return true;
+        }
+        return false;
+    }
+
+    public function count() {
+        return count($this->values);
+    }
+}
+
+/**
+ * 计数器桶（总量型检测）
+ * 固定时间窗口内计数，超过阈值溢出
+ * 用于：24h 总请求量异常等
+ */
+class CounterBucket {
+    public $threshold;
+    public $count = 0;
+    public $overflowed = false;
+
+    public function __construct($threshold) {
+        $this->threshold = $threshold;
+    }
+
+    public function add() {
+        if ($this->overflowed) return true;
+        $this->count++;
+        if ($this->count >= $this->threshold) {
+            $this->overflowed = true;
+            return true;
+        }
+        return false;
+    }
+}
+
 // ===== P0-A5: HTTP 安全头 =====
 // 移除 PHP 版本信息泄露
 header_remove('X-Powered-By');
@@ -235,103 +332,6 @@ function triggerSecurityScan(bool $force = false): array {
     }
 
     return ['success' => true, 'message' => "扫描已启动（$launchMethod）", 'scan_id' => $scanId, 'skipped' => false];
-}
-
-// ====== 漏桶算法：安全场景检测引擎 ======
-
-/**
- * 标准漏桶（速率型检测）
- * 事件持续灌入，超过容量则溢出（触发告警）
- * 用于：API 速率滥用、登录爆破等短时间高频请求
- */
-class LeakyBucket {
-    public int $capacity;      // 桶容量
-    public float $leakRate;    // 漏出速率（每秒漏几个）
-    public float $level = 0;   // 当前水位
-    public float $lastLeakAt;  // 上次漏出时间戳
-    public bool $overflowed = false; // 是否已溢出
-
-    public function __construct(int $capacity, int $leakPerSeconds, float $startTime) {
-        $this->capacity = $capacity;
-        $this->leakRate = $capacity / $leakPerSeconds; // 每秒漏出量
-        $this->lastLeakAt = $startTime;
-    }
-
-    /** 添加一个事件，返回是否溢出 */
-    public function add(float $timestamp): bool {
-        if ($this->overflowed) return true;
-
-        // 先漏出（按时间差计算）
-        $elapsed = $timestamp - $this->lastLeakAt;
-        if ($elapsed > 0) {
-            $this->level = max(0, $this->level - $elapsed * $this->leakRate);
-            $this->lastLeakAt = $timestamp;
-        }
-
-        // 加水
-        $this->level++;
-
-        if ($this->level >= $this->capacity) {
-            $this->overflowed = true;
-            return true;
-        }
-        return false;
-    }
-}
-
-/**
- * 去重漏桶（扫描型检测）
- * 统计不同值的数量，达到阈值就溢出
- * 用于：路径扫描（不同404 URL数量）、端口扫描等
- */
-class UniqBucket {
-    public int $threshold;     // 阈值
-    public array $values = []; // 去重集合
-    public bool $overflowed = false;
-
-    public function __construct(int $threshold) {
-        $this->threshold = $threshold;
-    }
-
-    /** 添加一个值，返回是否溢出 */
-    public function add(string $value): bool {
-        if ($this->overflowed) return true;
-        $this->values[$value] = true;
-        if (count($this->values) >= $this->threshold) {
-            $this->overflowed = true;
-            return true;
-        }
-        return false;
-    }
-
-    public function count(): int {
-        return count($this->values);
-    }
-}
-
-/**
- * 计数器桶（总量型检测）
- * 固定时间窗口内计数，超过阈值溢出
- * 用于：24h 总请求量异常等
- */
-class CounterBucket {
-    public int $threshold;
-    public int $count = 0;
-    public bool $overflowed = false;
-
-    public function __construct(int $threshold) {
-        $this->threshold = $threshold;
-    }
-
-    public function add(): bool {
-        if ($this->overflowed) return true;
-        $this->count++;
-        if ($this->count >= $this->threshold) {
-            $this->overflowed = true;
-            return true;
-        }
-        return false;
-    }
 }
 
 /**
