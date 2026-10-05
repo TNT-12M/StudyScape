@@ -441,17 +441,44 @@ async function forceScan() {
   secScanning.value = true
   try {
     await phpAdminApi.securityScanForce()
-    $message.success('安全扫描已启动，请稍后刷新查看结果')
-    // 5 秒后刷新状态
-    setTimeout(() => {
-      loadSecStatus()
-      loadSecIpList()
-    }, 5000)
+    $message.success('安全扫描已启动，正在后台处理...')
+    // 轮询扫描状态，直到完成或超时
+    const maxWait = 120000 // 最多等 2 分钟
+    const interval = 3000 // 每 3 秒查一次
+    const startTime = Date.now()
+
+    const poll = async () => {
+      try {
+        await loadSecStatus()
+        const status = secStatus.value.last_scan?.status
+        if (status === 'finished' || status === 'failed') {
+          // 扫描完成，刷新列表
+          await loadSecIpList()
+          if (status === 'finished') {
+            const count = secStatus.value.total_abnormal ?? 0
+            $message.success(count > 0 ? `扫描完成，发现 ${count} 个异常 IP` : '扫描完成，未发现异常 IP')
+          } else {
+            $message.warning('扫描失败，请查看失败原因')
+          }
+          secScanning.value = false
+          return
+        }
+        // 还在扫描中，继续轮询
+        if (Date.now() - startTime < maxWait) {
+          setTimeout(poll, interval)
+        } else {
+          // 超时了
+          secScanning.value = false
+          $message.warning('扫描时间较长，请稍后手动刷新查看结果')
+        }
+      } catch {
+        secScanning.value = false
+      }
+    }
+    setTimeout(poll, 2000) // 2 秒后开始第一次轮询
   }
   catch (e) {
     $message.error(e.message || '启动扫描失败')
-  }
-  finally {
     secScanning.value = false
   }
 }
