@@ -1,23 +1,73 @@
 <template>
   <div class="admin-shell">
-    <aside class="admin-sidebar">
-      <div class="admin-logo">学境・StudyScape</div>
+    <!-- 移动端遮罩 -->
+    <div v-if="mobileSidebarOpen" class="sidebar-mask" @click="mobileSidebarOpen = false" />
+
+    <aside class="admin-sidebar" :class="{ 'is-open': mobileSidebarOpen }">
+      <div class="admin-logo">
+        <span class="logo-icon">📚</span>
+        <span class="logo-text">学境・管理</span>
+      </div>
       <nav class="admin-menu">
-        <RouterLink to="/admin">平台概览</RouterLink>
-        <RouterLink v-if="session.isRoot" to="/admin/users">用户授权</RouterLink>
-        <RouterLink v-if="session.isContentAdmin" to="/admin/questions">题库管理</RouterLink>
-        <RouterLink v-if="session.isRoot" to="/admin/papers">考试管理</RouterLink>
-        <RouterLink v-if="session.isContentAdmin" to="/admin/materials">资料管理</RouterLink>
-        <RouterLink v-if="session.isRoot" to="/admin/feedback">反馈处理</RouterLink>
-        <RouterLink v-if="session.isRoot" to="/admin/announcements">公告管理</RouterLink>
-        <RouterLink v-if="session.isContentAdmin" to="/admin/ocr">智能 OCR 审核</RouterLink>
+        <RouterLink to="/admin" @click="closeOnMobile">
+          <span class="menu-icon">📊</span><span class="menu-text">平台概览</span>
+        </RouterLink>
+        <RouterLink v-if="session.isRoot" to="/admin/users" @click="closeOnMobile">
+          <span class="menu-icon">👥</span><span class="menu-text">用户授权</span>
+        </RouterLink>
+        <RouterLink v-if="session.isContentAdmin" to="/admin/questions" @click="closeOnMobile">
+          <span class="menu-icon">📚</span><span class="menu-text">题库管理</span>
+        </RouterLink>
+        <RouterLink v-if="session.isRoot" to="/admin/papers" @click="closeOnMobile">
+          <span class="menu-icon">📝</span><span class="menu-text">考试管理</span>
+        </RouterLink>
+        <RouterLink v-if="session.isContentAdmin" to="/admin/materials" @click="closeOnMobile">
+          <span class="menu-icon">📁</span><span class="menu-text">资料管理</span>
+        </RouterLink>
+        <RouterLink v-if="session.isRoot" to="/admin/feedback" @click="closeOnMobile">
+          <span class="menu-icon">💬</span><span class="menu-text">反馈处理</span>
+        </RouterLink>
+        <RouterLink v-if="session.isRoot" to="/admin/announcements" @click="closeOnMobile">
+          <span class="menu-icon">📢</span><span class="menu-text">公告管理</span>
+        </RouterLink>
+        <RouterLink v-if="session.isContentAdmin" to="/admin/ocr" @click="closeOnMobile">
+          <span class="menu-icon">🔍</span><span class="menu-text">智能 OCR 审核</span>
+        </RouterLink>
       </nav>
-      <RouterLink class="back-user" to="/app">返回用户端</RouterLink>
+      <RouterLink class="back-user" to="/app" @click="closeOnMobile">
+        <span class="menu-icon">←</span><span class="menu-text">返回用户端</span>
+      </RouterLink>
     </aside>
+
     <section class="admin-main">
       <header class="admin-header">
-        <span>管理后台</span>
-        <div class="admin-user"><n-popover trigger="click" placement="bottom-end" @update:show="value => value && loadNotifications()"><template #trigger><n-badge :value="unreadCount" :max="99"><n-button quaternary size="small">通知</n-button></n-badge></template><n-space vertical style="max-width:320px"><n-text v-if="!notifications.length" depth="3">暂无通知</n-text><n-list v-else size="small"><n-list-item v-for="item in notifications" :key="item.id"><n-thing :title="item.title" :description="item.body" /></n-list-item></n-list><n-button v-if="unreadCount" size="small" @click="readNotifications">全部标记已读</n-button></n-space></n-popover><SessionProfileLink to="/admin/profile" /><span>{{ session.isRoot ? 'root' : '内容管理员' }}</span><n-button quaternary size="small" @click="logout">退出</n-button></div>
+        <div class="header-left">
+          <button class="mobile-menu-btn" @click="mobileSidebarOpen = !mobileSidebarOpen" aria-label="菜单">
+            <span class="hamburger" />
+          </button>
+          <span class="page-title">管理后台</span>
+        </div>
+        <div class="admin-user">
+          <n-popover trigger="click" placement="bottom-end" @update:show="value => value && loadNotifications()">
+            <template #trigger>
+              <n-badge :value="unreadCount" :max="99">
+                <n-button quaternary size="small">通知</n-button>
+              </n-badge>
+            </template>
+            <n-space vertical style="max-width:320px">
+              <n-text v-if="!notifications.length" depth="3">暂无通知</n-text>
+              <n-list v-else size="small">
+                <n-list-item v-for="item in notifications" :key="item.id">
+                  <n-thing :title="item.title" :description="item.body" />
+                </n-list-item>
+              </n-list>
+              <n-button v-if="unreadCount" size="small" @click="readNotifications">全部标记已读</n-button>
+            </n-space>
+          </n-popover>
+          <SessionProfileLink to="/admin/profile" />
+          <span class="role-tag hide-mobile">{{ session.isRoot ? 'root' : '内容管理员' }}</span>
+          <n-button quaternary size="small" @click="logout">退出</n-button>
+        </div>
       </header>
       <main class="admin-content"><RouterView /></main>
     </section>
@@ -25,6 +75,7 @@
 </template>
 
 <script setup>
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { phpNotificationApi } from '@/api/php-modules'
 import { SessionProfileLink } from '@/layouts/components'
 import { useSessionStore } from '@/store'
@@ -33,6 +84,16 @@ const router = useRouter()
 const session = useSessionStore()
 const notifications = ref([])
 const unreadCount = ref(0)
+const mobileSidebarOpen = ref(false)
+
+function closeOnMobile() {
+  if (window.innerWidth <= 768) mobileSidebarOpen.value = false
+}
+
+function handleResize() {
+  if (window.innerWidth > 768) mobileSidebarOpen.value = false
+}
+
 async function loadNotifications() {
   try {
     const result = await phpNotificationApi.list({ page: 1, page_size: 10 })
@@ -44,7 +105,13 @@ async function readNotifications() {
   await phpNotificationApi.markRead()
   await loadNotifications()
 }
-onMounted(loadNotifications)
+onMounted(() => {
+  loadNotifications()
+  window.addEventListener('resize', handleResize)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
+})
 
 async function logout() {
   await session.logout()
@@ -53,16 +120,191 @@ async function logout() {
 </script>
 
 <style scoped>
-.admin-shell { height: 100%; min-height: 100vh; display: flex; overflow: hidden; background: var(--n-color); }
-.admin-sidebar { width: 220px; flex: 0 0 220px; height: 100vh; padding: 24px 14px; display: flex; flex-direction: column; overflow-y: auto; background: #172033; color: #fff; }
-.admin-logo { padding: 0 14px 28px; font-size: 20px; font-weight: 700; }
-.admin-menu { display: flex; flex-direction: column; gap: 4px; }
-.admin-menu a, .back-user { padding: 11px 14px; color: #b9c3d6; text-decoration: none; border-radius: 6px; }
-.admin-menu a:hover, .admin-menu a.router-link-active, .back-user:hover { color: #fff; background: #2a3957; }
-.back-user { margin-top: auto; font-size: 13px; }
-.admin-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; flex: 1; }
-.admin-header { height: 64px; flex: 0 0 64px; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--n-border-color); background: var(--n-color); font-weight: 600; }
-.admin-user { display: flex; align-items: center; gap: 12px; font-size: 13px; font-weight: 400; color: var(--n-text-color-2); }
-.admin-content { min-height: 0; flex: 1; overflow-y: auto; overflow-x: hidden; max-width: 1400px; width: 100%; padding: 28px; box-sizing: border-box; }
-@media (max-width: 800px) { .admin-sidebar { width: 72px; flex-basis: 72px; padding: 20px 8px; } .admin-logo { padding: 0 5px 28px; font-size: 0; } .admin-logo::after { content: '学'; font-size: 20px; } .admin-menu a, .back-user { padding: 11px 5px; font-size: 0; text-align: center; } .admin-menu a::first-letter, .back-user::first-letter { font-size: 16px; } .admin-header, .admin-content { padding-left: 16px; padding-right: 16px; } }
+.admin-shell {
+  height: 100%;
+  min-height: 100vh;
+  display: flex;
+  overflow: hidden;
+  background: var(--n-color);
+  position: relative;
+}
+.admin-sidebar {
+  width: 220px;
+  flex: 0 0 220px;
+  height: 100vh;
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: #172033;
+  color: #fff;
+  transition: transform 0.25s ease;
+  z-index: 100;
+}
+.admin-logo {
+  padding: 6px 12px 22px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 17px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.logo-icon { font-size: 22px; }
+.logo-text { background: linear-gradient(135deg, #fff, #b9c3d6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.admin-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.admin-menu a, .back-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  color: #b9c3d6;
+  text-decoration: none;
+  border-radius: 8px;
+  font-size: 14px;
+  transition: background-color 0.15s, color 0.15s;
+}
+.admin-menu a:hover, .admin-menu a.router-link-active, .back-user:hover {
+  color: #fff;
+  background: #2a3957;
+}
+.menu-icon {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.menu-text { flex: 1; min-width: 0; }
+.back-user {
+  margin-top: auto;
+  font-size: 13px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 14px;
+  margin-top: 14px;
+}
+.admin-main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+.admin-header {
+  height: 60px;
+  flex: 0 0 60px;
+  padding: 0 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--n-border-color);
+  background: var(--n-color);
+  font-weight: 600;
+}
+.header-left { display: flex; align-items: center; gap: 12px; }
+.page-title { font-size: 15px; }
+.admin-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--n-text-color-2);
+}
+.role-tag {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--n-color-info);
+  color: var(--n-text-color);
+  font-size: 12px;
+}
+.admin-content {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-width: 1400px;
+  width: 100%;
+  padding: 24px 28px;
+  box-sizing: border-box;
+}
+
+/* 移动端菜单按钮 */
+.mobile-menu-btn {
+  display: none;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 6px;
+}
+.mobile-menu-btn:hover { background: var(--n-color-hover); }
+.hamburger {
+  display: block;
+  width: 100%;
+  height: 2px;
+  background: var(--n-text-color-2);
+  position: relative;
+  border-radius: 2px;
+}
+.hamburger::before, .hamburger::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: var(--n-text-color-2);
+  border-radius: 2px;
+}
+.hamburger::before { top: -6px; }
+.hamburger::after { top: 6px; }
+
+.sidebar-mask {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 99;
+}
+
+/* 平板适配 */
+@media (max-width: 1024px) {
+  .admin-sidebar { width: 200px; flex-basis: 200px; }
+  .admin-content { padding: 20px; }
+  .admin-header { padding: 0 20px; }
+}
+
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .mobile-menu-btn { display: block; }
+  .hide-mobile { display: none !important; }
+
+  .admin-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: 240px;
+    transform: translateX(-100%);
+    box-shadow: 2px 0 12px rgba(0, 0, 0, 0.15);
+  }
+  .admin-sidebar.is-open { transform: translateX(0); }
+  .sidebar-mask { display: block; }
+
+  .admin-header {
+    padding: 0 14px;
+    height: 56px;
+  }
+  .admin-content {
+    padding: 16px 14px;
+  }
+  .page-title { font-size: 14px; }
+  .admin-user { gap: 6px; }
+}
 </style>

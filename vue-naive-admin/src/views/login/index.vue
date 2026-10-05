@@ -88,4 +88,11 @@ async function register() {
 .brand-mark { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 12px; color: #fff; background: #3b82f6; font-size: 24px; font-weight: 700; }
 .login-heading h1 { margin: 0; font-size: 24px; }.login-heading p { margin: 3px 0 0; color: var(--n-text-color-3); font-size: 13px; }
 .login-form { padding-top: 18px; }.captcha-row { display: flex; gap: 10px; margin-bottom: 20px; }.captcha-row img { width: 120px; height: 34px; cursor: pointer; border: 1px solid var(--n-border-color); border-radius: 4px; }
+@media (max-width: 480px) {
+  .login-page { padding: 12px; }
+  .login-card { padding: 12px 8px; }
+  .login-heading h1 { font-size: 20px; }
+  .brand-mark { width: 42px; height: 42px; font-size: 20px; }
+  .captcha-row img { width: 100px; }
+}
 </style>

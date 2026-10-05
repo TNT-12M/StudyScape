@@ -17,8 +17,8 @@
         <n-empty v-if="!loading && !feedback.length" description="暂无反馈" />
       </n-card>
     </n-space>
-    <n-modal v-model:show="showDetail" preset="card" title="反馈详情" style="width: min(680px, 94vw)">
-      <n-descriptions v-if="selected" bordered :column="1">
+    <n-modal v-model:show="showDetail" preset="card" title="反馈详情" class="feedback-modal">
+      <n-descriptions v-if="selected" bordered :column="1" label-placement="top">
         <n-descriptions-item label="用户">{{ selected.username || selected.email || selected.user_id || '-' }}</n-descriptions-item>
         <n-descriptions-item label="联系方式">{{ selected.contact || '未提供' }}</n-descriptions-item>
         <n-descriptions-item label="提交时间">{{ selected.created_at || selected.createdAt || '-' }}</n-descriptions-item>
@@ -27,7 +27,15 @@
         <n-descriptions-item label="处理备注"><n-input v-model:value="editForm.admin_note" type="textarea" :rows="4" placeholder="内部备注，可选" /></n-descriptions-item>
         <n-descriptions-item label="处理状态"><n-select v-model:value="editForm.status" :options="statusOptions" /></n-descriptions-item>
       </n-descriptions>
-      <template #footer><n-space justify="end"><n-button @click="showDetail = false">取消</n-button><n-button v-if="selected?.status !== 'resolved'" type="success" :loading="saving" @click="quickAction('adopt')">采纳并回复</n-button><n-button v-if="selected?.status !== 'closed'" type="warning" :loading="saving" @click="quickAction('ignore')">忽略</n-button><n-button v-if="selected?.status === 'closed' || selected?.status === 'resolved'" :loading="saving" @click="quickAction('reopen')">重新处理</n-button><n-button type="primary" :loading="saving" @click="saveFeedback">保存</n-button></n-space></template>
+      <template #footer>
+        <div class="modal-actions">
+          <n-button @click="showDetail = false">取消</n-button>
+          <n-button v-if="selected?.status !== 'closed'" type="warning" :loading="saving" @click="quickAction('ignore')">忽略</n-button>
+          <n-button v-if="selected?.status === 'closed' || selected?.status === 'resolved'" :loading="saving" @click="quickAction('reopen')">重新处理</n-button>
+          <n-button v-if="selected?.status !== 'resolved'" type="success" :loading="saving" @click="quickAction('adopt')">采纳并回复</n-button>
+          <n-button type="primary" :loading="saving" @click="saveFeedback">保存</n-button>
+        </div>
+      </template>
     </n-modal>
   </AppPage>
 </template>
@@ -47,6 +55,8 @@ const editForm = reactive({ id: null, status: 'open', admin_note: '' })
 const pagination = reactive({ page: 1, pageSize: 20, itemCount: 0, showSizePicker: true, pageSizes: [10, 20, 50], onChange: page => { pagination.page = page; loadFeedback() }, onUpdatePageSize: size => { pagination.pageSize = size; pagination.page = 1; loadFeedback() } })
 const statusOptions = [
   { label: '待处理', value: 'open' },
+  { label: '处理中', value: 'processing' },
+  { label: '已解决', value: 'resolved' },
   { label: '已关闭', value: 'closed' },
 ]
 const columns = [
@@ -58,7 +68,12 @@ const columns = [
 ]
 
 function statusLabel(value) { return statusOptions.find(item => item.value === value)?.label || value || '待处理' }
-function tagType(value) { return value === 'resolved' ? 'success' : value === 'closed' ? 'default' : 'info' }
+function tagType(value) {
+  if (value === 'resolved') return 'success'
+  if (value === 'processing') return 'warning'
+  if (value === 'closed') return 'default'
+  return 'info'
+}
 function openDetail(row) {
   selected.value = row
   Object.assign(editForm, { id: row.id, status: row.status || 'open', admin_note: row.admin_note || '' })
@@ -105,4 +120,33 @@ onMounted(loadFeedback)
 
 <style scoped>
 .content { white-space: pre-wrap; line-height: 1.7; }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+:deep(.feedback-modal .n-modal-card) {
+  width: min(680px, 94vw) !important;
+  max-width: 94vw;
+}
+:deep(.feedback-modal .n-modal-card-body) {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+@media (max-width: 768px) {
+  .modal-actions {
+    justify-content: stretch;
+  }
+  .modal-actions .n-button {
+    flex: 1;
+    min-width: calc(50% - 4px);
+  }
+  :deep(.feedback-modal .n-modal-card) {
+    width: 100% !important;
+    max-width: 100%;
+    margin: 0;
+    border-radius: 16px 16px 0 0;
+  }
+}
 </style>

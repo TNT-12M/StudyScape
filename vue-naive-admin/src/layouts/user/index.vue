@@ -7,26 +7,26 @@
       </div>
       <nav class="user-menu" aria-label="用户导航">
         <RouterLink to="/app" exact-active-class="is-active">
-          <span>学习首页</span>
+          <span class="nav-icon">🏠</span><span class="nav-text">学习首页</span>
         </RouterLink>
         <RouterLink to="/app/practice" active-class="is-active">
-          <span>在线刷题</span>
+          <span class="nav-icon">✏️</span><span class="nav-text">在线刷题</span>
         </RouterLink>
         <RouterLink to="/app/papers" active-class="is-active">
-          <span>在线考试</span>
+          <span class="nav-icon">📝</span><span class="nav-text">在线考试</span>
         </RouterLink>
         <RouterLink to="/app/materials" active-class="is-active">
-          <span>资料中心</span>
+          <span class="nav-icon">📁</span><span class="nav-text">资料中心</span>
         </RouterLink>
         <RouterLink to="/app/questions" active-class="is-active">
-          <span>题库浏览</span>
+          <span class="nav-icon">📚</span><span class="nav-text">题库浏览</span>
         </RouterLink>
         <RouterLink to="/app/feedback" active-class="is-active">
-          <span>开发者反馈</span>
+          <span class="nav-icon">💬</span><span class="nav-text">开发者反馈</span>
         </RouterLink>
       </nav>
       <RouterLink v-if="session.isAdmin" class="back-admin" to="/admin">
-        <span>进入管理后台</span>
+        <span class="nav-icon">⚙️</span><span class="nav-text">进入管理后台</span>
       </RouterLink>
     </aside>
     <section class="user-main">
@@ -117,6 +117,9 @@ async function logout() {
   gap: 4px;
 }
 .user-menu a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 12px 14px;
   color: #b9c3d6;
   text-decoration: none;
@@ -126,6 +129,13 @@ async function logout() {
     background-color 0.15s,
     color 0.15s;
 }
+.nav-icon {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.nav-text { flex: 1; }
 .user-menu a:hover,
 .user-menu a.is-active {
   color: #fff;
@@ -133,6 +143,9 @@ async function logout() {
 }
 .back-admin {
   margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 11px 14px;
   color: #b9c3d6;
   text-decoration: none;
@@ -193,13 +206,17 @@ async function logout() {
   .user-sidebar {
     width: auto;
     min-height: auto;
-    padding: 14px 16px 10px;
+    padding: 12px 14px 8px;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   }
   .user-brand {
-    padding: 0 0 12px;
+    padding: 0 0 10px;
   }
   .user-brand strong {
-    font-size: 17px;
+    font-size: 16px;
   }
   .user-brand span {
     display: none;
@@ -207,23 +224,33 @@ async function logout() {
   .user-menu {
     flex-direction: row;
     overflow-x: auto;
-    gap: 4px;
+    gap: 6px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
   }
+  .user-menu::-webkit-scrollbar { display: none; }
   .user-menu a {
     flex: 0 0 auto;
-    padding: 9px 12px;
+    padding: 8px 14px;
     white-space: nowrap;
+    font-size: 13px;
+    border-radius: 20px;
   }
   .back-admin {
-    margin-top: 8px;
-    padding: 9px 12px;
-    text-align: center;
+    display: none; /* 移动端在菜单里显示管理入口没有必要，隐藏 */
   }
   .user-header {
-    padding: 0 16px;
+    padding: 0 14px;
+    height: 52px;
+  }
+  .user-page-title {
+    font-size: 14px;
+  }
+  .user-actions {
+    gap: 6px;
   }
   .user-content {
-    padding: 20px 16px;
+    padding: 16px 14px 32px;
   }
 }
 </style>
