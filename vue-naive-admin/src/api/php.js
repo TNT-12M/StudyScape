@@ -47,13 +47,15 @@ api.interceptors.response.use((response) => {
 export async function phpAction(action, payload = {}, options = {}) {
   const method = (options.method || 'POST').toUpperCase()
   const bypassCsrf = options.bypassCsrf === true
+  const timeout = options.timeout || 30000
   if (method === 'GET') {
     const response = await api.get('', {
       params: { action, ...payload },
+      timeout,
     })
     return response
   }
-  return api.post('', toFormData(action, payload, !bypassCsrf))
+  return api.post('', toFormData(action, payload, !bypassCsrf), { timeout })
 }
 
 export function getCaptchaUrl() {

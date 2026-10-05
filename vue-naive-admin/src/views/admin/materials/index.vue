@@ -25,7 +25,7 @@
                 :show-file-list="false"
                 :max="20"
                 :custom-request="() => {}"
-                @on-change="handleFileSelect"
+                @before-upload="handleBeforeUpload"
               >
                 <n-button type="primary">选择文件（可多选）</n-button>
                 <template #tip>支持 PDF / Word / Excel / PPT / TXT / MD，单文件最大 50MB，一次最多 20 个</template>
@@ -148,23 +148,27 @@ const columns = [
   },
 ]
 
-function handleFileSelect(options) {
-  const files = options.fileList?.map(item => item.file) || []
-  for (const file of files) {
-    if (!file) continue
-    // 跳过重复
-    if (fileItems.value.some(it => it.file.name === file.name && it.file.size === file.size)) continue
-    fileItems.value.push({
-      uid: ++uidCounter,
-      file,
-      filename: file.name,
-      education_level: batchForm.education_level,
-      subject: batchForm.subject || '',
-      description: '',
-      status: '',
-      errorMsg: '',
-    })
+function handleBeforeUpload({ file }) {
+  const f = file.file
+  if (!f) return false
+  // 跳过重复
+  if (fileItems.value.some(it => it.file.name === f.name && it.file.size === f.size)) return false
+  // 大小检查（50MB）
+  if (f.size > 50 * 1024 * 1024) {
+    message.warning(`文件 ${f.name} 超过 50MB，已跳过`)
+    return false
   }
+  fileItems.value.push({
+    uid: ++uidCounter,
+    file: f,
+    filename: f.name,
+    education_level: batchForm.education_level,
+    subject: batchForm.subject || '',
+    description: '',
+    status: '',
+    errorMsg: '',
+  })
+  return false // 阻止 Naive UI 默认上传
 }
 
 function removeFile(index) {

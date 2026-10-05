@@ -70,7 +70,7 @@ export const phpPracticeApi = {
 
 export const phpMaterialsApi = {
   list: data => phpAction('material_list', data, { bypassCsrf: true }),
-  upload: data => phpAction('material_upload', data),
+  upload: data => phpAction('material_upload', data, { timeout: 120000 }),
   update: data => phpAction('material_update', data),
   remove: id => phpAction('material_delete', { id }),
   token: id => phpAction('material_get_token', { id }),
