@@ -100,6 +100,7 @@ import { useSessionStore } from '@/store'
 import { phpProfileApi } from '@/api/php-modules'
 
 const session = useSessionStore()
+const router = useRouter()
 const formRef = ref(null)
 const saving = ref(false)
 const form = reactive({
@@ -152,17 +153,14 @@ async function changePassword() {
       new_password: pwdForm.new_password,
       confirm_password: pwdForm.confirm_password,
     })
-    // 修改成功后清空表单
-    pwdForm.old_password = ''
-    pwdForm.new_password = ''
-    pwdForm.confirm_password = ''
-    $message.success('密码修改成功，请牢记新密码')
+    $message.success('密码修改成功，请使用新密码重新登录')
+    // 密码修改后强制退出登录，使用新密码重新登录
+    await session.logout()
+    await router.replace('/login')
   }
   catch (error) {
     if (error?.errors) return
     $message.error(error.message || '密码修改失败')
-  }
-  finally {
     pwdSaving.value = false
   }
 }
