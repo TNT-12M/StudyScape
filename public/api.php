@@ -122,12 +122,18 @@ function smtpSendMail(string $to, string $subject, string $body): array {
     $pass = $cfg['SMTP_PASS'];
     $secure = strtolower($cfg['SMTP_SECURE'] ?? 'tls');
     $fromName = $cfg['SMTP_FROM_NAME'] ?? 'StudyScape';
+    $replyTo = $cfg['SMTP_REPLY_TO'] ?? $user;
 
-    $boundary = md5(uniqid((string)mt_rand(), true));
+    // 提取发件邮箱域名，用于 Message-ID 和 EHLO（这是降低垃圾箱概率的关键）
+    $emailDomain = substr(strrchr($user, '@'), 1) ?: 'qq.com';
+    // EHLO 必须是一个真实存在的域名
+    $ehloDomain = $emailDomain;
+
     $subject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
     $fromEncoded = '=?UTF-8?B?' . base64_encode($fromName) . '?=';
     $date = date('r');
-    $messageId = '<' . md5(uniqid((string)mt_rand(), true)) . '@' . ($_SERVER['HTTP_HOST'] ?? 'studyscape') . '>';
+    // Message-ID 域名必须与发件邮箱域名一致
+    $messageId = '<' . md5(uniqid((string)mt_rand(), true)) . '.' . time() . '@' . $emailDomain . '>';
 
     $headers = [];
     $headers[] = "Date: $date";
@@ -135,10 +141,16 @@ function smtpSendMail(string $to, string $subject, string $body): array {
     $headers[] = "To: $to";
     $headers[] = "Subject: $subject";
     $headers[] = "Message-ID: $messageId";
+    $headers[] = "Reply-To: $fromEncoded <$replyTo>";
+    $headers[] = "Return-Path: <$user>";
     $headers[] = "MIME-Version: 1.0";
     $headers[] = "Content-Type: text/plain; charset=UTF-8";
     $headers[] = "Content-Transfer-Encoding: base64";
     $headers[] = "X-Mailer: StudyScape/1.0";
+    // 通知类邮件标识，降低垃圾箱评分
+    $headers[] = "Precedence: bulk";
+    $headers[] = "Auto-Submitted: auto-generated";
+    $headers[] = "X-Auto-Response-Suppress: All";
 
     $bodyEncoded = chunk_split(base64_encode($body));
     $data = implode("\r\n", $headers) . "\r\n\r\n" . $bodyEncoded;
@@ -178,7 +190,7 @@ function smtpSendMail(string $to, string $subject, string $body): array {
             return [false, 'SMTP 服务器无响应'];
         }
 
-        _smtpCmd($socket, "EHLO " . ($_SERVER['HTTP_HOST'] ?? 'localhost'), '250');
+        _smtpCmd($socket, "EHLO $ehloDomain", '250');
 
         if ($secure === 'tls') {
             _smtpCmd($socket, 'STARTTLS', '220');
@@ -1609,7 +1621,14 @@ if ($action) {
                 $code = generateEmailCode();
                 $purposeText = $purpose === 'register' ? '注册账号' : '重置密码';
                 $subject = "【学境StudyScape】{$purposeText}验证码";
-                $body = "您好！\n\n您正在申请{$purposeText}，验证码：【{$code}】\n有效期 5 分钟，请不要把验证码泄露给其他人。\n如非本人操作，请忽略此邮件。\n\n学境StudyScape";
+                $body = "尊敬的用户，您好！\n\n"
+                    . "您正在学境 StudyScape 进行「{$purposeText}」操作。\n"
+                    . "您的验证码为： {$code}\n\n"
+                    . "验证码 5 分钟内有效，为了您的账号安全，请勿将验证码告知他人。\n"
+                    . "如非本人操作，请忽略此邮件，您的账号不会受到任何影响。\n\n"
+                    . "此邮件由系统自动发送，请勿直接回复。\n\n"
+                    . "学境 StudyScape 团队\n"
+                    . date('Y年m月d日');
 
                 [$ok, $err] = smtpSendMail($email, $subject, $body);
                 if (!$ok) {
