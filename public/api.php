@@ -695,8 +695,10 @@ try {
         $db->exec('BEGIN');
 
         // 给 users 表加 email_verified 字段
-        $col = dbFetchOne($db, "PRAGMA table_info(users) WHERE name='email_verified'");
-        if (!$col) {
+        $cols = @dbFetchAll($db, "PRAGMA table_info(users)");
+        $hasCol = false;
+        foreach ($cols as $c) { if ($c['name'] === 'email_verified') { $hasCol = true; break; } }
+        if (!$hasCol) {
             $db->exec("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0");
             // 已存在的用户默认标记为已验证（历史兼容）
             $db->exec("UPDATE users SET email_verified=1 WHERE email IS NOT NULL AND email != ''");
