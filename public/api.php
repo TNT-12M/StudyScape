@@ -54,9 +54,10 @@ session_start();
 // ===== 伪 Cron：Nginx 日志安全扫描（每 30 分钟一次） =====
 // 任意请求进来时检查上次扫描时间，超时则异步拉起 Python 脚本
 // 扫描间隔 30 分钟，避免频繁消耗服务器资源
-function triggerSecurityScan(bool $force = false): void {
+// 返回：['success' => bool, 'message' => string, 'scan_id' => int|null, 'skipped' => bool]
+function triggerSecurityScan(bool $force = false): array {
     global $db;
-    if (!$db) return;
+    if (!$db) return ['success' => false, 'message' => '数据库未连接', 'scan_id' => null, 'skipped' => false];
 
     $scanInterval = 1800; // 30 分钟
     if ($force) $scanInterval = 0;
@@ -65,10 +66,13 @@ function triggerSecurityScan(bool $force = false): void {
     $lastScan = dbFetchOne($db, "SELECT id, started_at, status FROM security_scan_log WHERE scan_type='nginx_log' ORDER BY id DESC LIMIT 1");
     if (!$force && $lastScan) {
         $lastTime = strtotime($lastScan['started_at'] ?? '');
-        if ($lastTime && (time() - $lastTime) < $scanInterval) return; // 没到时间，跳过
+        if ($lastTime && (time() - $lastTime) < $scanInterval) {
+            return ['success' => true, 'message' => '距上次扫描不足30分钟，跳过', 'scan_id' => $lastScan['id'], 'skipped' => true];
+        }
         // 如果上一次还在 running，且不超过 10 分钟，不重复触发
-        // 如果超过 10 分钟还在 running，认为是卡住了，允许重新触发
-        if ($lastScan['status'] === 'running' && $lastTime && (time() - $lastTime) < 600) return;
+        if ($lastScan['status'] === 'running' && $lastTime && (time() - $lastTime) < 600) {
+            return ['success' => true, 'message' => '扫描正在进行中', 'scan_id' => $lastScan['id'], 'skipped' => true];
+        }
     }
 
     // 如果上次是 running 且卡住了，先标记为失败
@@ -87,6 +91,7 @@ function triggerSecurityScan(bool $force = false): void {
     dbQuery($db, "INSERT INTO security_scan_log(scan_type, started_at, status) VALUES('nginx_log', ?, 'running')", [
         date('Y-m-d H:i:s')
     ]);
+    $scanId = $db->lastInsertRowID();
 
     // 日志文件路径（宝塔默认路径，可通过 .env 配置）
     $logPath = '/www/wwwlogs/120.79.161.207.log';
@@ -102,21 +107,23 @@ function triggerSecurityScan(bool $force = false): void {
     }
 
     if (!file_exists($logPath)) {
-        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=(SELECT MAX(id) FROM security_scan_log WHERE scan_type='nginx_log' AND status='running')", [
+        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=?", [
             date('Y-m-d H:i:s'),
-            '日志文件不存在: ' . $logPath
+            '日志文件不存在: ' . $logPath,
+            $scanId
         ]);
-        return;
+        return ['success' => false, 'message' => '日志文件不存在: ' . $logPath, 'scan_id' => $scanId, 'skipped' => false];
     }
 
     $dbPath = dirname(__DIR__) . '/exam.db';
     $scriptPath = dirname(__DIR__) . '/security/log_monitor.py';
     if (!file_exists($scriptPath)) {
-        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=(SELECT MAX(id) FROM security_scan_log WHERE scan_type='nginx_log' AND status='running')", [
+        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=?", [
             date('Y-m-d H:i:s'),
-            '扫描脚本不存在: ' . $scriptPath
+            '扫描脚本不存在: ' . $scriptPath,
+            $scanId
         ]);
-        return;
+        return ['success' => false, 'message' => '扫描脚本不存在: ' . $scriptPath, 'scan_id' => $scanId, 'skipped' => false];
     }
 
     // 异步拉起 Python 脚本（不阻塞当前请求）
@@ -145,6 +152,7 @@ function triggerSecurityScan(bool $force = false): void {
     // 尝试多种方式启动（popen 可能被禁用，依次降级）
     $launched = false;
     $errors = [];
+    $launchMethod = '';
 
     // 方式 1：popen + pclose（最标准的异步启动）
     if (function_exists('popen') && function_exists('pclose')) {
@@ -153,6 +161,7 @@ function triggerSecurityScan(bool $force = false): void {
             if ($handle !== false) {
                 pclose($handle);
                 $launched = true;
+                $launchMethod = 'popen';
             }
         } catch (Throwable $e) {
             $errors[] = 'popen: ' . $e->getMessage();
@@ -167,6 +176,7 @@ function triggerSecurityScan(bool $force = false): void {
             $output = @shell_exec($cmd);
             if ($output !== null) {
                 $launched = true;
+                $launchMethod = 'shell_exec';
             }
         } catch (Throwable $e) {
             $errors[] = 'shell_exec: ' . $e->getMessage();
@@ -180,18 +190,46 @@ function triggerSecurityScan(bool $force = false): void {
         try {
             @exec($cmd, $output, $retCode);
             $launched = true;
+            $launchMethod = 'exec';
         } catch (Throwable $e) {
             $errors[] = 'exec: ' . $e->getMessage();
         }
     }
 
+    // 方式 4：proc_open（最可靠的后台启动方式）
+    if (!$launched && function_exists('proc_open')) {
+        try {
+            $descriptorspec = [
+                0 => ['pipe', 'r'],  // stdin
+                1 => ['pipe', 'w'],  // stdout
+                2 => ['pipe', 'w'],  // stderr
+            ];
+            $proc = @proc_open($cmd, $descriptorspec, $pipes);
+            if (is_resource($proc)) {
+                // 关闭所有管道，让进程独立运行
+                fclose($pipes[0]);
+                fclose($pipes[1]);
+                fclose($pipes[2]);
+                proc_close($proc);
+                $launched = true;
+                $launchMethod = 'proc_open';
+            }
+        } catch (Throwable $e) {
+            $errors[] = 'proc_open: ' . $e->getMessage();
+        }
+    }
+
     if (!$launched) {
         error_log('security scan trigger failed: ' . implode('; ', $errors));
-        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=(SELECT MAX(id) FROM security_scan_log WHERE scan_type='nginx_log' AND status='running')", [
+        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=?", [
             date('Y-m-d H:i:s'),
-            '启动失败: ' . implode('; ', $errors)
+            '启动失败: ' . implode('; ', $errors),
+            $scanId
         ]);
+        return ['success' => false, 'message' => '启动失败: ' . implode('; ', $errors), 'scan_id' => $scanId, 'skipped' => false];
     }
+
+    return ['success' => true, 'message' => "扫描已启动（$launchMethod）", 'scan_id' => $scanId, 'skipped' => false];
 }
 // 非登录/注册等关键操作时，静默触发（忽略异常）
 // （伪 Cron 触发在数据库初始化 + 迁移完成之后，见下方）
@@ -2634,21 +2672,56 @@ if ($action) {
             case 'security_scan_status':
                 requireAdmin();
                 $lastScan = dbFetchOne($db, "SELECT * FROM security_scan_log WHERE scan_type='nginx_log' ORDER BY id DESC LIMIT 1");
-                $ipCount = dbFetchOne($db, "SELECT COUNT(*) AS c FROM security_ips");
+                $ipCount = dbFetchOne($db, "SELECT COUNT(*) AS c FROM security_ips WHERE risk_level IN ('high','medium')");
                 $highCount = dbFetchOne($db, "SELECT COUNT(*) AS c FROM security_ips WHERE risk_level='high'");
+                $totalIpCount = dbFetchOne($db, "SELECT COUNT(*) AS c FROM security_ips");
                 jsonOut(true, '', [
                     'last_scan' => $lastScan,
                     'total_abnormal' => (int)($ipCount['c'] ?? 0),
                     'high_risk' => (int)($highCount['c'] ?? 0),
+                    'total_ip_count' => (int)($totalIpCount['c'] ?? 0),
                 ]);
                 break;
 
             case 'security_scan_force':
                 requireAdmin();
-                @triggerSecurityScan(true);
+                $result = triggerSecurityScan(true);
                 $lastScan = dbFetchOne($db, "SELECT * FROM security_scan_log WHERE scan_type='nginx_log' ORDER BY id DESC LIMIT 1");
-                jsonOut(true, '已启动安全扫描，请稍后查看结果', [
+
+                // 额外的调试信息（帮助排查启动问题）
+                $debug = [
+                    'os' => PHP_OS,
+                    'php_os' => PHP_OS_FAMILY ?? 'unknown',
+                    'python3_path' => '',
+                    'python3_version' => '',
+                    'script_exists' => file_exists(dirname(__DIR__) . '/security/log_monitor.py'),
+                    'log_exists' => file_exists('/www/wwwlogs/120.79.161.207.log'),
+                    'db_exists' => file_exists(dirname(__DIR__) . '/exam.db'),
+                    'functions' => [
+                        'popen' => function_exists('popen'),
+                        'pclose' => function_exists('pclose'),
+                        'shell_exec' => function_exists('shell_exec'),
+                        'exec' => function_exists('exec'),
+                        'proc_open' => function_exists('proc_open'),
+                    ],
+                ];
+
+                // 测试 python3 是否可用
+                $pythonBin = 'python3';
+                if (function_exists('shell_exec')) {
+                    $pythonPath = @shell_exec('which python3 2>/dev/null || which python 2>/dev/null');
+                    $debug['python3_path'] = trim($pythonPath ?? '');
+                    $ver = @shell_exec('python3 --version 2>&1');
+                    if (!$ver) $ver = @shell_exec('python --version 2>&1');
+                    $debug['python3_version'] = trim($ver ?? '');
+                }
+
+                jsonOut($result['success'], $result['message'], [
                     'last_scan' => $lastScan,
+                    'scan_id' => $result['scan_id'],
+                    'skipped' => $result['skipped'],
+                    'launch_info' => $result['message'],
+                    'debug' => $debug,
                 ]);
                 break;
 

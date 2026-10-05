@@ -264,14 +264,17 @@ def _main(log_path, db_path):
     ''')
     conn.commit()
 
+    # ===== 第一步：先写入所有异常 IP（不查位置，快速完成扫描）=====
     new_abnormal_count = 0
+    pending_notify_ips = []  # 需要发通知的 IP，后面批量查位置
+
     for item in suspicious_ips:
-        # 检查是否已存在
-        cursor.execute('SELECT id, risk_level, notified FROM security_ips WHERE ip=?', [item['ip']])
+        # 检查是否已存在，顺便看有没有位置信息
+        cursor.execute('SELECT id, risk_level, notified, location FROM security_ips WHERE ip=?', [item['ip']])
         row = cursor.fetchone()
 
         if row:
-            # 已存在，更新
+            # 已存在，更新统计数据
             cursor.execute('''
                 UPDATE security_ips SET
                     api_count=?, scan_count=?, total_count=?, status_404=?,
@@ -282,29 +285,23 @@ def _main(log_path, db_path):
                 item['status_404'], item['risk_level'], item['last_seen'],
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'), item['ip']
             ])
-            # 如果之前是 medium 现在变 high，或者之前没通知过，重新通知
+            # 如果之前是 medium 现在变 high，或者之前没通知过，加入待通知列表
             if (row[1] != 'high' and item['risk_level'] == 'high') or row[2] == 0:
-                # 需要发通知
-                location = get_ip_location(item['ip'])
-                cursor.execute('UPDATE security_ips SET location=?, notified=1 WHERE ip=?', [location, item['ip']])
-                _insert_notification(cursor, item, location)
-                new_abnormal_count += 1
+                pending_notify_ips.append((item, row[3] or ''))  # (ip_data, existing_location)
         else:
-            # 新异常 IP
-            location = get_ip_location(item['ip'])
+            # 新异常 IP（先不查位置，快速写入）
             cursor.execute('''
                 INSERT INTO security_ips
                     (ip, api_count, scan_count, total_count, status_404,
                      risk_level, location, last_seen, first_detected, updated_at, notified)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, 0)
             ''', [
                 item['ip'], item['api_count'], item['scan_count'], item['total_count'],
-                item['status_404'], item['risk_level'], location, item['last_seen'],
+                item['status_404'], item['risk_level'], item['last_seen'],
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             ])
-            _insert_notification(cursor, item, location)
-            new_abnormal_count += 1
+            pending_notify_ips.append((item, ''))
 
     # 清理不再异常的 IP（如果这次扫描里没出现，且最后出现时间超过 48 小时）
     if suspicious_ips:
@@ -318,7 +315,7 @@ def _main(log_path, db_path):
 
     conn.commit()
 
-    # 更新扫描状态记录
+    # ===== 第二步：立即更新扫描状态为 finished（让用户立刻看到结果）=====
     cursor.execute("SELECT id FROM security_scan_log WHERE scan_type='nginx_log' AND status='running' ORDER BY id DESC LIMIT 1")
     row = cursor.fetchone()
     if row:
@@ -332,7 +329,48 @@ def _main(log_path, db_path):
             datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             len(ip_stats),
             len(suspicious_ips),
-            f'处理 {line_count} 行日志，发现 {len(suspicious_ips)} 个异常 IP',
+            f'处理 {line_count} 行日志，发现 {len(suspicious_ips)} 个异常 IP，正在补充地理位置信息...',
+            row[0]
+        ])
+        conn.commit()
+
+    print(f"扫描主流程完成，发现 {len(suspicious_ips)} 个异常 IP，开始补充地理位置和发送通知...")
+
+    # ===== 第三步：补充地理位置 + 发送通知（后台慢慢处理）=====
+    # 注意：ip-api.com 免费版限制 45 次/分钟，所以这里控制速率
+    for idx, (item, existing_location) in enumerate(pending_notify_ips):
+        try:
+            # 已有位置就直接用
+            location = existing_location
+            if not location:
+                location = get_ip_location(item['ip'])
+                # 更新位置到数据库
+                cursor.execute('UPDATE security_ips SET location=? WHERE ip=?', [location, item['ip']])
+                conn.commit()
+
+            # 发送通知
+            cursor.execute('UPDATE security_ips SET notified=1 WHERE ip=?', [item['ip']])
+            _insert_notification(cursor, item, location)
+            conn.commit()
+            new_abnormal_count += 1
+
+            # 免费接口限速：45次/分钟 ≈ 每1.3秒一个，这里留余量每1.5秒
+            # 但只在需要查询时才限速，已有位置的不用等
+            if not existing_location:
+                import time
+                time.sleep(1.5)
+        except Exception as e:
+            print(f"处理 IP {item['ip']} 通知时出错: {e}")
+            continue
+
+    # 更新扫描结果详情
+    if row:
+        cursor.execute('''
+            UPDATE security_scan_log
+            SET result_info=?
+            WHERE id=?
+        ''', [
+            f'处理 {line_count} 行日志，发现 {len(suspicious_ips)} 个异常 IP，已发送 {new_abnormal_count} 条通知',
             row[0]
         ])
         conn.commit()

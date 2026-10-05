@@ -440,10 +440,15 @@ async function loadSecIpList() {
 async function forceScan() {
   secScanning.value = true
   try {
-    await phpAdminApi.securityScanForce()
-    $message.success('安全扫描已启动，正在后台处理...')
+    const result = await phpAdminApi.securityScanForce()
+    $message.success(result.launch_info || '安全扫描已启动，正在后台处理...')
+    // 打印调试信息到 console
+    if (result.debug) {
+      console.log('[安全扫描调试信息]', result.debug)
+    }
+    // 如果是跳过（已经在运行中），也开始轮询
     // 轮询扫描状态，直到完成或超时
-    const maxWait = 90000 // 最多等 90 秒（38MB 日志应该几秒就完了）
+    const maxWait = 60000 // 最多等 60 秒（主流程应该几秒就完了）
     const interval = 2000 // 每 2 秒查一次
     const startTime = Date.now()
 
@@ -465,22 +470,24 @@ async function forceScan() {
           return
         }
         // 还在扫描中，刷新一下列表（让用户看到最新数据）
-        await loadSecIpList()
+        try { await loadSecIpList() } catch (_) {}
         // 继续轮询
         if (Date.now() - startTime < maxWait) {
           setTimeout(poll, interval)
         } else {
           // 超时了
           secScanning.value = false
-          $message.warning('扫描仍在进行中，请稍后手动刷新查看结果')
+          $message.warning('扫描仍在进行中（补充地理位置信息较慢），请稍后刷新查看')
         }
       } catch (e) {
+        console.error('轮询扫描状态出错:', e)
         secScanning.value = false
       }
     }
     poll() // 立即开始第一次轮询
   }
   catch (e) {
+    console.error('启动扫描失败:', e)
     $message.error(e.message || '启动扫描失败')
     secScanning.value = false
   }
