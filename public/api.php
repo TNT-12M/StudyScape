@@ -9,10 +9,36 @@ error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
 // ===== P0-A5: HTTP 安全头 =====
+// 移除 PHP 版本信息泄露
+header_remove('X-Powered-By');
+
+// 基础安全头
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 header('X-XSS-Protection: 1; mode=block');
+
+// 内容安全策略（CSP）— 限制资源加载来源，防御 XSS 和数据注入
+// 允许 inline 样式和 eval（Vue/Naive UI 需要），图片允许 data: base64（OCR 图片等）
+header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+
+// 权限策略 — 禁用不需要的浏览器 API，减少攻击面
+header("Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=(), gyroscope=(), accelerometer=(), magnetometer=()");
+
+// ===== P0-A6: HTTP 方法限制 =====
+// 只允许 GET 和 POST，其他方法一律返回 405
+$allowedMethods = ['GET', 'POST'];
+$requestMethod = $_SERVER['REQUEST_METHOD'] ?? '';
+if (!in_array($requestMethod, $allowedMethods, true)) {
+    http_response_code(405);
+    header('Allow: GET, POST');
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'success' => false,
+        'error' => '不支持的请求方法：' . $requestMethod,
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
 // ===== P0-A3: Session 安全加固 =====
 $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
