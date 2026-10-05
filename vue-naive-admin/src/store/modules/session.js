@@ -24,10 +24,17 @@ export const useSessionStore = defineStore('php-session', {
     async refresh() {
       try {
         const result = await phpAuthApi.checkSession()
-        this.user = result.data?.user || null
+        const serverUser = result.data?.user || null
+        // 如果 setUser 已经设置了用户（如登录后），不要用 refresh 的结果覆盖
+        // 避免 session_regenerate_id 后立即二次请求偶发的 cookie 不同步问题
+        if (!this._userSetByLogin) {
+          this.user = serverUser
+        }
       }
       catch {
-        this.user = null
+        if (!this._userSetByLogin) {
+          this.user = null
+        }
       }
       this.ready = true
       this.checked = true
@@ -37,6 +44,13 @@ export const useSessionStore = defineStore('php-session', {
       this.user = user || null
       this.ready = true
       this.checked = true
+      this._userSetByLogin = Boolean(user?.id)
+    },
+    async ensureReady() {
+      if (this.checked) return this.user
+      // 避免重复并发请求
+      if (!this._refreshPromise) this._refreshPromise = this.refresh().finally(() => { this._refreshPromise = null })
+      return this._refreshPromise
     },
     async updateProfile(data) {
       const result = await phpProfileApi.update(data)
@@ -54,6 +68,7 @@ export const useSessionStore = defineStore('php-session', {
         this.user = null
         this.ready = true
         this.checked = true
+        this._userSetByLogin = false
       }
     },
   },
