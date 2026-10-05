@@ -76,7 +76,22 @@
             <n-button size="small" type="primary" :loading="secScanning" @click="forceScan">
               立即扫描
             </n-button>
+            <n-button size="small" :loading="secChecking" @click="runCheck">
+              自检
+            </n-button>
           </div>
+          <n-alert v-if="secStatus.last_scan?.status === 'failed' && secStatus.last_scan.result_info" type="error" :show-icon="true" size="small">
+            扫描失败：{{ secStatus.last_scan.result_info }}
+          </n-alert>
+          <n-alert v-if="checkResult && checkVisible" type="info" :show-icon="true" size="small" @on-close="checkVisible = false">
+            <div style="font-size:12px; line-height:1.8;">
+              <div>日志文件：{{ checkResult.log_path }} ({{ checkResult.log_exists ? '存在' : '不存在' }}, {{ formatSize(checkResult.log_size) }})</div>
+              <div>扫描脚本：{{ checkResult.script_path }} ({{ checkResult.script_exists ? '存在' : '不存在' }})</div>
+              <div>数据库：{{ checkResult.db_path }} ({{ checkResult.db_exists ? '存在' : '不存在' }})</div>
+              <div>操作系统：{{ checkResult.php_os }} | Python：{{ checkResult.python_version || '未检测到' }}</div>
+              <div>popen：{{ checkResult.popen_available ? '可用' : '禁用' }} | shell_exec：{{ checkResult.shell_exec_available ? '可用' : '禁用' }}</div>
+            </div>
+          </n-alert>
         </template>
         <n-space vertical size="medium">
           <div class="sec-summary">
@@ -338,6 +353,9 @@ const secStatus = ref({})
 const secIpList = ref([])
 const secLoading = ref(false)
 const secScanning = ref(false)
+const secChecking = ref(false)
+const checkResult = ref(null)
+const checkVisible = ref(false)
 const secPage = ref(1)
 const secPageSize = ref(10)
 const secTotal = ref(0)
@@ -436,6 +454,29 @@ async function forceScan() {
   finally {
     secScanning.value = false
   }
+}
+
+async function runCheck() {
+  secChecking.value = true
+  try {
+    const result = await phpAdminApi.securityScanCheck()
+    checkResult.value = result.data || {}
+    checkVisible.value = true
+  }
+  catch (e) {
+    $message.error(e.message || '自检失败')
+  }
+  finally {
+    secChecking.value = false
+  }
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '0 B'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+  return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB'
 }
 
 // 管理员才加载安全数据

@@ -2597,6 +2597,48 @@ if ($action) {
                 ]);
                 break;
 
+            // 安全扫描自检：检查环境、路径是否正确
+            case 'security_scan_check':
+                requireAdmin();
+                $logPath = '/www/wwwlogs/120.79.161.207.log';
+                $envFile = dirname(__DIR__) . '/security.env';
+                if (file_exists($envFile)) {
+                    $envLines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                    foreach ($envLines as $line) {
+                        if (str_starts_with(trim($line), '#')) continue;
+                        if (str_starts_with($line, 'NGINX_LOG_PATH=')) {
+                            $logPath = trim(substr($line, 15));
+                        }
+                    }
+                }
+                $dbPath = dirname(__DIR__) . '/data/exam.db';
+                $scriptPath = dirname(__DIR__) . '/security/log_monitor.py';
+                $pythonBin = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' ? 'python' : 'python3';
+
+                $checks = [
+                    'log_path' => $logPath,
+                    'log_exists' => file_exists($logPath),
+                    'log_size' => file_exists($logPath) ? filesize($logPath) : 0,
+                    'script_path' => $scriptPath,
+                    'script_exists' => file_exists($scriptPath),
+                    'db_path' => $dbPath,
+                    'db_exists' => file_exists($dbPath),
+                    'php_os' => PHP_OS,
+                    'python_bin' => $pythonBin,
+                    'popen_available' => function_exists('popen'),
+                    'shell_exec_available' => function_exists('shell_exec'),
+                    'python_version' => '',
+                ];
+
+                // 尝试检测 python 是否可用
+                if (function_exists('shell_exec')) {
+                    $ver = @shell_exec($pythonBin . ' --version 2>&1');
+                    $checks['python_version'] = trim($ver ?: '');
+                }
+
+                jsonOut(true, '', $checks);
+                break;
+
             case 'security_ip_list':
                 requireAdmin();
                 $page = max(1, (int)($_POST['page'] ?? 1));
