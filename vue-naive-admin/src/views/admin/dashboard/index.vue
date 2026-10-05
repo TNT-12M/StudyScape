@@ -123,7 +123,7 @@
             :loading="secLoading"
             :bordered="false"
             size="small"
-            scroll-x="900"
+            scroll-x="1100"
           />
         </n-space>
       </n-card>
@@ -375,17 +375,41 @@ const secColumns = [
     if (row.risk_level === 'high') return h('n-tag', { type: 'error', size: 'small', round: true }, { default: () => '高度可疑' })
     return h('n-tag', { type: 'warning', size: 'small', round: true }, { default: () => '异常' })
   }},
-  { title: 'API 请求', key: 'api_count', width: 100, render: row => row.api_count?.toLocaleString() },
-  { title: '扫描特征', key: 'scan_count', width: 100, render: row => row.scan_count?.toLocaleString() },
-  { title: '404 次数', key: 'status_404', width: 100, render: row => row.status_404?.toLocaleString() },
+  { title: '触发场景', key: 'scenarios', width: 200, render: row => {
+    const scenarioNames = {
+      'api_rate_abuse': 'API速率滥用',
+      'path_scanning': '路径扫描',
+      'high_total_volume': '高请求量',
+      'scan_pattern_dense': '扫描特征密集',
+    }
+    let list = []
+    if (Array.isArray(row.scenarios)) {
+      list = row.scenarios
+    } else if (typeof row.scenarios === 'string' && row.scenarios) {
+      try { list = JSON.parse(row.scenarios) } catch { list = [] }
+    }
+    if (!list.length) return h('span', { style: 'color: var(--n-text-color-3)' }, '-')
+    return h('div', { class: 'sec-scenarios' }, list.map(sid =>
+      h('n-tag', {
+        size: 'small',
+        type: sid === 'path_scanning' || sid === 'scan_pattern_dense' ? 'error' : 'warning',
+        style: 'margin-right: 4px; margin-bottom: 4px;',
+        round: true,
+      }, { default: () => scenarioNames[sid] || sid })
+    ))
+  }},
+  { title: 'API 请求', key: 'api_count', width: 90, render: row => row.api_count?.toLocaleString() },
+  { title: '扫描特征', key: 'scan_count', width: 90, render: row => row.scan_count?.toLocaleString() },
+  { title: '404 次数', key: 'status_404', width: 90, render: row => row.status_404?.toLocaleString() },
+  { title: '总请求', key: 'total_count', width: 90, render: row => row.total_count?.toLocaleString() },
   { title: '地理位置', key: 'location', ellipsis: { tooltip: true } },
-  { title: '关联用户', key: 'users', width: 180, render: row => {
+  { title: '关联用户', key: 'users', width: 160, render: row => {
     if (!row.users?.length) return h('span', { style: 'color: var(--n-text-color-3)' }, '无')
     return h('div', { class: 'sec-users' }, row.users.map(u =>
       h('n-tag', { size: 'small', style: 'margin-right: 4px; margin-bottom: 4px;' }, { default: () => u.username })
     ))
   }},
-  { title: '最近活跃', key: 'last_seen', width: 160, render: row => formatTimeAgo(row.last_seen) },
+  { title: '最近活跃', key: 'last_seen', width: 150, render: row => formatTimeAgo(row.last_seen) },
 ]
 
 const secPaginationProps = computed(() => ({
