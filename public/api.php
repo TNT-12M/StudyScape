@@ -108,16 +108,9 @@ function triggerSecurityScan(bool $force = false): void {
 
     // 异步拉起 Python 脚本（不阻塞当前请求）
     $pythonBin = 'python3';
-    $cmd = sprintf(
-        '%s %s %s %s > /dev/null 2>&1 &',
-        escapeshellcmd($pythonBin),
-        escapeshellarg($scriptPath),
-        escapeshellarg($logPath),
-        escapeshellarg($dbPath)
-    );
+    $isWin = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
 
-    // Windows 下用不同方式
-    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+    if ($isWin) {
         $pythonBin = 'python';
         $cmd = sprintf(
             'start /B "" %s %s %s %s',
@@ -126,15 +119,64 @@ function triggerSecurityScan(bool $force = false): void {
             escapeshellarg($logPath),
             escapeshellarg($dbPath)
         );
+    } else {
+        $cmd = sprintf(
+            'nohup %s %s %s %s > /dev/null 2>&1 & echo $!',
+            escapeshellcmd($pythonBin),
+            escapeshellarg($scriptPath),
+            escapeshellarg($logPath),
+            escapeshellarg($dbPath)
+        );
     }
 
-    try {
-        pclose(popen($cmd, 'r'));
-    } catch (Throwable $e) {
-        error_log('security scan trigger failed: ' . $e->getMessage());
+    // 尝试多种方式启动（popen 可能被禁用，依次降级）
+    $launched = false;
+    $errors = [];
+
+    // 方式 1：popen + pclose（最标准的异步启动）
+    if (function_exists('popen') && function_exists('pclose')) {
+        try {
+            $handle = @popen($cmd, 'r');
+            if ($handle !== false) {
+                pclose($handle);
+                $launched = true;
+            }
+        } catch (Throwable $e) {
+            $errors[] = 'popen: ' . $e->getMessage();
+        }
+    } else {
+        $errors[] = 'popen 函数被禁用';
+    }
+
+    // 方式 2：shell_exec（宝塔常见可用，nohup & 后台执行）
+    if (!$launched && function_exists('shell_exec')) {
+        try {
+            $output = @shell_exec($cmd);
+            if ($output !== null) {
+                $launched = true;
+            }
+        } catch (Throwable $e) {
+            $errors[] = 'shell_exec: ' . $e->getMessage();
+        }
+    } else if (!$launched) {
+        $errors[] = 'shell_exec 函数被禁用';
+    }
+
+    // 方式 3：exec
+    if (!$launched && function_exists('exec')) {
+        try {
+            @exec($cmd, $output, $retCode);
+            $launched = true;
+        } catch (Throwable $e) {
+            $errors[] = 'exec: ' . $e->getMessage();
+        }
+    }
+
+    if (!$launched) {
+        error_log('security scan trigger failed: ' . implode('; ', $errors));
         dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=(SELECT MAX(id) FROM security_scan_log WHERE scan_type='nginx_log' AND status='running')", [
             date('Y-m-d H:i:s'),
-            '启动失败: ' . $e->getMessage()
+            '启动失败: ' . implode('; ', $errors)
         ]);
     }
 }
