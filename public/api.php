@@ -89,7 +89,7 @@ function triggerSecurityScan(bool $force = false): void {
     }
 
     if (!file_exists($logPath)) {
-        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE scan_type='nginx_log' AND status='running' ORDER BY id DESC LIMIT 1", [
+        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=(SELECT MAX(id) FROM security_scan_log WHERE scan_type='nginx_log' AND status='running')", [
             date('Y-m-d H:i:s'),
             '日志文件不存在: ' . $logPath
         ]);
@@ -99,7 +99,7 @@ function triggerSecurityScan(bool $force = false): void {
     $dbPath = dirname(__DIR__) . '/data/exam.db';
     $scriptPath = dirname(__DIR__) . '/security/log_monitor.py';
     if (!file_exists($scriptPath)) {
-        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE scan_type='nginx_log' AND status='running' ORDER BY id DESC LIMIT 1", [
+        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=(SELECT MAX(id) FROM security_scan_log WHERE scan_type='nginx_log' AND status='running')", [
             date('Y-m-d H:i:s'),
             '扫描脚本不存在: ' . $scriptPath
         ]);
@@ -132,7 +132,7 @@ function triggerSecurityScan(bool $force = false): void {
         pclose(popen($cmd, 'r'));
     } catch (Throwable $e) {
         error_log('security scan trigger failed: ' . $e->getMessage());
-        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE scan_type='nginx_log' AND status='running' ORDER BY id DESC LIMIT 1", [
+        dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=(SELECT MAX(id) FROM security_scan_log WHERE scan_type='nginx_log' AND status='running')", [
             date('Y-m-d H:i:s'),
             '启动失败: ' . $e->getMessage()
         ]);
