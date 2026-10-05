@@ -2036,7 +2036,7 @@ if ($action) {
 
                 // 更新密码
                 $encryptedNew = encryptPassword($newPassword);
-                dbQuery($db, 'UPDATE users SET password=?, updated_at=? WHERE id=?', [$encryptedNew, time(), $uid]);
+                dbQuery($db, 'UPDATE users SET password=? WHERE id=?', [$encryptedNew, $uid]);
 
                 // 修改密码后，重新生成 session id 并刷新管理员指纹
                 session_regenerate_id(true);
