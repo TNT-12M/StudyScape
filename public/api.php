@@ -635,6 +635,8 @@ function phpSecurityScan(string $logPath, int $scanId): array {
     // 写入数据库
     $now = date('Y-m-d H:i:s');
     $newCount = 0;
+    $newHighCount = 0;
+    $newIpsInfo = []; // 新发现的 IP 信息（用于汇总通知）
 
     foreach ($suspicious as $item) {
         $ip = $item['ip'];
@@ -654,22 +656,39 @@ function phpSecurityScan(string $logPath, int $scanId): array {
                 $item['status_404'], $item['risk_level'], $item['last_seen'],
                 $now, $scenarioJson, $ip
             ]);
-            // 如果升级到 high 或之前没通知过，发通知
+            // 如果升级到 high 或之前没通知过，记录到汇总列表
             $wasHigh = ($row['risk_level'] === 'high');
             $isHighNow = ($item['risk_level'] === 'high');
             if (($isHighNow && !$wasHigh) || !$row['notified']) {
                 dbQuery($db, "UPDATE security_ips SET notified=1 WHERE ip=?", [$ip]);
-                _insertPhpSecurityNotification($db, $item, $row['location'] ?? '', $scenarioNames);
                 $newCount++;
+                if ($isHighNow) $newHighCount++;
+                $newIpsInfo[] = [
+                    'ip' => $ip,
+                    'risk_level' => $item['risk_level'],
+                    'api_count' => $item['api_count'],
+                    'scenarios' => $scenarioNames,
+                ];
             }
         } else {
             dbQuery($db, "INSERT INTO security_ips(ip, api_count, scan_count, total_count, status_404, risk_level, location, last_seen, first_detected, updated_at, notified, scenarios) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", [
                 $ip, $item['api_count'], $item['scan_count'], $item['total_count'],
                 $item['status_404'], $item['risk_level'], '', $item['last_seen'], $now, $now, 1, $scenarioJson
             ]);
-            _insertPhpSecurityNotification($db, $item, '', $scenarioNames);
             $newCount++;
+            if ($item['risk_level'] === 'high') $newHighCount++;
+            $newIpsInfo[] = [
+                'ip' => $ip,
+                'risk_level' => $item['risk_level'],
+                'api_count' => $item['api_count'],
+                'scenarios' => $scenarioNames,
+            ];
         }
+    }
+
+    // 批量发送汇总通知（每次扫描最多 1 条）
+    if ($newCount > 0) {
+        _insertSecuritySummaryNotification($db, $newCount, $newHighCount, $newIpsInfo);
     }
 
     // 清理过期 IP（48 小时没出现的移除）
@@ -720,6 +739,48 @@ function _insertPhpSecurityNotification($db, $ipData, $location, $scenarioNames 
         $body,
         'security',
         date('Y-m-d H:i:s')
+    ]);
+}
+
+/**
+ * 批量汇总安全通知（每次扫描最多发 1 条）
+ * 避免发现 N 个 IP 就发 N 条通知把通知栏撑爆
+ */
+function _insertSecuritySummaryNotification($db, $totalNew, $highCount, $ipsInfo) {
+    $root = dbFetchOne($db, "SELECT id FROM users WHERE is_initial_root=1 OR username='lian' LIMIT 1");
+    if (!$root) return;
+
+    $now = date('Y-m-d H:i:s');
+    $title = "【安全预警】发现 {$totalNew} 个异常 IP（高度可疑 {$highCount} 个）";
+
+    // 正文：前 5 个 IP 明细，多的省略
+    $bodyLines = [];
+    $bodyLines[] = "本次扫描新发现 {$totalNew} 个异常 IP，其中高度可疑 {$highCount} 个。";
+    $bodyLines[] = '';
+
+    $showCount = min(5, count($ipsInfo));
+    for ($i = 0; $i < $showCount; $i++) {
+        $info = $ipsInfo[$i];
+        $riskLabel = $info['risk_level'] === 'high' ? '🔴 高度可疑' : '🟡 异常';
+        $scenarioStr = $info['scenarios'] ? '（' . implode('、', $info['scenarios']) . '）' : '';
+        $bodyLines[] = ($i + 1) . ". {$info['ip']} {$riskLabel} - API 请求 {$info['api_count']} 次{$scenarioStr}";
+    }
+
+    if (count($ipsInfo) > 5) {
+        $bodyLines[] = '... 及另外 ' . (count($ipsInfo) - 5) . ' 个 IP';
+    }
+
+    $bodyLines[] = '';
+    $bodyLines[] = '请前往管理员后台 → 概览 → 安全监控 查看详情。';
+
+    $body = implode("\n", $bodyLines);
+
+    dbQuery($db, "INSERT INTO notifications(user_id, title, body, type, created_at) VALUES(?,?,?,?,?)", [
+        $root['id'],
+        $title,
+        $body,
+        'security',
+        $now
     ]);
 }
 
@@ -3396,11 +3457,14 @@ if ($action) {
                 $offset = ($page - 1) * $pageSize;
                 $risk = $_POST['risk_level'] ?? '';
 
-                $where = '';
+                $where = "WHERE risk_level IN ('high','medium')";
                 $params = [];
                 if ($risk === 'high' || $risk === 'medium') {
                     $where = "WHERE risk_level=?";
                     $params[] = $risk;
+                } elseif ($risk === 'all') {
+                    $where = '';
+                    $params = [];
                 }
 
                 $totalRow = dbFetchOne($db, "SELECT COUNT(*) AS c FROM security_ips $where", $params);

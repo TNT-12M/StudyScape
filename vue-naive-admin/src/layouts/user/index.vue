@@ -35,7 +35,7 @@
           学习中心
         </div>
         <div class="user-actions">
-          <n-popover trigger="click" placement="bottom-end" @update:show="value => value && loadNotifications()"><template #trigger><n-badge :value="unreadCount" :max="99"><n-button quaternary size="small">通知</n-button></n-badge></template><n-space vertical style="max-width:320px"><n-text v-if="!notifications.length" depth="3">暂无通知</n-text><n-list v-else size="small"><n-list-item v-for="item in notifications" :key="item.id"><n-thing :title="item.title" :description="item.body" /></n-list-item></n-list><n-button v-if="unreadCount" size="small" @click="readNotifications">全部标记已读</n-button></n-space></n-popover>
+          <n-popover trigger="click" placement="bottom-end" @update:show="value => value && loadNotifications()"><template #trigger><n-badge :value="unreadCount" :max="99"><n-button quaternary size="small">通知</n-button></n-badge></template><n-space vertical style="max-width:340px"><n-text v-if="!notifications.length" depth="3">暂无通知</n-text><div v-else class="notify-list-wrap"><n-list size="small"><n-list-item v-for="item in notifications" :key="item.id"><n-thing :title="item.title" :description="item.body" /></n-list-item></n-list></div><n-button v-if="unreadCount" size="small" @click="readNotifications">全部标记已读</n-button></n-space></n-popover>
           <SessionProfileLink to="/app/profile" />
           <n-button quaternary size="small" @click="logout">
             退出
@@ -252,5 +252,22 @@ async function logout() {
   .user-content {
     padding: 16px 14px 32px;
   }
+}
+/* 通知列表滚动 */
+.notify-list-wrap {
+  max-height: 60vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.notify-list-wrap :deep(.n-list-item) {
+  padding: 10px 4px;
+}
+.notify-list-wrap :deep(.n-thing-main) {
+  max-width: 300px;
+}
+.notify-list-wrap :deep(.n-thing-content) {
+  white-space: normal;
+  word-break: break-all;
+  font-size: 12px;
 }
 </style>
