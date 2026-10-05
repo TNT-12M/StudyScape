@@ -25,6 +25,23 @@ session_set_cookie_params([
 ]);
 session_start();
 
+/**
+ * 生成管理员会话指纹，绑定用户代理和IP前缀，防止 Session 劫持
+ * 管理员登录时生成，每次管理员操作都校验
+ */
+function generateAdminFingerprint(): string {
+    $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+    // 取 IP 前三段（IPv4），避免动态 IP 导致频繁失效
+    $ipPrefix = implode('.', array_slice(explode('.', $ip), 0, 3));
+    return hash('sha256', 'admin_fingerprint_' . $ua . '_' . $ipPrefix . '_' . session_id());
+}
+
+function verifyAdminFingerprint(): bool {
+    if (empty($_SESSION['admin_fp'])) return false;
+    return hash_equals($_SESSION['admin_fp'], generateAdminFingerprint());
+}
+
 // ===================== 密码密钥（项目目录之外） =====================
 function passwordKeyPath(): string {
     $configured = getenv('PASSWORD_KEY_FILE');
@@ -60,13 +77,21 @@ function loadPasswordKey(): string {
 }
 
 function encryptPassword(string $password): string {
-    global $passwordKey;
-    $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-    $cipher = sodium_crypto_secretbox($password, $nonce, $passwordKey);
-    return 'enc:v1:' . base64_encode($nonce . $cipher);
+    // 使用 bcrypt 哈希（单向，不可逆），远比对称加密安全
+    // PASSWORD_BCRYPT 自动加盐，cost=10 平衡安全与性能
+    $hash = password_hash($password, PASSWORD_BCRYPT, ['cost' => 10]);
+    if ($hash === false) {
+        // bcrypt 不可用时降级到 libsodium 对称加密
+        global $passwordKey;
+        $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+        $cipher = sodium_crypto_secretbox($password, $nonce, $passwordKey);
+        return 'enc:v1:' . base64_encode($nonce . $cipher);
+    }
+    return 'bcrypt:v2:' . $hash;
 }
 
 function decryptPassword(string $stored): ?string {
+    // 仅用于旧格式密码的迁移验证；bcrypt 哈希无法解密
     global $passwordKey;
     if (!str_starts_with($stored, 'enc:v1:')) return null;
     $payload = base64_decode(substr($stored, 7), true);
@@ -81,11 +106,30 @@ function decryptPassword(string $stored): ?string {
     }
 }
 
+function passwordNeedsRehash(string $stored): bool {
+    // 非 bcrypt v2 格式都需要升级
+    return !str_starts_with($stored, 'bcrypt:v2:');
+}
+
+function rehashPasswordIfNeeded(int $userId, string $stored, string $plainPassword): void {
+    if (!passwordNeedsRehash($stored)) return;
+    global $db;
+    $newHash = encryptPassword($plainPassword);
+    @dbQuery($db, "UPDATE users SET password=? WHERE id=?", [$newHash, $userId]);
+}
+
 function passwordMatches(string $stored, string $candidate): bool {
+    // bcrypt 哈希格式（推荐）
+    if (str_starts_with($stored, 'bcrypt:v2:')) {
+        $hash = substr($stored, 10);
+        return password_verify($candidate, $hash);
+    }
+    // 旧的对称加密格式（兼容）
     if (str_starts_with($stored, 'enc:v1:')) {
         $plain = decryptPassword($stored);
         return $plain !== null && hash_equals($plain, $candidate);
     }
+    // 原始明文（极旧格式，兼容）
     return hash_equals($stored, $candidate);
 }
 
@@ -987,18 +1031,32 @@ function isInitialRoot(): bool {
 
 function requireAdmin() {
     if (!isLoggedIn()) jsonOut(false, "请先登录");
+    // 管理员操作必须校验会话指纹，防止 Session 劫持/伪造
+    if (!verifyAdminFingerprint()) {
+        // 指纹不匹配：清除管理员状态，强制重新登录
+        unset($_SESSION['admin_fp'], $_SESSION['is_admin'], $_SESSION['role']);
+        jsonOut(false, "管理员会话已失效，请重新登录");
+    }
     if (!isAdmin()) jsonOut(false, "权限不足，仅管理员可操作");
     return (int)$_SESSION['user_id'];
 }
 
 function requireRoot(): int {
     if (!isLoggedIn()) jsonOut(false, "请先登录");
+    if (!verifyAdminFingerprint()) {
+        unset($_SESSION['admin_fp'], $_SESSION['is_admin'], $_SESSION['role']);
+        jsonOut(false, "管理员会话已失效，请重新登录");
+    }
     if (!isRoot()) jsonOut(false, "权限不足，仅 root 可操作");
     return (int)$_SESSION['user_id'];
 }
 
 function requireContentPermission(string $permission): int {
     if (!isLoggedIn()) jsonOut(false, "请先登录");
+    if (!verifyAdminFingerprint()) {
+        unset($_SESSION['admin_fp'], $_SESSION['is_admin'], $_SESSION['role']);
+        jsonOut(false, "管理员会话已失效，请重新登录");
+    }
     $user = currentUser();
     if (!$user || !in_array($user['role'], ['root', 'content_admin'], true)) {
         jsonOut(false, "权限不足，仅内容管理员或 root 可操作");
@@ -1339,10 +1397,8 @@ if ($action) {
                         : "用户名或密码错误，还可尝试 {$status['remaining']} 次";
                     jsonOut(false, $msg, ['throttle' => $status]);
                 }
-                // 兼容历史明文账号：验证成功后立即改写为密文。
-                if (!str_starts_with((string)$u['password'], 'enc:v1:')) {
-                    dbQuery($db, "UPDATE users SET password=? WHERE id=?", [encryptPassword($password), (int)$u['id']]);
-                }
+                // 兼容历史明文/旧加密账号：验证成功后立即升级为 bcrypt 哈希。
+                rehashPasswordIfNeeded((int)$u['id'], (string)$u['password'], $password);
 
                 if (!$u['is_active']) {
                     recordLoginFail();
@@ -1362,6 +1418,11 @@ if ($action) {
                 $_SESSION['role'] = $u['username'] === 'lian' ? 'root' : ($u['role'] ?? ((int)$u['is_admin'] ? 'root' : 'user'));
                 $_SESSION['is_admin'] = in_array($_SESSION['role'], ['root', 'content_admin'], true);
                 $_SESSION['is_approved'] = (bool)$u['is_approved'];
+
+                // 管理员登录时生成会话指纹，绑定 UA+IP，防止 Session 劫持/伪造
+                if ($_SESSION['is_admin']) {
+                    $_SESSION['admin_fp'] = generateAdminFingerprint();
+                }
                 
                 dbQuery($db, "UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?", [$u['id']]);
 
@@ -1486,6 +1547,13 @@ if ($action) {
                         $_SESSION['role'] = $u['role'];
                         $_SESSION['is_admin'] = (bool)$u['is_admin'];
                         $_SESSION['is_approved'] = (bool)$u['is_approved'];
+                        // 管理员会话必须通过指纹校验，否则撤销管理员状态（防止 Session 伪造）
+                        if ((bool)$u['is_admin'] && !verifyAdminFingerprint()) {
+                            $_SESSION['is_admin'] = false;
+                            $_SESSION['role'] = 'user';
+                            $u['is_admin'] = 0;
+                            $u['role'] = 'user';
+                        }
                         jsonOut(true, "", ['user' => formatUserTimestamps($u)]);
                     }
                     invalidateSession();
