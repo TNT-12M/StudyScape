@@ -147,20 +147,24 @@ function cleanOptionText(value) {
 }
 function normalizeQuestion(question) {
   const source = String(question.content || '').replace(/\r/g, '')
-  const marker = source.search(/(?<![A-Za-zＡ-Ｚ])[A-DＡ-Ｄ]\s*[.．、)）:：]\s*/)
   const hasOptions = Array.isArray(question.options) && question.options.length > 0
-  if (marker >= 0) {
-    let prefix = source.slice(0, marker).trim()
-    // 只去掉题干末尾残留的 $$，保留题干中间的合法公式
-    prefix = prefix.replace(/\$\$\s*$/, '').trim()
-    if (hasOptions) {
-      question.content = prefix
-    } else {
+
+  if (!hasOptions) {
+    // 只有当 options 为空时，才尝试从题干里剥离选项
+    const marker = source.search(/(?<![A-Za-zＡ-Ｚ])[A-DＡ-Ｄ]\s*[.．、)）:：]\s*/)
+    if (marker >= 0) {
+      let prefix = source.slice(0, marker).trim()
+      prefix = prefix.replace(/\$\$\s*$/, '').trim()
       const tail = source.slice(marker).trim()
       const parts = tail.split(/(?=\s*[A-DＡ-Ｄ]\s*[.．、)）:：]\s*)/i).map(item => item.trim()).filter(Boolean)
-      if (parts.length >= 2) { question.content = prefix; question.options = parts }
+      if (parts.length >= 2) {
+        question.content = prefix
+        question.options = parts
+      }
     }
   }
+  // 如果 options 已经有值了，绝不从题干里再剥（避免张冠李戴）
+
   question.options = Array.isArray(question.options)
     ? question.options.map(item => cleanOptionText(item)).filter(Boolean)
     : []

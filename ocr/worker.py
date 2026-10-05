@@ -191,9 +191,82 @@ def split_content_options(content, options):
     return text, options
 
 
-def normalize(data, paper_name, subject, education_level):
-    questions = []
-    for part in _as_list(data, "part_info"):
+def _crop_image_from_bbox(image_bytes, bbox):
+    """根据 bbox 坐标从原图中裁切图片，返回 base64（data:image/png;base64,... 格式）。
+    bbox 格式：[[x1,y1],[x2,y2],[x3,y3],[x4,y4]] 或 [x1,y1,x2,y2]
+    """
+    if not bbox or not image_bytes:
+        return None
+    try:
+        from PIL import Image
+        import io
+    except ImportError:
+        return None
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        width, height = img.size
+        # 解析 bbox
+        if isinstance(bbox[0], list):
+            xs = [p[0] for p in bbox]
+            ys = [p[1] for p in bbox]
+            x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+        else:
+            x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+        # 边界检查 + 稍微扩展一点边距
+        pad = 3
+        x1 = max(0, int(x1) - pad)
+        y1 = max(0, int(y1) - pad)
+        x2 = min(width, int(x2) + pad)
+        y2 = min(height, int(y2) + pad)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        cropped = img.crop((x1, y1, x2, y2))
+        buf = io.BytesIO()
+        cropped.save(buf, format="PNG")
+        import base64 as _b64
+        return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
+
+
+# 材料题/大题题干模式：匹配"阅读材料/根据材料/阅读下文...完成下列小题/完成1~2题"等
+_MATERIAL_PATTERN = re.compile(
+    r"(阅读(?:下列|下面|以上|图文)?材料|根据(?:以上|以下|上述|图文)?材料|阅读下文|读(?:下)?文|阅读图文|结合材料).*?"
+    r"(?:完成|回答|回答下列|下列各题|各题|小题|下面各题|以下各题|1\s*[-~～]\s*\d+\s*题|\d+\s*[-~～]\s*\d+\s*题)",
+    re.DOTALL
+)
+
+# 题目序号模式："13." "一、" "(1)" "【1】" 等，用于识别大题边界
+_QUESTION_NUMBER = re.compile(r"^\s*(?:[一二三四五六七八九十]+[、.．]|\d+\s*[.．、)）]|【\d+】|\(\s*\d+\s*\))\s*")
+
+
+def _is_material_stem(text):
+    """判断一段文本是否是材料题的大题题干（材料阅读类）。"""
+    if not text:
+        return False
+    # 长度过短不可能是材料
+    if len(text) < 30:
+        return False
+    return bool(_MATERIAL_PATTERN.search(text))
+
+
+def _question_number_prefix(text):
+    """提取题干开头的题号前缀，返回 (题号文本, 剩余文本)。没匹配到返回 ('', text)。"""
+    m = _QUESTION_NUMBER.match(text)
+    if m:
+        return m.group(0).strip(), text[m.end():].strip()
+    return "", text.strip()
+
+
+def normalize(data, paper_name, subject, education_level, page_images=None):
+    """
+    归一化 OCR 结果。
+    page_images: 每页的原始图片 bytes 列表（用于裁切 figure 图片），可选。
+    """
+    page_images = page_images or []
+    raw_questions = []
+
+    for part_idx, part in enumerate(_as_list(data, "part_info")):
         if not isinstance(part, dict):
             continue
         part_title = part.get("part_title", "") if isinstance(part, dict) else ""
@@ -216,16 +289,25 @@ def normalize(data, paper_name, subject, education_level):
                     answer = value
                 elif kind == 2 and value:
                     explanation = value
-            # 题干里可能混入了选项，剥离并清洗
-            text, options = split_content_options(text, options)
+
+            # 从 figure_list 裁切图片
             figures = []
+            page_idx = item.get("_page_idx", 0)
+            page_img = page_images[page_idx] if page_idx < len(page_images) else None
             for fig in _as_list(item, "figure_list"):
                 if not isinstance(fig, dict):
                     continue
                 points = fig.get("points") or []
-                figures.append({"type": fig.get("type"), "bbox": points, "base64": None})
-            questions.append({
-                "source_qid": str(len(questions) + 1),
+                b64 = None
+                if page_img and points:
+                    b64 = _crop_image_from_bbox(page_img, points)
+                figures.append({
+                    "type": fig.get("type"),
+                    "bbox": points,
+                    "base64": b64 or "",
+                })
+
+            raw_questions.append({
                 "part_title": part_title,
                 "question_type": "single",
                 "content": text,
@@ -237,8 +319,94 @@ def normalize(data, paper_name, subject, education_level):
                 "is_html": 0,
                 "images": figures,
                 "included": True,
+                "_part_idx": part_idx,
             })
-    return {"paper_name": paper_name, "subject": subject or "综合", "education_level": education_level, "questions": questions}
+
+    # ========== 修复 1：材料题合并 ==========
+    # 策略：遍历题目，如果某题的题干是"材料题"样式（阅读材料...完成下列各题），
+    # 且它的 options 很少/没有，则认为它是大题材料，把后面的小题合并进去。
+    questions = []
+    i = 0
+    while i < len(raw_questions):
+        q = raw_questions[i]
+        content = q["content"].strip()
+
+        # 判断是否是材料题大题题干
+        is_material = _is_material_stem(content)
+        # 启发式：如果题干很长（>150字）、选项为空或极少（0-1个），也可能是材料
+        if not is_material and len(content) > 150 and len(q["options"]) <= 1:
+            # 再看末尾有没有 "下列小题" "各题" 之类
+            if re.search(r"(下列|以下|以上|各|小题|完成\s*(\d+[~～-]\s*)?\d+\s*题)", content[-100:]):
+                is_material = True
+
+        if is_material and i + 1 < len(raw_questions):
+            # 收集属于这个材料的小题
+            sub_questions = []
+            j = i + 1
+            while j < len(raw_questions):
+                next_q = raw_questions[j]
+                next_content = next_q["content"].strip()
+                # 如果下一题也是材料题，停止
+                if _is_material_stem(next_content):
+                    break
+                # 如果下一题的 part 变了，停止
+                if next_q.get("_part_idx") != q.get("_part_idx"):
+                    break
+                # 安全限制：一个材料题最多带 10 个小题
+                if len(sub_questions) >= 10:
+                    break
+                sub_questions.append(next_q)
+                j += 1
+
+            if sub_questions:
+                # 有小题：把材料作为大题题干 + 多道小题
+                # 这里采用"保留材料为独立题 + 后面小题不变"的策略，
+                # 但把大题类型标记为 material，题干就是材料文本
+                q["question_type"] = "material"
+                q["options"] = []
+                q["_sub_questions"] = len(sub_questions)
+                questions.append(q)
+                # 小题正常加入，但把 part_title 加上材料说明
+                for idx, sq in enumerate(sub_questions):
+                    sq["part_title"] = (q["part_title"] + " / 材料题" if q["part_title"] else "材料题")
+                    # 小题题干去掉题号前缀，避免和列表序号重复
+                    prefix, rest = _question_number_prefix(sq["content"])
+                    if prefix:
+                        sq["content"] = rest
+                    questions.append(sq)
+                i = j
+                continue
+
+        # 普通题
+        questions.append(q)
+        i += 1
+
+    # ========== 修复 2：题干选项剥离（更保守的策略） ==========
+    # 只有当 options 为空时才从题干里剥离选项；
+    # 如果 options 已经有了，绝不从题干里再剥（避免张冠李戴）
+    for q in questions:
+        text = q["content"]
+        opts = q["options"]
+        if not opts:
+            # options 为空，尝试从题干剥离
+            new_text, new_opts = split_content_options(text, [])
+            if new_opts and len(new_opts) >= 2:
+                q["content"] = new_text
+                q["options"] = new_opts
+        # 否则保持原样，不做剥离
+
+    # 重新编号
+    for idx, q in enumerate(questions):
+        q["source_qid"] = str(idx + 1)
+        # 移除内部字段
+        q.pop("_part_idx", None)
+
+    return {
+        "paper_name": paper_name,
+        "subject": subject or "综合",
+        "education_level": education_level,
+        "questions": questions,
+    }
 
 
 def run(input_path, output_path, subject, education_level, dry_run=False):
@@ -253,14 +421,20 @@ def run(input_path, output_path, subject, education_level, dry_run=False):
     if dry_run:
         return {"paper_name": path.name, "subject": subject or "综合", "education_level": education_level, "questions": []}
     api_client = client()
-    pages = render_pdf(path) if suffix == ".pdf" else [path.read_bytes()]
+    pages = list(render_pdf(path)) if suffix == ".pdf" else [path.read_bytes()]
     merged = {"part_info": []}
     page_count = 0
-    for page in pages:
+    for page_bytes in pages:
         page_count += 1
-        page_data = ocr_bytes(api_client, page, subject)
+        page_data = ocr_bytes(api_client, page_bytes, subject)
+        # 给这一页的每个 subject 加上 _page_idx，方便后面找原始图片裁切
+        for part in _as_list(page_data, "part_info"):
+            if isinstance(part, dict):
+                for item in _as_list(part, "subject_list"):
+                    if isinstance(item, dict):
+                        item["_page_idx"] = page_count - 1
         merged["part_info"].extend(_as_list(page_data, "part_info"))
-    return normalize(merged, path.name, subject, education_level)
+    return normalize(merged, path.name, subject, education_level, page_images=pages)
 
 
 def main():
