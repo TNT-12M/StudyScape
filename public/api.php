@@ -2950,7 +2950,13 @@ if ($action) {
                     ];
                 }
 
-                // 5) 资料按科目统计（可选，丰富展示）
+                // 5) 题目按科目分布（用于饼图展示）
+                $rows = dbFetchAll($db, "SELECT subject, COUNT(*) AS c FROM questions WHERE subject IS NOT NULL AND subject<>'' GROUP BY subject ORDER BY c DESC");
+                $bySubject = array_map(function($r){
+                    return ['subject' => $r['subject'] ?: '未分类', 'count' => (int)$r['c']];
+                }, $rows);
+
+                // 6) 资料按科目统计（可选，丰富展示）
                 $rows = dbFetchAll($db, "SELECT subject, COUNT(*) AS c FROM materials GROUP BY subject ORDER BY c DESC LIMIT 8");
                 $materials = array_map(function($r){
                     return ['subject' => $r['subject'] ?: '未分类', 'count' => (int)$r['c']];
@@ -2964,6 +2970,7 @@ if ($action) {
                         'material_count'        => $material_count
                     ],
                     'types'            => $types,
+                    'by_subject'       => $bySubject,
                     'subjects'         => $subjects,
                     'published_papers' => $papers,
                     'materials'        => $materials
