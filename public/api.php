@@ -4970,8 +4970,7 @@ if ($action) {
                 foreach ($rows as &$r) {
                     $r['file_size'] = (int)$r['file_size'];
                     $r['downloads'] = (int)$r['downloads'];
-                    $r['uploaded_at'] = formatDbUtcTimestamp($r['uploaded_at']);
-                    $r['updated_at'] = formatDbUtcTimestamp($r['updated_at']);
+                    // 保持 UTC 字符串，由前端根据本地时区转换显示
                 }
                 unset($r);
                 jsonOut(true, "", [

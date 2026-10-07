@@ -148,6 +148,7 @@
 import { NButton, NSpace, NTag, NInputNumber } from 'naive-ui'
 import { phpMaterialsApi } from '@/api/php-modules'
 import { useSessionStore } from '@/store'
+import { formatDate } from '@/views/user/components/question-utils'
 
 const session = useSessionStore()
 const message = window.$message
@@ -215,7 +216,7 @@ const columns = [
   { title: '科目', key: 'subject', width: 100 },
   { title: '大小', key: 'file_size', render: row => formatSize(row.file_size), width: 100 },
   { title: '下载', key: 'downloads', width: 70 },
-  { title: '上传时间', key: 'uploaded_at', width: 170 },
+  { title: '上传时间', key: 'uploaded_at', width: 170, render: row => formatDate(row.uploaded_at) },
   {
     title: '操作', key: 'actions', width: 260,
     render: row => h(NSpace, null, {
