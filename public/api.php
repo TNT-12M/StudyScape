@@ -105,6 +105,40 @@ class CounterBucket {
     }
 }
 
+/**
+ * 比例桶：统计分子/分母的比例，超过阈值且满足最小计数时溢出
+ * 用于检测 404 比例异常高等场景
+ */
+class RatioBucket {
+    public $ratioThreshold;
+    public $minCount;
+    public $numerator = 0;
+    public $denominator = 0;
+    public $overflowed = false;
+
+    public function __construct($ratioThreshold, $minCount) {
+        $this->ratioThreshold = $ratioThreshold;
+        $this->minCount = $minCount;
+    }
+
+    /**
+     * @param bool $isNumerator 本次请求是否计入分子
+     */
+    public function add($isNumerator) {
+        if ($this->overflowed) return true;
+        $this->denominator++;
+        if ($isNumerator) $this->numerator++;
+        if ($this->denominator >= $this->minCount && $this->denominator > 0) {
+            $ratio = $this->numerator / $this->denominator;
+            if ($ratio >= $this->ratioThreshold) {
+                $this->overflowed = true;
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
 // ===== P0-A5: HTTP 安全头 =====
 // 移除 PHP 版本信息泄露
 header_remove('X-Powered-By');
@@ -340,47 +374,59 @@ function triggerSecurityScan(bool $force = false): array {
  */
 function getSecurityScenarios(): array {
     return [
-        // 场景1：API 速率滥用（5分钟内超过 300 次 API 请求）
+        // 场景1：API 速率滥用（5分钟内超过 600 次 API 请求 = 每秒2次，远高于正常用户操作）
         [
             'id' => 'api_rate_abuse',
             'name' => 'API 速率滥用',
             'type' => 'leaky',
             'severity' => 'medium',
-            'capacity' => 300,
+            'capacity' => 600,
             'window_seconds' => 300, // 5分钟
             'filter' => 'api', // 只统计 API 请求
             'description' => '短时间内大量 API 请求',
         ],
-        // 场景2：路径扫描（10分钟内 40 个不同的 404 URL）
+        // 场景2：路径扫描（10分钟内 60 个不同的 404 URL）
         [
             'id' => 'path_scanning',
             'name' => '路径扫描',
             'type' => 'uniq',
             'severity' => 'high',
-            'threshold' => 40,
+            'threshold' => 60,
             'window_minutes' => 10,
             'filter' => '404_path', // 只统计 404 的路径
             'description' => '探测大量不存在的路径，疑似扫描器',
         ],
-        // 场景3：异常高请求量（24小时内超过 5000 次总请求）
+        // 场景3：异常高请求量（24小时内超过 15000 次总请求，约每分钟10次以上持续24h）
         [
             'id' => 'high_total_volume',
             'name' => '异常高请求量',
             'type' => 'counter',
             'severity' => 'medium',
-            'threshold' => 5000,
+            'threshold' => 15000,
             'filter' => 'all',
             'description' => '24 小时内请求量异常高',
         ],
-        // 场景4：扫描特征密集（24h 内 50 次以上扫描特征路径访问）
+        // 场景4：扫描特征密集（24h 内 100 次以上扫描特征路径访问）
         [
             'id' => 'scan_pattern_dense',
             'name' => '扫描特征密集',
             'type' => 'counter',
             'severity' => 'high',
-            'threshold' => 50,
+            'threshold' => 100,
             'filter' => 'scan_pattern',
             'description' => '大量访问含扫描特征的路径',
+        ],
+        // 场景5：高 404 比例 + 绝对量（总请求中 404 占比 > 40% 且 404 次数 > 200）
+        [
+            'id' => 'high_404_ratio',
+            'name' => '高 404 比例',
+            'type' => 'ratio',
+            'severity' => 'high',
+            'numerator_filter' => '404',
+            'denominator_filter' => 'all',
+            'ratio_threshold' => 0.40,
+            'min_count' => 200,
+            'description' => '404 比例异常高，疑似扫描器',
         ],
     ];
 }
@@ -421,8 +467,21 @@ function phpSecurityScan(string $logPath, int $scanId): array {
         }
     }
 
-    // 扫描特征合并为单个正则（比循环 str_contains 快很多）
-    $scanRegex = '/(wp-|wordpress|xmlrpc|admin\/|administrator|\.env|\.git|\.svn|phpmyadmin|\/etc\/passwd|union\s+select|<script|alert\(|eval\(|base64|cmd=|exec=)/i';
+    // 已登录用户 IP 白名单：最近 24 小时内有登录记录的正常用户 IP 不参与检测
+    // （正常用户操作量高很正常，不应该被当成攻击）
+    $activeUserIps = dbFetchAll($db,
+        "SELECT DISTINCT last_login_ip FROM users WHERE last_login_ip != '' AND is_active=1 AND last_login_time >= ?",
+        [date('Y-m-d H:i:s', $cutoff)]
+    );
+    foreach ($activeUserIps as $row) {
+        $ip = trim($row['last_login_ip'] ?? '');
+        if ($ip && filter_var($ip, FILTER_VALIDATE_IP)) {
+            $whitelist[$ip] = true;
+        }
+    }
+
+    // 扫描特征合并为单个正则（只保留明显的漏洞探测特征，避免误匹配正常业务路径）
+    $scanRegex = '/(\.env|\.git|\.svn|phpmyadmin|pma[_\-]|myadmin|wp-admin|wp-login|wordpress|wp-content|xmlrpc\.php|\/etc\/passwd|\/proc\/self|%2e%2e\/|union\s+select|<script.*>|alert\(|eval\(|base64_decode|cmd=.*\b|\bshell\b|fckeditor|kindeditor|ueditor|phpinfo\(\)|actuator|jenkins)/i';
 
     // 场景配置
     $scenarios = getSecurityScenarios();
@@ -523,6 +582,8 @@ function phpSecurityScan(string $logPath, int $scanId): array {
                     $ipBuckets[$ip][$sc['id']] = new UniqBucket($sc['threshold']);
                 } elseif ($sc['type'] === 'counter') {
                     $ipBuckets[$ip][$sc['id']] = new CounterBucket($sc['threshold']);
+                } elseif ($sc['type'] === 'ratio') {
+                    $ipBuckets[$ip][$sc['id']] = new RatioBucket($sc['ratio_threshold'], $sc['min_count']);
                 }
             }
         }
@@ -549,6 +610,18 @@ function phpSecurityScan(string $logPath, int $scanId): array {
         foreach ($scenarios as $sc) {
             $bucket = $buckets[$sc['id']];
             if ($bucket->overflowed) continue; // 已经溢出的跳过
+
+            if ($sc['type'] === 'ratio') {
+                // 比例桶：每次请求分母+1，满足分子条件时分子+1
+                $isNum = false;
+                switch ($sc['numerator_filter'] ?? '') {
+                    case '404': $isNum = $is404; break;
+                    case 'api': $isNum = $isApi; break;
+                    case 'scan_pattern': $isNum = $hasScanPattern; break;
+                }
+                $bucket->add($isNum);
+                continue;
+            }
 
             $hit = false;
             switch ($sc['filter']) {
@@ -656,13 +729,13 @@ function phpSecurityScan(string $logPath, int $scanId): array {
                 $item['status_404'], $item['risk_level'], $item['last_seen'],
                 $now, $scenarioJson, $ip
             ]);
-            // 如果升级到 high 或之前没通知过，记录到汇总列表
+            // 只有 high 级别才发通知，medium 只记录不打扰管理员
             $wasHigh = ($row['risk_level'] === 'high');
             $isHighNow = ($item['risk_level'] === 'high');
-            if (($isHighNow && !$wasHigh) || !$row['notified']) {
+            if ($isHighNow && (!$wasHigh || !$row['notified'])) {
                 dbQuery($db, "UPDATE security_ips SET notified=1 WHERE ip=?", [$ip]);
                 $newCount++;
-                if ($isHighNow) $newHighCount++;
+                $newHighCount++;
                 $newIpsInfo[] = [
                     'ip' => $ip,
                     'risk_level' => $item['risk_level'],
@@ -671,18 +744,24 @@ function phpSecurityScan(string $logPath, int $scanId): array {
                 ];
             }
         } else {
+            $isHigh = ($item['risk_level'] === 'high');
             dbQuery($db, "INSERT INTO security_ips(ip, api_count, scan_count, total_count, status_404, risk_level, location, last_seen, first_detected, updated_at, notified, scenarios) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", [
                 $ip, $item['api_count'], $item['scan_count'], $item['total_count'],
-                $item['status_404'], $item['risk_level'], '', $item['last_seen'], $now, $now, 1, $scenarioJson
+                $item['status_404'], $item['risk_level'], '', $item['last_seen'], $now, $now,
+                $isHigh ? 1 : 0, // 只有 high 才标记已通知
+                $scenarioJson
             ]);
-            $newCount++;
-            if ($item['risk_level'] === 'high') $newHighCount++;
-            $newIpsInfo[] = [
-                'ip' => $ip,
-                'risk_level' => $item['risk_level'],
-                'api_count' => $item['api_count'],
-                'scenarios' => $scenarioNames,
-            ];
+            // 只有 high 级别才发通知
+            if ($isHigh) {
+                $newCount++;
+                $newHighCount++;
+                $newIpsInfo[] = [
+                    'ip' => $ip,
+                    'risk_level' => $item['risk_level'],
+                    'api_count' => $item['api_count'],
+                    'scenarios' => $scenarioNames,
+                ];
+            }
         }
     }
 

@@ -21,9 +21,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # ====== 配置 ======
-API_THRESHOLD = 1000          # 24h 内 API 请求阈值，超过标记异常
-SCAN_PATH_THRESHOLD = 20      # 扫描特征路径数量阈值，超过标记高度可疑
+API_THRESHOLD = 3000          # 24h 内 API 请求阈值（提高到 3000，避免正常用户误报）
+SCAN_PATH_THRESHOLD = 50      # 扫描特征路径数量阈值，超过才标记 high
 WINDOW_HOURS = 24             # 统计时间窗口（小时）
+HIGH_404_RATIO = 0.40         # 404 比例阈值（超过这个比例且 >200 次才算 high）
+MIN_404_FOR_RATIO = 200       # 404 比例判断的最小请求数
 
 # IP 白名单：这些 IP 不参与异常检测（如管理员自己的 IP、内网 IP 等）
 # 可通过 security.env 文件中的 SECURITY_WHITELIST_IPS 配置，逗号分隔
@@ -43,18 +45,17 @@ if env_path.exists():
     except Exception:
         pass
 
-# 常见扫描/漏洞探测路径特征
+# 常见扫描/漏洞探测路径特征（只保留明显的攻击特征，避免误匹配正常业务）
 SCAN_PATTERNS = [
     r'\.env', r'\.git', r'\.svn', r'\.htaccess', r'\.htpasswd',
-    r'phpmyadmin', r'pma', r'myadmin', r'mysql', r'phpinfo',
+    r'phpmyadmin', r'pma[_\-]', r'myadmin', r'phpinfo',
     r'wp-admin', r'wp-login', r'wordpress', r'wp-content',
     r'admin\.php', r'config\.php', r'install\.php', r'setup\.php',
     r'/etc/passwd', r'/proc/self', r'\.\./', r'%2e%2e',
-    r'xmlrpc', r'actuator', r'jenkins', r'console',
-    r'\.bak', r'\.swp', r'\.old', r'\.sql', r'\.tar', r'\.zip', r'\.rar',
-    r'shell', r'cmd=', r'passwd', r'shadow',
+    r'xmlrpc\.php', r'actuator', r'jenkins',
+    r'\.bak', r'\.swp', r'\.sql',
+    r'union\s+select', r'<script', r'eval\(', r'base64_decode',
     r'fckeditor', r'kindeditor', r'ueditor', r'ckeditor',
-    r'thinkphp', r'laravel', r'tp5', r'public/',
 ]
 
 # Nginx combined 格式正则
@@ -246,7 +247,11 @@ def _main(log_path, db_path):
             continue
 
         is_abnormal = stat['api_count'] >= API_THRESHOLD
-        is_high_risk = is_abnormal and stat['scan_count'] >= SCAN_PATH_THRESHOLD
+        # 404 比例异常高（超过 40% 且 404 次数 > 200）也是高风险
+        high_404_ratio = (stat['total_count'] >= MIN_404_FOR_RATIO and
+                          stat['status_404'] / stat['total_count'] >= HIGH_404_RATIO)
+        # 只有扫描特征多 OR 404 比例高才算 high，否则只是 medium
+        is_high_risk = (stat['scan_count'] >= SCAN_PATH_THRESHOLD) or high_404_ratio
 
         if is_abnormal:
             suspicious_ips.append({
@@ -307,23 +312,30 @@ def _main(log_path, db_path):
                 item['status_404'], item['risk_level'], item['last_seen'],
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'), item['ip']
             ])
-            # 如果之前是 medium 现在变 high，或者之前没通知过，加入待通知列表
-            if (row[1] != 'high' and item['risk_level'] == 'high') or row[2] == 0:
+            # 只有 high 级别才发通知，medium 只记录不打扰管理员
+            was_high = (row[1] == 'high')
+            is_high_now = (item['risk_level'] == 'high')
+            if is_high_now and (not was_high or row[2] == 0):
+                cursor.execute('UPDATE security_ips SET notified=1 WHERE ip=?', [item['ip']])
                 pending_notify_ips.append((item, row[3] or ''))  # (ip_data, existing_location)
         else:
             # 新异常 IP（先不查位置，快速写入）
+            # 只有 high 级别才发通知
+            is_high = (item['risk_level'] == 'high')
             cursor.execute('''
                 INSERT INTO security_ips
                     (ip, api_count, scan_count, total_count, status_404,
                      risk_level, location, last_seen, first_detected, updated_at, notified)
-                VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, 0)
+                VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
             ''', [
                 item['ip'], item['api_count'], item['scan_count'], item['total_count'],
                 item['status_404'], item['risk_level'], item['last_seen'],
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                1 if is_high else 0,  # 只有 high 才标记已通知
             ])
-            pending_notify_ips.append((item, ''))
+            if is_high:
+                pending_notify_ips.append((item, ''))
 
     # 清理不再异常的 IP（如果这次扫描里没出现，且最后出现时间超过 48 小时）
     if suspicious_ips:
