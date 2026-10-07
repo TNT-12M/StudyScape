@@ -75,6 +75,10 @@ export const phpMaterialsApi = {
   remove: id => phpAction('material_delete', { id }),
   token: id => phpAction('material_get_token', { id }),
   downloadUrl: token => `${import.meta.env.VITE_PHP_API_URL || '/api.php'}?action=material_download&token=${encodeURIComponent(token)}`,
+  categoryList: data => phpAction('material_category_list', data, { bypassCsrf: true }),
+  categoryAdd: data => phpAction('material_category_add', data),
+  categoryUpdate: data => phpAction('material_category_update', data),
+  categoryRemove: id => phpAction('material_category_delete', { id }),
 }
 
 export const phpOcrApi = {

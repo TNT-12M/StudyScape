@@ -47,9 +47,11 @@
 
 <script setup>
 import { computed, h, onMounted, reactive, ref } from 'vue'
+import { useSessionStore } from '@/store/modules/session'
 import { phpQuestionsApi } from '@/api/php-modules'
 import { sanitizeHtml, renderMathInHtml } from '@/views/user/components/question-utils'
 
+const session = useSessionStore()
 const questions = ref([])
 const subjects = ref([])
 const loading = ref(false)
@@ -143,6 +145,9 @@ function handlePageSizeChange(pageSize) {
 }
 
 onMounted(async () => {
+  if (session.defaultEducationLevel) {
+    filters.education_level = session.defaultEducationLevel
+  }
   await loadSubjects()
   await loadQuestions()
 })

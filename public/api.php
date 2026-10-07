@@ -1396,6 +1396,31 @@ try {
     $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_source_qid ON questions(source_qid)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_materials_education_level ON materials(education_level)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_materials_level_subject ON materials(education_level, subject)");
+
+    // ===== 资料分类 =====
+    $db->exec("CREATE TABLE IF NOT EXISTS material_categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        education_level TEXT NOT NULL DEFAULT 'junior',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    if (!tableHasColumn($db, 'materials', 'category_id')) {
+        $db->exec("ALTER TABLE materials ADD COLUMN category_id INTEGER DEFAULT NULL");
+    }
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_materials_category ON materials(category_id)");
+    // 默认分类
+    $catCount = (int)dbFetchOne($db, "SELECT COUNT(*) AS c FROM material_categories")['c'];
+    if ($catCount === 0) {
+        dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['试卷', 'junior', 1]);
+        dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['讲义', 'junior', 2]);
+        dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['练习题', 'junior', 3]);
+        dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['知识点总结', 'junior', 4]);
+        dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['试卷', 'senior', 1]);
+        dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['讲义', 'senior', 2]);
+        dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['练习题', 'senior', 3]);
+        dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['知识点总结', 'senior', 4]);
+    }
 } catch (Exception $e) {
     // ROLLBACK 自身可能因无活跃事务而抛异常（enableExceptions(true) 时 @ 无法抑制），用内部 try-catch 兜底，避免掩盖原始错误
     try { $db->exec('ROLLBACK'); } catch (Exception $rb) {}
@@ -2476,6 +2501,7 @@ $csrfBypass = [
     'notification_unread_count',
     // C：资料读接口
     'material_list',
+    'material_category_list',
     'material_download',      // GET 直链，无法带 CSRF，另有一次性 token 鉴权
     // 首页公开概览（未登录即可调用）
     'public_overview',
@@ -4920,21 +4946,27 @@ if ($action) {
             // ============== P2-C：资料下载 ======================
             // =====================================================
 
-            // ---------- 资料列表（登录即可；按 subject/keyword 过滤） ----------
+            // ---------- 资料列表（登录即可；按 subject/category/keyword 过滤） ----------
             case 'material_list':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
                 $subject = sanitizeInput($_POST['subject'] ?? $_GET['subject'] ?? '');
                 $keyword = sanitizeInput($_POST['keyword'] ?? $_GET['keyword'] ?? '');
                 $educationLevel = validateEducationLevel($_POST['education_level'] ?? $_GET['education_level'] ?? '', '');
+                $categoryId = isset($_POST['category_id']) ? (int)$_POST['category_id'] : (isset($_GET['category_id']) ? (int)$_GET['category_id'] : 0);
                 // 管理员在资料中心可选择"全部学段"查看所有资料（不再强制必须选具体学段）；
                 // 若需限制学段仅用于筛选，空值即代表跨学段浏览。
                 $where = ['1=1']; $args = [];
                 if ($educationLevel !== '') { $where[] = 'education_level=?'; $args[] = $educationLevel; }
                 if ($subject !== '') { $where[] = "subject=?"; $args[] = $subject; }
+                if ($categoryId > 0) { $where[] = 'category_id=?'; $args[] = $categoryId; }
                 if ($keyword !== '') { $where[] = "(filename LIKE ? OR description LIKE ?)"; $args[] = "%$keyword%"; $args[] = "%$keyword%"; }
                 $wSql = implode(' AND ', $where);
-                $rows = dbFetchAll($db, "SELECT id, filename, file_size, mime_type, subject, description, uploaded_at, updated_at, downloads, education_level FROM materials WHERE $wSql ORDER BY id DESC", $args);
+                $rows = dbFetchAll($db, "SELECT id, filename, file_size, mime_type, subject, description, uploaded_at, updated_at, downloads, education_level, category_id FROM materials WHERE $wSql ORDER BY id DESC", $args);
                 $subjects = dbFetchAll($db, "SELECT DISTINCT subject FROM materials WHERE subject IS NOT NULL AND subject <> '' ORDER BY subject ASC");
+                // 分类列表：如果选了学段就只返回该学段的分类
+                $catWhere = ''; $catArgs = [];
+                if ($educationLevel !== '') { $catWhere = 'WHERE education_level=?'; $catArgs[] = $educationLevel; }
+                $categories = dbFetchAll($db, "SELECT id, name, education_level, sort_order FROM material_categories {$catWhere} ORDER BY sort_order ASC, id ASC", $catArgs);
                 foreach ($rows as &$r) {
                     $r['file_size'] = (int)$r['file_size'];
                     $r['downloads'] = (int)$r['downloads'];
@@ -4945,6 +4977,7 @@ if ($action) {
                 jsonOut(true, "", [
                     'materials' => $rows,
                     'subjects' => array_column($subjects, 'subject'),
+                    'categories' => $categories,
                     'education_levels' => ['junior', 'senior'],
                     'can_upload' => isAdmin(),
                 ]);
@@ -4996,6 +5029,7 @@ if ($action) {
 
                 $subject = sanitizeInput($_POST['subject'] ?? '');
                 $desc    = sanitizeInput($_POST['description'] ?? '');
+                $categoryId = (int)($_POST['category_id'] ?? 0);
                 $rawEducationLevel = trim((string)($_POST['education_level'] ?? ''));
                 if ($rawEducationLevel === '') jsonOut(false, '请选择所属学段');
                 $educationLevel = validateEducationLevel($rawEducationLevel);
@@ -5014,8 +5048,8 @@ if ($action) {
                 @chmod($absPath, 0644);
 
                 dbQuery($db,
-                    "INSERT INTO materials(filename, stored_name, file_path, file_size, mime_type, subject, description, uploaded_by, education_level) VALUES(?,?,?,?,?,?,?,?,?)",
-                    [$origName, $stored, $relPath, (int)$f['size'], $mime, $subject, $desc, getUid(), $educationLevel]
+                    "INSERT INTO materials(filename, stored_name, file_path, file_size, mime_type, subject, description, uploaded_by, education_level, category_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    [$origName, $stored, $relPath, (int)$f['size'], $mime, $subject, $desc, getUid(), $educationLevel, $categoryId > 0 ? $categoryId : null]
                 );
                 $newId = (int)$db->lastInsertRowID();
                 jsonOut(true, "上传成功", ['material_id' => $newId, 'filename' => $origName, 'size' => (int)$f['size'], 'education_level' => $educationLevel]);
@@ -5030,11 +5064,12 @@ if ($action) {
                 $filename = trim((string)($_POST['filename'] ?? ''));
                 $subject = sanitizeInput($_POST['subject'] ?? '');
                 $desc = sanitizeInput($_POST['description'] ?? '');
+                $categoryId = (int)($_POST['category_id'] ?? 0);
                 $rawEducationLevel = trim((string)($_POST['education_level'] ?? ''));
                 if ($rawEducationLevel === '') jsonOut(false, '请选择所属学段');
                 $educationLevel = validateEducationLevel($rawEducationLevel);
                 if ($filename === '') jsonOut(false, '文件名不能为空');
-                dbQuery($db, 'UPDATE materials SET filename=?, subject=?, description=?, education_level=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$filename, $subject, $desc, $educationLevel, $id]);
+                dbQuery($db, 'UPDATE materials SET filename=?, subject=?, description=?, education_level=?, category_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$filename, $subject, $desc, $educationLevel, $categoryId > 0 ? $categoryId : null, $id]);
                 jsonOut(true, '资料信息已更新');
                 break;
 
@@ -5057,6 +5092,73 @@ if ($action) {
                     jsonOut(false, "删除失败：" . $e->getMessage());
                 }
                 jsonOut(true, "已删除");
+                break;
+
+            // ---------- 资料分类列表 ----------
+            case 'material_category_list':
+                if (!isLoggedIn()) jsonOut(false, "请先登录");
+                $educationLevel = validateEducationLevel($_POST['education_level'] ?? $_GET['education_level'] ?? '', '');
+                $where = []; $args = [];
+                if ($educationLevel !== '') { $where[] = 'education_level=?'; $args[] = $educationLevel; }
+                $wSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
+                $rows = dbFetchAll($db, "SELECT id, name, education_level, sort_order FROM material_categories {$wSql} ORDER BY sort_order ASC, id ASC", $args);
+                foreach ($rows as &$r) {
+                    $r['id'] = (int)$r['id'];
+                    $r['sort_order'] = (int)$r['sort_order'];
+                    // 每个分类下的资料数量
+                    $cnt = dbFetchOne($db, "SELECT COUNT(*) AS c FROM materials WHERE category_id=?", [$r['id']]);
+                    $r['material_count'] = (int)($cnt['c'] ?? 0);
+                }
+                unset($r);
+                jsonOut(true, "", ['categories' => $rows]);
+                break;
+
+            // ---------- 资料分类新增 ----------
+            case 'material_category_add':
+                if (!isLoggedIn()) jsonOut(false, "请先登录");
+                requireContentPermission('material_manage');
+                $name = trim((string)($_POST['name'] ?? ''));
+                $educationLevel = validateEducationLevel($_POST['education_level'] ?? 'junior');
+                $sortOrder = (int)($_POST['sort_order'] ?? 0);
+                if ($name === '') jsonOut(false, "分类名称不能为空");
+                // 同一学段内名称不能重复
+                $exist = dbFetchOne($db, "SELECT id FROM material_categories WHERE name=? AND education_level=?", [$name, $educationLevel]);
+                if ($exist) jsonOut(false, "该学段下已有同名分类");
+                dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", [$name, $educationLevel, $sortOrder]);
+                jsonOut(true, "分类已创建", ['id' => (int)$db->lastInsertRowID()]);
+                break;
+
+            // ---------- 资料分类编辑 ----------
+            case 'material_category_update':
+                if (!isLoggedIn()) jsonOut(false, "请先登录");
+                requireContentPermission('material_manage');
+                $id = (int)($_POST['id'] ?? 0);
+                $name = trim((string)($_POST['name'] ?? ''));
+                $sortOrder = (int)($_POST['sort_order'] ?? 0);
+                if ($id <= 0) jsonOut(false, "参数错误");
+                if ($name === '') jsonOut(false, "分类名称不能为空");
+                $cat = dbFetchOne($db, "SELECT * FROM material_categories WHERE id=?", [$id]);
+                if (!$cat) jsonOut(false, "分类不存在");
+                // 检查重名
+                $exist = dbFetchOne($db, "SELECT id FROM material_categories WHERE name=? AND education_level=? AND id<>?", [$name, $cat['education_level'], $id]);
+                if ($exist) jsonOut(false, "该学段下已有同名分类");
+                dbQuery($db, "UPDATE material_categories SET name=?, sort_order=? WHERE id=?", [$name, $sortOrder, $id]);
+                jsonOut(true, "分类已更新");
+                break;
+
+            // ---------- 资料分类删除 ----------
+            case 'material_category_delete':
+                if (!isLoggedIn()) jsonOut(false, "请先登录");
+                requireContentPermission('material_manage');
+                $id = (int)($_POST['id'] ?? 0);
+                if ($id <= 0) jsonOut(false, "参数错误");
+                $cat = dbFetchOne($db, "SELECT * FROM material_categories WHERE id=?", [$id]);
+                if (!$cat) jsonOut(false, "分类不存在");
+                // 有资料的分类不能删
+                $cnt = (int)dbFetchOne($db, "SELECT COUNT(*) AS c FROM materials WHERE category_id=?", [$id])['c'];
+                if ($cnt > 0) jsonOut(false, "该分类下还有 {$cnt} 份资料，无法删除");
+                dbQuery($db, "DELETE FROM material_categories WHERE id=?", [$id]);
+                jsonOut(true, "分类已删除");
                 break;
 
             // ---------- 申请下载 token（登录即可；一次性；5 分钟有效） ----------

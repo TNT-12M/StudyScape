@@ -3,9 +3,10 @@
     <n-card title="资料中心" :bordered="false" class="page-card">
       <template #header-extra><n-button secondary :loading="loading" @click="loadMaterials">刷新</n-button></template>
       <n-space wrap align="center" class="filters">
-        <n-select v-model:value="filters.education_level" clearable :options="levelOptions" placeholder="全部学段" style="width: 150px" @update:value="loadMaterials" />
-        <n-select v-model:value="filters.subject" clearable :options="subjectOptions" placeholder="全部分类" style="width: 180px" @update:value="loadMaterials" />
-        <n-input v-model:value="filters.keyword" clearable placeholder="搜索文件名或简介" style="width: 260px" @keyup.enter="loadMaterials">
+        <n-select v-model:value="filters.education_level" clearable :options="levelOptions" placeholder="全部学段" style="width: 130px" @update:value="onLevelChange" />
+        <n-select v-model:value="filters.category_id" clearable :options="categoryOptions" placeholder="全部分类" style="width: 140px" @update:value="loadMaterials" />
+        <n-select v-model:value="filters.subject" clearable :options="subjectOptions" placeholder="全部科目" style="width: 140px" @update:value="loadMaterials" />
+        <n-input v-model:value="filters.keyword" clearable placeholder="搜索文件名或简介" style="width: 240px" @keyup.enter="loadMaterials">
           <template #suffix><n-button text @click="loadMaterials">搜索</n-button></template>
         </n-input>
       </n-space>
@@ -21,6 +22,7 @@
               <div class="material-description">{{ material.description || '暂无简介' }}</div>
               <n-space size="small" wrap class="material-meta">
                 <n-tag v-if="material.education_level" size="small">{{ levelLabel(material.education_level) }}</n-tag>
+                <n-tag v-if="material.category_name" size="small" type="info">{{ material.category_name }}</n-tag>
                 <n-tag v-if="material.subject" size="small" type="success">{{ material.subject }}</n-tag>
                 <span>{{ formatSize(material.file_size) }}</span>
               </n-space>
@@ -39,25 +41,47 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useSessionStore } from '@/store/modules/session'
 import { phpMaterialsApi } from '@/api/php-modules'
 import { formatDate } from '@/views/user/components/question-utils'
 
-const filters = reactive({ education_level: null, subject: null, keyword: '' })
+const session = useSessionStore()
+const filters = reactive({ education_level: null, category_id: null, subject: null, keyword: '' })
 const materials = ref([])
 const subjects = ref([])
+const categories = ref([])
 const loading = ref(false)
 const downloading = ref(null)
 const error = ref('')
 const levelOptions = [{ label: '初中', value: 'junior' }, { label: '高中', value: 'senior' }]
 const subjectOptions = computed(() => subjects.value.map(subject => ({ label: subject, value: subject })))
+const categoryOptions = computed(() => categories.value.map(c => ({ label: c.name, value: c.id })))
+
+function onLevelChange() {
+  filters.category_id = null
+  loadMaterials()
+}
+
+onMounted(() => {
+  // 有默认学段时，自动过滤
+  if (session.defaultEducationLevel) {
+    filters.education_level = session.defaultEducationLevel
+  }
+  loadMaterials()
+})
 
 async function loadMaterials() {
   loading.value = true
   error.value = ''
   try {
     const result = await phpMaterialsApi.list(filters)
-    materials.value = result.data?.materials || []
-    subjects.value = result.data?.subjects || []
+    const data = result.data || {}
+    categories.value = data.categories || []
+    subjects.value = data.subjects || []
+    materials.value = (data.materials || []).map(m => {
+      const cat = categories.value.find(c => c.id === m.category_id)
+      return { ...m, category_name: cat?.name || '' }
+    })
   }
   catch (err) { error.value = err.message || '资料加载失败' }
   finally { loading.value = false }

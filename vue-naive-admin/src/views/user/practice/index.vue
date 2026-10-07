@@ -32,11 +32,13 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useSessionStore } from '@/store/modules/session'
 import { phpExamApi, phpPracticeApi } from '@/api/php-modules'
 import AttemptRunner from '@/views/user/components/AttemptRunner.vue'
 import ResultPanel from '@/views/user/components/ResultPanel.vue'
 import AttemptTable from '@/views/user/components/AttemptTable.vue'
 
+const session = useSessionStore()
 const view = ref('list')
 const tab = ref('config')
 const loading = ref(false)
@@ -155,7 +157,13 @@ async function saveGrades(grades) {
 
 function backToList() { view.value = 'list'; tab.value = 'history'; loadPage() }
 
-onMounted(loadPage)
+onMounted(async () => {
+  if (session.defaultEducationLevel) {
+    form.education_level = session.defaultEducationLevel
+    loadSubjects()
+  }
+  loadPage()
+})
 </script>
 
 <style scoped>

@@ -14,6 +14,13 @@ export const useSessionStore = defineStore('php-session', {
     isRoot: state => (state.user?.role || (state.user?.is_admin ? 'root' : 'user')) === 'root',
     isContentAdmin: state => ['root', 'content_admin'].includes(state.user?.role || (state.user?.is_admin ? 'root' : 'user')),
     isAdmin: state => ['root', 'content_admin'].includes(state.user?.role || (state.user?.is_admin ? 'root' : 'user')),
+    defaultEducationLevel: state => {
+      const grade = state.user?.grade
+      if (!grade) return null
+      if (['grade7', 'grade8', 'grade9'].includes(grade)) return 'junior'
+      if (['high1', 'high2', 'high3'].includes(grade)) return 'senior'
+      return null
+    },
     can: state => permission => {
       const role = state.user?.role || (state.user?.is_admin ? 'root' : 'user')
       if (role === 'root') return true

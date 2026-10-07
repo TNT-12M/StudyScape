@@ -179,6 +179,18 @@ const gradeOptions = [
   { label: '高三', value: 'high3' },
 ]
 
+// 根据年级推导学段
+function gradeToLevel(grade) {
+  if (!grade) return null
+  if (['grade7', 'grade8', 'grade9'].includes(grade)) return 'junior'
+  if (['high1', 'high2', 'high3'].includes(grade)) return 'senior'
+  return null
+}
+function gradeLabel(grade) {
+  const g = gradeOptions.find(o => o.value === grade)
+  return g?.label || grade
+}
+
 const isImageUrl = (value) => {
   const url = String(value || '').trim()
   if (!url) return true
@@ -232,6 +244,31 @@ watch(() => session.user, (user) => {
 async function save() {
   try {
     await formRef.value?.validate()
+    const oldGrade = session.user?.grade || null
+    const newGrade = form.grade || null
+    const gradeChanged = oldGrade !== newGrade
+
+    // 年级变化时弹确认框
+    if (gradeChanged && newGrade) {
+      const level = gradeToLevel(newGrade)
+      const levelText = level === 'junior' ? '初中' : level === 'senior' ? '高中' : ''
+      try {
+        await new Promise((resolve, reject) => {
+          $dialog.warning({
+            title: '确认设置年级',
+            content: `设置为${gradeLabel(newGrade)}后，系统将优先为您展示${levelText}阶段的题库和资料，确定继续吗？`,
+            positiveText: '确认设置',
+            negativeText: '再想想',
+            onPositiveClick: () => resolve(),
+            onNegativeClick: () => reject(new Error('cancel')),
+            onClose: () => reject(new Error('cancel')),
+          })
+        })
+      } catch (e) {
+        if (e.message === 'cancel') return
+      }
+    }
+
     saving.value = true
     await session.updateProfile({
       nickname: form.nickname.trim(),
@@ -245,7 +282,7 @@ async function save() {
       gender: session.user?.gender || 'secret',
       grade: session.user?.grade || null,
     })
-    $message.success('资料已保存')
+    $message.success(gradeChanged ? '年级已设置，内容已按学段过滤' : '资料已保存')
   }
   catch (error) {
     if (error?.errors) return
