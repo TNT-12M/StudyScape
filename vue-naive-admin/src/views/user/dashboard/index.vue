@@ -28,20 +28,27 @@
         </n-card>
       </n-gi>
       <n-gi span="2 l:1">
-        <n-card title="最近发布的试卷" segmented>
-          <n-list v-if="overview.published_papers?.length">
-            <n-list-item v-for="paper in overview.published_papers" :key="paper.id">
-              <div>
-                <b>{{ paper.name }}</b>
-                <div class="muted">{{ paper.question_count }} 题 · {{ paper.duration_minutes }} 分钟</div>
-              </div>
-              <n-button size="small" @click="router.push('/app/papers')">查看</n-button>
-            </n-list-item>
-          </n-list>
-          <n-empty v-else description="暂无已发布试卷" />
+        <n-card title="资料分布" segmented>
+          <div v-if="materialData.length" class="chart-wrap">
+            <v-chart class="subject-chart" :option="materialOption" autoresize />
+          </div>
+          <n-empty v-else description="暂无资料数据" />
         </n-card>
       </n-gi>
     </n-grid>
+
+    <n-card class="mt-16" title="最近发布的试卷" segmented>
+      <n-list v-if="overview.published_papers?.length">
+        <n-list-item v-for="paper in overview.published_papers" :key="paper.id">
+          <div>
+            <b>{{ paper.name }}</b>
+            <div class="muted">{{ paper.question_count }} 题 · {{ paper.duration_minutes }} 分钟</div>
+          </div>
+          <n-button size="small" @click="router.push('/app/papers')">查看</n-button>
+        </n-list-item>
+      </n-list>
+      <n-empty v-else description="暂无已发布试卷" />
+    </n-card>
   </AppPage>
 </template>
 
@@ -61,7 +68,7 @@ use([CanvasRenderer, PieChart, TitleComponent, TooltipComponent, LegendComponent
 const router = useRouter()
 const session = useSessionStore()
 
-const overview = reactive({ stats: {}, subjects: [], by_subject: [], published_papers: [] })
+const overview = reactive({ stats: {}, subjects: [], by_subject: [], published_papers: [], materials: [] })
 
 const stats = computed(() => [
   { label: '题库题目', value: overview.stats.question_count || 0 },
@@ -80,6 +87,57 @@ const subjectData = computed(() => {
   }
   return []
 })
+
+const materialData = computed(() => {
+  const list = overview.materials || []
+  if (Array.isArray(list) && list.length) {
+    return list.map(item => ({
+      name: item.subject ?? item.name ?? '未分类',
+      value: Number(item.count ?? item.total ?? item.value) || 0,
+    })).filter(item => item.value > 0)
+  }
+  return []
+})
+
+const materialOption = computed(() => ({
+  tooltip: {
+    trigger: 'item',
+    backgroundColor: 'rgba(23, 23, 23, 0.92)',
+    borderWidth: 0,
+    textStyle: { color: '#fff', fontSize: 12 },
+    padding: [10, 14],
+    formatter: '{b}: {c} 份 ({d}%)',
+  },
+  legend: {
+    type: 'scroll',
+    orient: 'vertical',
+    right: 10,
+    top: 'center',
+    textStyle: { color: 'var(--n-text-color-2)', fontSize: 12 },
+    itemWidth: 10,
+    itemHeight: 10,
+    itemGap: 10,
+  },
+  color: ['#27D2BF', '#FF7A45', '#3C2ECA', '#F6A623', '#6C5CE7', '#E8463A', '#1DC981', '#9B59B6', '#3498DB', '#E67E22'],
+  series: [{
+    type: 'pie',
+    radius: ['55%', '78%'],
+    center: ['35%', '50%'],
+    avoidLabelOverlap: true,
+    itemStyle: {
+      borderRadius: 4,
+      borderColor: 'var(--n-color)',
+      borderWidth: 2,
+    },
+    label: { show: false },
+    emphasis: {
+      label: { show: true, fontSize: 14, fontWeight: 600 },
+      itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0, 0, 0, 0.2)' },
+    },
+    labelLine: { show: false },
+    data: materialData.value,
+  }],
+}))
 
 const subjectOption = computed(() => ({
   tooltip: {
