@@ -72,7 +72,7 @@ function togglePublish(row) {
 function removePaper(row) {
   dialog.warning({
     title: '删除试卷',
-    content: '删除试卷及其题目关联，确定继续吗？',
+    content: '删除后试卷、关联题目及所有学生作答记录将一并清除，确定继续吗？',
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {

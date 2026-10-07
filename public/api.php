@@ -4575,10 +4575,15 @@ if ($action) {
                 $pid = (int)($_POST['paper_id'] ?? 0);
                 if ($pid <= 0) jsonOut(false, "试卷ID无效");
                 if (!dbFetchOne($db, "SELECT id FROM papers WHERE id=?", [$pid])) jsonOut(false, "试卷不存在，请刷新后重试");
-                $cnt = (int)dbFetchOne($db, "SELECT COUNT(*) AS c FROM exam_attempts WHERE paper_id=?", [$pid])['c'];
-                if ($cnt > 0) jsonOut(false, "已有学生作答记录，仅允许下架，不允许删除");
                 try {
                     $db->exec('BEGIN');
+                    // 删除学生作答记录（含答案明细）
+                    $attemptIds = array_column(dbFetchAll($db, "SELECT id FROM exam_attempts WHERE paper_id=?", [$pid]), 'id');
+                    if (!empty($attemptIds)) {
+                        $idsPlaceholders = implode(',', array_fill(0, count($attemptIds), '?'));
+                        dbQuery($db, "DELETE FROM exam_answers WHERE attempt_id IN ($idsPlaceholders)", $attemptIds);
+                        dbQuery($db, "DELETE FROM exam_attempts WHERE paper_id=?", [$pid]);
+                    }
                     dbQuery($db, "DELETE FROM paper_questions WHERE paper_id=?", [$pid]);
                     dbQuery($db, "DELETE FROM papers WHERE id=?", [$pid]);
                     $db->exec('COMMIT');
