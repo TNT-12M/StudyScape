@@ -88,7 +88,15 @@
       </n-card>
 
       <n-card title="资料列表" segmented>
-        <n-data-table :columns="columns" :data="materials" :loading="loading" :scroll-x="1100" :pagination="pagination" />
+        <n-data-table
+          :columns="columns"
+          :data="materials"
+          :loading="loading"
+          :scroll-x="1100"
+          :pagination="pagination"
+          @update:page="onPageChange"
+          @update:page-size="onPageSizeChange"
+        />
       </n-card>
     </n-space>
 
@@ -157,7 +165,7 @@ const dialog = window.$dialog
 const materials = ref([])
 const subjects = ref([])
 const categories = ref([])
-const pagination = reactive({ page: 1, pageSize: 10, showSizePicker: true, pageSizes: [10, 20, 50] })
+const pagination = reactive({ page: 1, pageSize: 10, itemCount: 0, showSizePicker: true, pageSizes: [10, 20, 50] })
 const loading = ref(false)
 const uploading = ref(false)
 const showUpload = ref(false)
@@ -249,6 +257,19 @@ const catColumns = [
 function onLevelChange() {
   loadCategories()
   filters.category_id = null
+  pagination.page = 1
+  loadMaterials()
+}
+
+function onPageChange(page) {
+  pagination.page = page
+  loadMaterials()
+}
+
+function onPageSizeChange(pageSize) {
+  pagination.pageSize = pageSize
+  pagination.page = 1
+  loadMaterials()
 }
 
 function handleBeforeUpload({ file }) {
@@ -350,7 +371,11 @@ async function startBatchUpload() {
 async function loadMaterials() {
   loading.value = true
   try {
-    const result = await phpMaterialsApi.list(filters)
+    const result = await phpMaterialsApi.list({
+      ...filters,
+      page: pagination.page,
+      page_size: pagination.pageSize,
+    })
     const data = result.data || {}
     materials.value = (data.materials || []).map(m => {
       const cat = categories.value.find(c => c.id === m.category_id)
@@ -358,6 +383,7 @@ async function loadMaterials() {
     })
     subjects.value = data.subjects || []
     if (!categories.value.length) categories.value = data.categories || []
+    if (typeof data.total === 'number') pagination.itemCount = data.total
   } catch (error) { message.error(error.message) }
   finally { loading.value = false }
 }

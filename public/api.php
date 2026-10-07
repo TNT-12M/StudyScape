@@ -4953,6 +4953,9 @@ if ($action) {
                 $keyword = sanitizeInput($_POST['keyword'] ?? $_GET['keyword'] ?? '');
                 $educationLevel = validateEducationLevel($_POST['education_level'] ?? $_GET['education_level'] ?? '', '');
                 $categoryId = isset($_POST['category_id']) ? (int)$_POST['category_id'] : (isset($_GET['category_id']) ? (int)$_GET['category_id'] : 0);
+                $page = max(1, (int)($_POST['page'] ?? $_GET['page'] ?? 1));
+                $pageSize = (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 0);
+                if ($pageSize <= 0) $pageSize = 0; // 0 表示不分页
                 // 管理员在资料中心可选择"全部学段"查看所有资料（不再强制必须选具体学段）；
                 // 若需限制学段仅用于筛选，空值即代表跨学段浏览。
                 $where = ['1=1']; $args = [];
@@ -4961,7 +4964,19 @@ if ($action) {
                 if ($categoryId > 0) { $where[] = 'category_id=?'; $args[] = $categoryId; }
                 if ($keyword !== '') { $where[] = "(filename LIKE ? OR description LIKE ?)"; $args[] = "%$keyword%"; $args[] = "%$keyword%"; }
                 $wSql = implode(' AND ', $where);
-                $rows = dbFetchAll($db, "SELECT id, filename, file_size, mime_type, subject, description, uploaded_at, updated_at, downloads, education_level, category_id FROM materials WHERE $wSql ORDER BY id DESC", $args);
+
+                // 总数
+                $totalRow = dbFetchOne($db, "SELECT COUNT(*) AS c FROM materials WHERE $wSql", $args);
+                $total = (int)($totalRow['c'] ?? 0);
+
+                $limitSql = ''; $limitArgs = [];
+                if ($pageSize > 0) {
+                    $offset = ($page - 1) * $pageSize;
+                    $limitSql = " LIMIT ? OFFSET ?";
+                    $limitArgs = [$pageSize, $offset];
+                }
+
+                $rows = dbFetchAll($db, "SELECT id, filename, file_size, mime_type, subject, description, uploaded_at, updated_at, downloads, education_level, category_id FROM materials WHERE $wSql ORDER BY id DESC{$limitSql}", array_merge($args, $limitArgs));
                 $subjects = dbFetchAll($db, "SELECT DISTINCT subject FROM materials WHERE subject IS NOT NULL AND subject <> '' ORDER BY subject ASC");
                 // 分类列表：如果选了学段就只返回该学段的分类
                 $catWhere = ''; $catArgs = [];
@@ -4979,6 +4994,9 @@ if ($action) {
                     'categories' => $categories,
                     'education_levels' => ['junior', 'senior'],
                     'can_upload' => isAdmin(),
+                    'total' => $total,
+                    'page' => $page,
+                    'page_size' => $pageSize > 0 ? $pageSize : $total,
                 ]);
                 break;
 
