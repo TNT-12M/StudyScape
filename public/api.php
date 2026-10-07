@@ -3438,6 +3438,12 @@ if ($action) {
                 foreach ($byTypeRows as $r) {
                     $by_type[] = ['type' => $r['question_type'], 'label' => $typeLabels[$r['question_type']] ?? $r['question_type'], 'count' => (int)$r['c']];
                 }
+                // 资料分布（科目维度）
+                $matSubjRows = dbFetchAll($db, 'SELECT subject, COUNT(*) AS c FROM materials GROUP BY subject ORDER BY c DESC LIMIT 8');
+                $material_by_subject = [];
+                foreach ($matSubjRows as $r) {
+                    $material_by_subject[] = ['subject' => $r['subject'] ?: '未分类', 'count' => (int)$r['c']];
+                }
                 if (isRoot()) {
                     for ($i = 6; $i >= 0; $i--) {
                         $date = $today->modify('-' . $i . ' days')->format('Y-m-d');
@@ -3450,7 +3456,7 @@ if ($action) {
                     $open = dbFetchOne($db, "SELECT COUNT(*) AS c FROM user_feedback WHERE status IN ('open','processing')");
                     $metrics['feedback_open_count'] = (int)($open['c'] ?? 0);
                 }
-                jsonOut(true, '', array_merge($metrics, ['timezone' => 'Asia/Shanghai', 'today' => ['date' => $today->format('Y-m-d'), 'uv' => $todayUv], 'summary' => ['uv_7d' => $uv7d, 'average_uv' => round($uv7d / 7, 2), 'peak_uv' => (int)$peak['uv'], 'peak_date' => $peak['date']], 'trend' => $trend, 'by_subject' => $by_subject, 'by_type' => $by_type]));
+                jsonOut(true, '', array_merge($metrics, ['timezone' => 'Asia/Shanghai', 'today' => ['date' => $today->format('Y-m-d'), 'uv' => $todayUv], 'summary' => ['uv_7d' => $uv7d, 'average_uv' => round($uv7d / 7, 2), 'peak_uv' => (int)$peak['uv'], 'peak_date' => $peak['date']], 'trend' => $trend, 'by_subject' => $by_subject, 'by_type' => $by_type, 'material_by_subject' => $material_by_subject]));
                 break;
 
             // ==================== 安全监控 ====================

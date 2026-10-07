@@ -34,9 +34,9 @@
         </div>
       </n-card>
 
-      <!-- 下方双栏：题库分布 + 快捷入口 -->
-      <n-grid :cols="3" :x-gap="16" responsive="screen" item-responsive>
-        <n-gi span="3 m:2">
+      <!-- 题库分布 + 资料分布 -->
+      <n-grid :cols="2" :x-gap="16" responsive="screen" item-responsive>
+        <n-gi span="2 m:1">
           <n-card title="题库构成" segmented>
             <div class="chart-wrap chart-wrap--sm">
               <v-chart v-if="subjectData.length" class="subject-chart" :option="subjectOption" autoresize />
@@ -44,24 +44,32 @@
             </div>
           </n-card>
         </n-gi>
-        <n-gi span="3 m:1">
-          <n-card title="后台功能" segmented>
-            <div class="shortcut-grid">
-              <div
-                v-for="item in shortcuts"
-                :key="item.path"
-                class="shortcut-item"
-                @click="router.push(item.path)"
-              >
-                <div class="shortcut-icon" :style="{ color: item.color, background: item.color + '18' }">
-                  <span v-html="item.icon" />
-                </div>
-                <span class="shortcut-label">{{ item.label }}</span>
-              </div>
+        <n-gi span="2 m:1">
+          <n-card title="资料构成" segmented>
+            <div class="chart-wrap chart-wrap--sm">
+              <v-chart v-if="materialSubjectData.length" class="subject-chart" :option="materialSubjectOption" autoresize />
+              <n-skeleton v-else-if="loading" text :round="false" />
             </div>
           </n-card>
         </n-gi>
       </n-grid>
+
+      <!-- 快捷入口 -->
+      <n-card title="后台功能" segmented>
+        <div class="shortcut-grid">
+          <div
+            v-for="item in shortcuts"
+            :key="item.path"
+            class="shortcut-item"
+            @click="router.push(item.path)"
+          >
+            <div class="shortcut-icon" :style="{ color: item.color, background: item.color + '18' }">
+              <span v-html="item.icon" />
+            </div>
+            <span class="shortcut-label">{{ item.label }}</span>
+          </div>
+        </div>
+      </n-card>
 
       <!-- 安全监控：异常 IP -->
       <n-card v-if="session.isRoot" title="安全监控 · 异常请求 IP" segmented>
@@ -312,6 +320,60 @@ const subjectOption = computed(() => ({
     },
     labelLine: { show: false },
     data: subjectData.value,
+  }],
+}))
+
+// 资料分布数据
+const materialSubjectData = computed(() => {
+  const list = statistics.value.material_by_subject ?? []
+  if (Array.isArray(list) && list.length) {
+    return list.map(item => ({
+      name: item.subject ?? item.name ?? '未分类',
+      value: numberValue(item.count ?? item.total ?? item.value),
+    }))
+  }
+  const total = numberValue(statistics.value.material_count)
+  if (total > 0) return [{ name: '资料总数', value: total }]
+  return []
+})
+
+const materialSubjectOption = computed(() => ({
+  tooltip: {
+    trigger: 'item',
+    backgroundColor: 'rgba(23, 23, 23, 0.92)',
+    borderWidth: 0,
+    textStyle: { color: '#fff', fontSize: 12 },
+    padding: [10, 14],
+    formatter: '{b}: {c} 份 ({d}%)',
+  },
+  legend: {
+    type: 'scroll',
+    orient: 'vertical',
+    right: 10,
+    top: 'center',
+    textStyle: { color: 'var(--n-text-color-2)', fontSize: 12 },
+    itemWidth: 10,
+    itemHeight: 10,
+    itemGap: 10,
+  },
+  color: ['#27D2BF', '#FF7A45', '#3C2ECA', '#F6A623', '#6C5CE7', '#E8463A', '#1DC981', '#9B59B6'],
+  series: [{
+    type: 'pie',
+    radius: ['55%', '78%'],
+    center: ['35%', '50%'],
+    avoidLabelOverlap: true,
+    itemStyle: {
+      borderRadius: 4,
+      borderColor: 'var(--n-color)',
+      borderWidth: 2,
+    },
+    label: { show: false },
+    emphasis: {
+      label: { show: true, fontSize: 14, fontWeight: 600 },
+      itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0, 0, 0, 0.2)' },
+    },
+    labelLine: { show: false },
+    data: materialSubjectData.value,
   }],
 }))
 
