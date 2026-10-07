@@ -43,7 +43,7 @@
                   <n-select v-model:value="batchForm.education_level" :options="levelOptions" style="width: 120px" @update:value="applyBatchEducation" />
                 </n-form-item>
                 <n-form-item label="统一分类" label-placement="left" style="margin-bottom: 0">
-                  <n-select v-model:value="batchForm.category_id" :options="categoryOptions.filter(c => c.value)" clearable placeholder="可选" style="width: 130px" @update:value="applyBatchCategory" />
+                  <n-select v-model:value="batchForm.category_id" :options="batchCategoryOptions" clearable placeholder="可选" style="width: 130px" @update:value="applyBatchCategory" />
                 </n-form-item>
                 <n-form-item label="统一科目" label-placement="left" style="margin-bottom: 0">
                   <n-input v-model:value="batchForm.subject" placeholder="可选" style="width: 130px" @update:value="applyBatchSubject" />
@@ -128,7 +128,7 @@
         </n-space>
         <n-data-table
           :columns="catColumns"
-          :data="categories"
+          :data="filteredCatList"
           :loading="catLoading"
           :bordered="false"
           size="small"
@@ -196,11 +196,32 @@ let uidCounter = 0
 const canUpload = computed(() => fileItems.value.length > 0 && !uploading.value && fileItems.value.every(it => it.education_level))
 
 const subjectOptions = computed(() => subjects.value.map(item => ({ label: item, value: item })))
-const categoryOptions = computed(() => [
-  { label: '全部分类', value: null },
-  ...categories.value.map(c => ({ label: c.name, value: c.id })),
-])
-const editCategoryOptions = computed(() => categories.value.map(c => ({ label: c.name, value: c.id })))
+const categoryOptions = computed(() => {
+  const level = filters.education_level
+  const list = categories.value.filter(c => !level || c.education_level === level)
+  return [
+    { label: '全部分类', value: null },
+    ...list.map(c => ({ label: c.name, value: c.id })),
+  ]
+})
+// 分类管理弹窗按学段过滤后的列表
+const filteredCatList = computed(() => {
+  if (!catFilterLevel.value) return categories.value
+  return categories.value.filter(c => c.education_level === catFilterLevel.value)
+})
+const editCategoryOptions = computed(() => {
+  const level = editForm.education_level
+  return categories.value
+    .filter(c => !level || c.education_level === level)
+    .map(c => ({ label: c.name, value: c.id }))
+})
+
+const batchCategoryOptions = computed(() => {
+  const level = batchForm.education_level
+  return categories.value
+    .filter(c => !level || c.education_level === level)
+    .map(c => ({ label: c.name, value: c.id }))
+})
 
 function getItemCategoryOptions(item) {
   const level = item.education_level
@@ -390,8 +411,9 @@ async function loadMaterials() {
 
 async function loadCategories() {
   try {
-    const level = filters.education_level || catFilterLevel.value || ''
-    const result = await phpMaterialsApi.categoryList({ education_level: level })
+    // 始终加载全部分类，确保资料列表中所有学段的分类名都能正确显示
+    // 各下拉选项和分类管理表格按各自需求在前端过滤
+    const result = await phpMaterialsApi.categoryList({ education_level: '' })
     categories.value = result.data?.categories || []
     // 更新资料列表的分类名
     materials.value = materials.value.map(m => {
@@ -425,10 +447,6 @@ function openEdit(row) {
     category_id: row.category_id || null,
     subject: row.subject || '',
     description: row.description || '',
-  })
-  // 加载对应学段的分类
-  phpMaterialsApi.categoryList({ education_level: row.education_level }).then(res => {
-    categories.value = res.data?.categories || []
   })
   showEditor.value = true
 }
