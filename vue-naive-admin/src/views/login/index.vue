@@ -89,16 +89,36 @@ async function login() {
     const target = redirect || (user.is_admin ? '/admin' : '/app')
     // 确保 DOM 更新后再跳转，避免路由守卫读取到旧状态
     await nextTick()
-    await router.replace(target)
-    // 兜底：如果跳转后路径仍然不对（极端竞态），强制再推一次
-    if (router.currentRoute.value.path !== target && !router.currentRoute.value.path.startsWith(target)) {
-      await router.push(target)
+    // 多级兜底：replace → push → setTimeout 硬跳转，确保一定能跳过去
+    try {
+      await router.replace(target)
+    } catch (e) {
+      console.warn('[登录] replace 失败，尝试 push:', e)
     }
+    if (!isOnTarget(target)) {
+      try {
+        await router.push(target)
+      } catch (e) {
+        console.warn('[登录] push 失败:', e)
+      }
+    }
+    // 最终兜底：如果 300ms 后还在登录页，强制 location 跳转
+    setTimeout(() => {
+      if (!isOnTarget(target)) {
+        console.warn('[登录] 路由跳转失败，强制 location 跳转到', target)
+        window.location.href = target
+      }
+    }, 300)
   }
   catch (error) {
     $message.error(error.message || '登录失败')
   }
   finally { loading.value = false }
+}
+
+function isOnTarget(target) {
+  const path = router.currentRoute.value.path
+  return path === target || path.startsWith(target + '/') || (target === '/admin' && path === '/admin')
 }
 
 function goForgot() { mode.value = 'forgot' }

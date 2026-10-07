@@ -24,8 +24,11 @@
         <RouterLink to="/app/feedback" active-class="is-active">
           <span class="nav-icon">💬</span><span class="nav-text">开发者反馈</span>
         </RouterLink>
+        <RouterLink v-if="session.isAdmin" to="/admin" class="nav-admin-link" active-class="is-active">
+          <span class="nav-icon">⚙️</span><span class="nav-text">管理后台</span>
+        </RouterLink>
       </nav>
-      <RouterLink v-if="session.isAdmin" class="back-admin" to="/admin">
+      <RouterLink v-if="session.isAdmin" class="back-admin hide-mobile" to="/admin">
         <span class="nav-icon">⚙️</span><span class="nav-text">进入管理后台</span>
       </RouterLink>
     </aside>
@@ -237,8 +240,9 @@ async function logout() {
     border-radius: 20px;
   }
   .back-admin {
-    display: none; /* 移动端在菜单里显示管理入口没有必要，隐藏 */
+    display: none; /* 移动端侧边栏隐藏 */
   }
+  .hide-mobile { display: none; }
   .user-header {
     padding: 0 14px;
     height: 52px;
