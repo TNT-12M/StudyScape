@@ -1,7 +1,12 @@
 <template>
   <AppPage show-footer>
     <n-card title="资料中心" :bordered="false" class="page-card">
-      <template #header-extra><n-button secondary :loading="loading" @click="loadMaterials">刷新</n-button></template>
+      <template #header-extra>
+        <n-space>
+          <n-button text @click="goRequest">我想要的资料</n-button>
+          <n-button secondary :loading="loading" @click="loadMaterials">刷新</n-button>
+        </n-space>
+      </template>
       <n-space wrap align="center" class="filters">
         <n-select v-model:value="filters.education_level" clearable :options="levelOptions" placeholder="全部学段" style="width: 130px" @update:value="onLevelChange" />
         <n-select v-model:value="filters.category_id" clearable :options="categoryOptions" placeholder="全部分类" style="width: 140px" @update:value="loadMaterials" />
@@ -41,11 +46,13 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/store/modules/session'
 import { phpMaterialsApi } from '@/api/php-modules'
 import { formatDate } from '@/views/user/components/question-utils'
 
 const session = useSessionStore()
+const router = useRouter()
 const filters = reactive({ education_level: null, category_id: null, subject: null, keyword: '' })
 const materials = ref([])
 const subjects = ref([])
@@ -60,6 +67,10 @@ const categoryOptions = computed(() => categories.value.map(c => ({ label: c.nam
 function onLevelChange() {
   filters.category_id = null
   loadMaterials()
+}
+
+function goRequest() {
+  router.push('/user/material-requests')
 }
 
 onMounted(() => {

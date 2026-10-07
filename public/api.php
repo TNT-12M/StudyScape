@@ -1421,6 +1421,24 @@ try {
         dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['练习题', 'senior', 3]);
         dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", ['知识点总结', 'senior', 4]);
     }
+    // 资料需求反馈表
+    $db->exec("CREATE TABLE IF NOT EXISTS material_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL,
+        education_level TEXT DEFAULT '',
+        subject TEXT DEFAULT '',
+        contact TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        admin_note TEXT,
+        handled_by INTEGER,
+        handled_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_material_requests_status ON material_requests(status, created_at DESC)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_material_requests_user ON material_requests(user_id, created_at DESC)");
 } catch (Exception $e) {
     // ROLLBACK 自身可能因无活跃事务而抛异常（enableExceptions(true) 时 @ 无法抑制），用内部 try-catch 兜底，避免掩盖原始错误
     try { $db->exec('ROLLBACK'); } catch (Exception $rb) {}
@@ -2502,6 +2520,8 @@ $csrfBypass = [
     // C：资料读接口
     'material_list',
     'material_category_list',
+    'material_request_submit',
+    'material_request_list_mine',
     'material_download',      // GET 直链，无法带 CSRF，另有一次性 token 鉴权
     // 首页公开概览（未登录即可调用）
     'public_overview',
@@ -5176,6 +5196,141 @@ if ($action) {
                 if ($cnt > 0) jsonOut(false, "该分类下还有 {$cnt} 份资料，无法删除");
                 dbQuery($db, "DELETE FROM material_categories WHERE id=?", [$id]);
                 jsonOut(true, "分类已删除");
+                break;
+
+            // ---------- 资料需求反馈：用户提交 ----------
+            case 'material_request_submit':
+                if (!isLoggedIn()) jsonOut(false, "请先登录");
+                $uid = (int)getUid();
+                $title = trim(strip_tags((string)($_POST['title'] ?? '')));
+                $content = trim(strip_tags((string)($_POST['content'] ?? '')));
+                $educationLevel = validateEducationLevel($_POST['education_level'] ?? '', '');
+                $subject = trim(strip_tags((string)($_POST['subject'] ?? '')));
+                $contact = trim(strip_tags((string)($_POST['contact'] ?? '')));
+                if ($content === '' || mb_strlen($content, 'UTF-8') < 2) jsonOut(false, '需求描述至少 2 个字符');
+                if (mb_strlen($content, 'UTF-8') > 500) jsonOut(false, '需求描述不能超过 500 个字符');
+                if (mb_strlen($title, 'UTF-8') > 50) jsonOut(false, '标题不能超过 50 个字符');
+                if (mb_strlen($subject, 'UTF-8') > 30) jsonOut(false, '科目不能超过 30 个字符');
+                if (mb_strlen($contact, 'UTF-8') > 50) jsonOut(false, '联系方式不能超过 50 个字符');
+                if (preg_match('/[\x00-\x1F\x7F]/u', $content)) jsonOut(false, '内容包含非法字符');
+                $user = currentUser();
+                [$dayStart, $dayEnd] = chinaTodayUtcBounds();
+                try {
+                    $db->exec('BEGIN IMMEDIATE');
+                    if (!$user || !in_array($user['role'], ['root', 'content_admin'], true)) {
+                        $count = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM material_requests WHERE user_id=? AND created_at>=? AND created_at<?', [$uid, $dayStart, $dayEnd])['c'] ?? 0);
+                        if ($count >= 5) {
+                            $db->exec('ROLLBACK');
+                            jsonOut(false, '每位用户每天最多提交 5 条资料需求，请明天再试');
+                        }
+                    }
+                    dbQuery($db,
+                        'INSERT INTO material_requests(user_id, title, content, education_level, subject, contact) VALUES(?,?,?,?,?,?)',
+                        [$uid, $title, $content, $educationLevel, $subject, $contact]
+                    );
+                    $newId = (int)$db->lastInsertRowID();
+                    $db->exec('COMMIT');
+                } catch (Throwable $e) {
+                    try { $db->exec('ROLLBACK'); } catch (Throwable $ignored) {}
+                    jsonOut(false, '提交失败：' . $e->getMessage());
+                }
+                jsonOut(true, '需求已提交，我们会尽快处理', ['id' => $newId]);
+                break;
+
+            // ---------- 资料需求反馈：我的列表 ----------
+            case 'material_request_list_mine':
+                if (!isLoggedIn()) jsonOut(false, "请先登录");
+                $uid = (int)getUid();
+                $page = max(1, (int)($_POST['page'] ?? $_GET['page'] ?? 1));
+                $size = max(1, min(50, (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 20)));
+                $total = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM material_requests WHERE user_id=?', [$uid])['c'] ?? 0);
+                $items = dbFetchAll($db,
+                    'SELECT id, title, content, education_level, subject, contact, status, admin_note, handled_at, created_at, updated_at FROM material_requests WHERE user_id=? ORDER BY id DESC LIMIT ? OFFSET ?',
+                    [$uid, $size, ($page - 1) * $size]
+                );
+                foreach ($items as &$item) {
+                    foreach (['created_at', 'updated_at', 'handled_at'] as $field) if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]);
+                }
+                unset($item);
+                jsonOut(true, '', ['items' => $items, 'pagination' => ['page' => $page, 'page_size' => $size, 'total' => $total]]);
+                break;
+
+            // ---------- 资料需求反馈：管理员列表 ----------
+            case 'admin_material_request_list':
+                $adminUid = requireContentPermission('material_manage');
+                $page = max(1, (int)($_POST['page'] ?? 1));
+                $size = max(1, min(100, (int)($_POST['page_size'] ?? 20)));
+                $status = trim((string)($_POST['status'] ?? ''));
+                $keyword = trim((string)($_POST['keyword'] ?? ''));
+                $educationLevel = validateEducationLevel($_POST['education_level'] ?? '', '');
+                $where = ['1=1']; $args = [];
+                if (in_array($status, ['pending', 'processing', 'fulfilled', 'rejected'], true)) { $where[] = 'r.status=?'; $args[] = $status; }
+                if ($educationLevel !== '') { $where[] = 'r.education_level=?'; $args[] = $educationLevel; }
+                if ($keyword !== '') {
+                    $where[] = '(r.title LIKE ? OR r.content LIKE ? OR r.subject LIKE ? OR u.username LIKE ?)';
+                    $like = '%' . $keyword . '%';
+                    array_push($args, $like, $like, $like, $like);
+                }
+                $whereSql = implode(' AND ', $where);
+                $total = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM material_requests r JOIN users u ON u.id=r.user_id WHERE $whereSql", $args)['c'] ?? 0);
+                $items = dbFetchAll($db,
+                    "SELECT r.id, r.user_id, u.username, r.title, r.content, r.education_level, r.subject, r.contact, r.status, r.admin_note, r.handled_by, r.handled_at, r.created_at, r.updated_at
+                     FROM material_requests r LEFT JOIN users u ON u.id=r.user_id
+                     WHERE $whereSql ORDER BY r.id DESC LIMIT ? OFFSET ?",
+                    array_merge($args, [$size, ($page - 1) * $size])
+                );
+                foreach ($items as &$item) {
+                    foreach (['created_at', 'updated_at', 'handled_at'] as $field) if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]);
+                }
+                unset($item);
+                log_admin_action('list_material_requests', $adminUid);
+                jsonOut(true, '', ['items' => $items, 'pagination' => ['page' => $page, 'page_size' => $size, 'total' => $total]]);
+                break;
+
+            // ---------- 资料需求反馈：管理员处理 ----------
+            case 'admin_material_request_update':
+                $adminUid = requireContentPermission('material_manage');
+                $id = (int)($_POST['id'] ?? 0);
+                $action = trim((string)($_POST['request_action'] ?? ''));
+                $note = trim(strip_tags((string)($_POST['admin_note'] ?? '')));
+                if ($id <= 0 || mb_strlen($note, 'UTF-8') > 500) jsonOut(false, '参数无效或备注过长');
+                $req = dbFetchOne($db, 'SELECT id, status FROM material_requests WHERE id=?', [$id]);
+                if (!$req) jsonOut(false, '需求不存在');
+                $status = $req['status'];
+                switch ($action) {
+                    case 'fulfill':
+                        $status = 'fulfilled';
+                        dbQuery($db,
+                            'UPDATE material_requests SET status=?, admin_note=?, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+                            [$status, $note, $adminUid, $id]
+                        );
+                        break;
+                    case 'reject':
+                        $status = 'rejected';
+                        dbQuery($db,
+                            'UPDATE material_requests SET status=?, admin_note=?, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+                            [$status, $note, $adminUid, $id]
+                        );
+                        break;
+                    case 'processing':
+                        $status = 'processing';
+                        dbQuery($db,
+                            'UPDATE material_requests SET status=?, admin_note=?, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+                            [$status, $note, $adminUid, $id]
+                        );
+                        break;
+                    case 'reopen':
+                        $status = 'pending';
+                        dbQuery($db,
+                            'UPDATE material_requests SET status=?, handled_by=NULL, handled_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+                            [$status, $id]
+                        );
+                        break;
+                    default:
+                        jsonOut(false, '操作无效');
+                }
+                log_admin_action('update_material_request_' . $action, $id);
+                jsonOut(true, '状态已更新');
                 break;
 
             // ---------- 申请下载 token（登录即可；一次性；5 分钟有效） ----------

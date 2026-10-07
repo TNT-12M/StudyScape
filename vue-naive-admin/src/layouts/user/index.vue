@@ -18,6 +18,9 @@
         <RouterLink to="/app/materials" active-class="is-active">
           <span class="nav-icon">📁</span><span class="nav-text">资料中心</span>
         </RouterLink>
+        <RouterLink to="/app/material-requests" active-class="is-active">
+          <span class="nav-icon">🎯</span><span class="nav-text">资料需求</span>
+        </RouterLink>
         <RouterLink to="/app/questions" active-class="is-active">
           <span class="nav-icon">📚</span><span class="nav-text">题库浏览</span>
         </RouterLink>

@@ -81,6 +81,14 @@ export const phpMaterialsApi = {
   categoryRemove: id => phpAction('material_category_delete', { id }),
 }
 
+// 资料需求反馈
+export const phpMaterialRequestApi = {
+  submit: data => phpAction('material_request_submit', data),
+  mine: data => phpAction('material_request_list_mine', data, { bypassCsrf: true }),
+  list: data => phpAction('admin_material_request_list', data),
+  update: data => phpAction('admin_material_request_update', data),
+}
+
 export const phpOcrApi = {
   create: data => phpAction('ocr_batch_create', data),
   list: data => phpAction('ocr_batch_list', data),

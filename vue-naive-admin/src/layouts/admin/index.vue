@@ -24,6 +24,9 @@
         <RouterLink v-if="session.isContentAdmin" to="/admin/materials" @click="closeOnMobile">
           <span class="menu-icon">📁</span><span class="menu-text">资料管理</span>
         </RouterLink>
+        <RouterLink v-if="session.isContentAdmin" to="/admin/material-requests" @click="closeOnMobile">
+          <span class="menu-icon">📝</span><span class="menu-text">资料需求</span>
+        </RouterLink>
         <RouterLink v-if="session.isRoot" to="/admin/feedback" @click="closeOnMobile">
           <span class="menu-icon">💬</span><span class="menu-text">反馈处理</span>
         </RouterLink>
