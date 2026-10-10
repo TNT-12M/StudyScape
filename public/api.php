@@ -3991,6 +3991,47 @@ if ($action) {
                 ]);
                 break;
 
+            // ---------- 题目搜索（快捷搜索） ----------
+            case 'question_search':
+                if (!isLoggedIn()) jsonOut(false, "请先登录");
+                $keyword = trim($_POST['keyword'] ?? $_GET['keyword'] ?? '');
+                $subject = trim($_POST['subject'] ?? $_GET['subject'] ?? '');
+                $limit   = max(1, min(100, (int)($_POST['limit'] ?? $_GET['limit'] ?? 50)));
+                $educationLevel = validateEducationLevel($_POST['education_level'] ?? $_GET['education_level'] ?? '', '');
+
+                $where = [];
+                $params = [];
+                if ($keyword !== '') {
+                    $where[] = '(content LIKE ? OR explanation LIKE ?)';
+                    $params[] = "%{$keyword}%";
+                    $params[] = "%{$keyword}%";
+                }
+                if ($subject !== '') {
+                    $where[] = 'subject = ?';
+                    $params[] = $subject;
+                }
+                if ($educationLevel !== '') {
+                    $where[] = 'education_level = ?';
+                    $params[] = $educationLevel;
+                }
+                $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
+
+                $rows = dbFetchAll($db, "SELECT id, subject, question_type, content, difficulty, points, created_at
+                    FROM questions {$whereSql} ORDER BY id DESC LIMIT ?", array_merge($params, [$limit]));
+
+                $items = array_map(function($r){
+                    $r['difficulty'] = (int)$r['difficulty'];
+                    $r['points']     = (float)$r['points'];
+                    // 普通用户不返回答案/解析相关
+                    if (!isAdmin()) {
+                        // content 里可能含答案，这里至少确保不泄露 explanation
+                    }
+                    return $r;
+                }, $rows);
+
+                jsonOut(true, "", ['items' => $items]);
+                break;
+
             // ---------- 题目详情 ----------
             case 'get_question':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
