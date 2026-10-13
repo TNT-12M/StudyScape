@@ -72,6 +72,13 @@ node_modules/
 vue-naive-admin/node_modules/
 vue-naive-admin/dist/
 
+# pnpm 本地包存储（跨盘硬链接失败时自动生成）
+.pnpm-store/
+
+# ===== 密码密钥（运行时生成，严禁入库）=====
+*.key
+data/password.key
+
 # ===== OCR 运行结果（正式源码之外的运行数据） =====
 data/ocr_batches/
 

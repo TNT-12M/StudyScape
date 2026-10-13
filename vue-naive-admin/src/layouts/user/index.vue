@@ -41,7 +41,27 @@
           学习中心
         </div>
         <div class="user-actions">
-          <n-popover trigger="click" placement="bottom-end" @update:show="value => value && loadNotifications()"><template #trigger><n-badge :value="unreadCount" :max="99"><n-button quaternary size="small">通知</n-button></n-badge></template><n-space vertical style="max-width:340px"><n-text v-if="!notifications.length" depth="3">暂无通知</n-text><div v-else class="notify-list-wrap"><n-list size="small"><n-list-item v-for="item in notifications" :key="item.id"><n-thing :title="item.title" :description="item.body" /></n-list-item></n-list></div><n-button v-if="unreadCount" size="small" @click="readNotifications">全部标记已读</n-button></n-space></n-popover>
+          <n-popover trigger="click" placement="bottom-end" @update:show="value => value && loadNotifications()">
+            <template #trigger>
+              <n-badge :value="unreadCount" :max="99">
+                <n-button quaternary size="small">
+                  通知
+                </n-button>
+              </n-badge>
+            </template><n-space vertical style="max-width:340px">
+              <n-text v-if="!notifications.length" depth="3">
+                暂无通知
+              </n-text><div v-else class="notify-list-wrap">
+                <n-list size="small">
+                  <n-list-item v-for="item in notifications" :key="item.id">
+                    <n-thing :title="item.title" :description="item.body" />
+                  </n-list-item>
+                </n-list>
+              </div><n-button v-if="unreadCount" size="small" @click="readNotifications">
+                全部标记已读
+              </n-button>
+            </n-space>
+          </n-popover>
           <SessionProfileLink to="/app/profile" />
           <n-button quaternary size="small" @click="logout">
             退出
@@ -56,7 +76,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { phpNotificationApi } from '@/api/php-modules'
 import { SessionProfileLink } from '@/layouts/components'
@@ -71,7 +91,8 @@ async function loadNotifications() {
     const result = await phpNotificationApi.list({ page: 1, page_size: 10 })
     notifications.value = result.data?.items || []
     unreadCount.value = Number(result.data?.unread_count || 0)
-  } catch { /* 通知失败不阻断学习端 */ }
+  }
+  catch { /* 通知失败不阻断学习端 */ }
 }
 async function readNotifications() {
   await phpNotificationApi.markRead()
@@ -81,7 +102,7 @@ onMounted(loadNotifications)
 
 async function logout() {
   await session.logout()
-  router.replace('/login')
+  router.replace('/welcome')
 }
 </script>
 
@@ -141,7 +162,9 @@ async function logout() {
   text-align: center;
   flex-shrink: 0;
 }
-.nav-text { flex: 1; }
+.nav-text {
+  flex: 1;
+}
 .user-menu a:hover,
 .user-menu a.is-active {
   color: #fff;
@@ -234,7 +257,9 @@ async function logout() {
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
   }
-  .user-menu::-webkit-scrollbar { display: none; }
+  .user-menu::-webkit-scrollbar {
+    display: none;
+  }
   .user-menu a {
     flex: 0 0 auto;
     padding: 8px 14px;
@@ -245,7 +270,9 @@ async function logout() {
   .back-admin {
     display: none; /* 移动端侧边栏隐藏 */
   }
-  .hide-mobile { display: none; }
+  .hide-mobile {
+    display: none;
+  }
   .user-header {
     padding: 0 14px;
     height: 52px;

@@ -1,5 +1,11 @@
 export const basicRoutes = [
   {
+    name: 'Welcome',
+    path: '/welcome',
+    component: () => import('@/views/welcome/index.vue'),
+    meta: { title: '学境・StudyScape — 学习的新境界', layout: 'empty', public: true },
+  },
+  {
     name: 'Login',
     path: '/login',
     component: () => import('@/views/login/index.vue'),
@@ -8,7 +14,7 @@ export const basicRoutes = [
   {
     name: 'UserHome',
     path: '/',
-    redirect: '/app',
+    redirect: '/welcome',
     meta: { public: true },
   },
   {

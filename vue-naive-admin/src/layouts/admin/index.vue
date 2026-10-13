@@ -45,7 +45,7 @@
     <section class="admin-main">
       <header class="admin-header">
         <div class="header-left">
-          <button class="mobile-menu-btn" @click="mobileSidebarOpen = !mobileSidebarOpen" aria-label="菜单">
+          <button class="mobile-menu-btn" aria-label="菜单" @click="mobileSidebarOpen = !mobileSidebarOpen">
             <span class="hamburger" />
           </button>
           <span class="page-title">管理后台</span>
@@ -54,18 +54,24 @@
           <n-popover trigger="click" placement="bottom-end" @update:show="value => value && loadNotifications()">
             <template #trigger>
               <n-badge :value="unreadCount" :max="99">
-                <n-button quaternary size="small">通知</n-button>
+                <n-button quaternary size="small">
+                  通知
+                </n-button>
               </n-badge>
             </template>
             <n-space vertical style="max-width:340px">
-              <n-text v-if="!notifications.length" depth="3">暂无通知</n-text>
+              <n-text v-if="!notifications.length" depth="3">
+                暂无通知
+              </n-text>
               <template v-else>
                 <!-- 公告（置顶） -->
                 <div v-if="announcements.length" class="notify-section">
-                  <n-text depth="3" style="font-size:12px">📢 公告</n-text>
+                  <n-text depth="3" style="font-size:12px">
+                    📢 公告
+                  </n-text>
                   <div class="notify-list-wrap notify-list-wrap--sm">
                     <n-list size="small">
-                      <n-list-item v-for="item in announcements" :key="'ann-'+item.id">
+                      <n-list-item v-for="item in announcements" :key="`ann-${item.id}`">
                         <n-thing :title="item.title" :description="item.body" />
                       </n-list-item>
                     </n-list>
@@ -73,31 +79,39 @@
                 </div>
                 <!-- 普通通知 -->
                 <div v-if="personalNotifs.length" class="notify-section">
-                  <n-text depth="3" style="font-size:12px">🔔 通知</n-text>
+                  <n-text depth="3" style="font-size:12px">
+                    🔔 通知
+                  </n-text>
                   <div class="notify-list-wrap">
                     <n-list size="small">
-                      <n-list-item v-for="item in personalNotifs" :key="'not-'+item.id">
+                      <n-list-item v-for="item in personalNotifs" :key="`not-${item.id}`">
                         <n-thing :title="item.title" :description="item.body" />
                       </n-list-item>
                     </n-list>
                   </div>
                 </div>
               </template>
-              <n-button v-if="unreadCount" size="small" @click="readNotifications">全部标记已读</n-button>
+              <n-button v-if="unreadCount" size="small" @click="readNotifications">
+                全部标记已读
+              </n-button>
             </n-space>
           </n-popover>
           <SessionProfileLink to="/admin/profile" />
           <span class="role-tag hide-mobile">{{ session.isRoot ? 'root' : '内容管理员' }}</span>
-          <n-button quaternary size="small" @click="logout">退出</n-button>
+          <n-button quaternary size="small" @click="logout">
+            退出
+          </n-button>
         </div>
       </header>
-      <main class="admin-content"><RouterView /></main>
+      <main class="admin-content">
+        <RouterView />
+      </main>
     </section>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { phpNotificationApi } from '@/api/php-modules'
 import { SessionProfileLink } from '@/layouts/components'
 import { useSessionStore } from '@/store'
@@ -110,19 +124,21 @@ const mobileSidebarOpen = ref(false)
 
 // 公告（置顶）
 const announcements = computed(() =>
-  notifications.value.filter(n => n.type === 'announcement').slice(0, 3)
+  notifications.value.filter(n => n.type === 'announcement').slice(0, 3),
 )
 // 普通通知（安全预警等）
 const personalNotifs = computed(() =>
-  notifications.value.filter(n => n.type !== 'announcement')
+  notifications.value.filter(n => n.type !== 'announcement'),
 )
 
 function closeOnMobile() {
-  if (window.innerWidth <= 768) mobileSidebarOpen.value = false
+  if (window.innerWidth <= 768)
+    mobileSidebarOpen.value = false
 }
 
 function handleResize() {
-  if (window.innerWidth > 768) mobileSidebarOpen.value = false
+  if (window.innerWidth > 768)
+    mobileSidebarOpen.value = false
 }
 
 async function loadNotifications() {
@@ -130,7 +146,8 @@ async function loadNotifications() {
     const result = await phpNotificationApi.list({ page: 1, page_size: 20 })
     notifications.value = result.data?.items || []
     unreadCount.value = Number(result.data?.unread_count || 0)
-  } catch { /* 通知失败不阻断后台 */ }
+  }
+  catch { /* 通知失败不阻断后台 */ }
 }
 async function readNotifications() {
   await phpNotificationApi.markRead()
@@ -146,7 +163,7 @@ onBeforeUnmount(() => {
 
 async function logout() {
   await session.logout()
-  router.replace('/login')
+  router.replace('/welcome')
 }
 </script>
 
@@ -181,14 +198,21 @@ async function logout() {
   font-weight: 700;
   white-space: nowrap;
 }
-.logo-icon { font-size: 22px; }
-.logo-text { background: linear-gradient(135deg, #fff, #b9c3d6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.logo-icon {
+  font-size: 22px;
+}
+.logo-text {
+  background: linear-gradient(135deg, #fff, #b9c3d6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
 .admin-menu {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.admin-menu a, .back-user {
+.admin-menu a,
+.back-user {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -197,9 +221,13 @@ async function logout() {
   text-decoration: none;
   border-radius: 8px;
   font-size: 14px;
-  transition: background-color 0.15s, color 0.15s;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
 }
-.admin-menu a:hover, .admin-menu a.router-link-active, .back-user:hover {
+.admin-menu a:hover,
+.admin-menu a.router-link-active,
+.back-user:hover {
   color: #fff;
   background: #2a3957;
 }
@@ -209,7 +237,10 @@ async function logout() {
   text-align: center;
   flex-shrink: 0;
 }
-.menu-text { flex: 1; min-width: 0; }
+.menu-text {
+  flex: 1;
+  min-width: 0;
+}
 .back-user {
   margin-top: auto;
   font-size: 13px;
@@ -236,8 +267,14 @@ async function logout() {
   background: var(--n-color);
   font-weight: 600;
 }
-.header-left { display: flex; align-items: center; gap: 12px; }
-.page-title { font-size: 15px; }
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.page-title {
+  font-size: 15px;
+}
 .admin-user {
   display: flex;
   align-items: center;
@@ -275,7 +312,9 @@ async function logout() {
   padding: 8px;
   border-radius: 6px;
 }
-.mobile-menu-btn:hover { background: var(--n-color-hover); }
+.mobile-menu-btn:hover {
+  background: var(--n-color-hover);
+}
 .hamburger {
   display: block;
   width: 100%;
@@ -284,7 +323,8 @@ async function logout() {
   position: relative;
   border-radius: 2px;
 }
-.hamburger::before, .hamburger::after {
+.hamburger::before,
+.hamburger::after {
   content: '';
   position: absolute;
   left: 0;
@@ -293,8 +333,12 @@ async function logout() {
   background: var(--n-text-color-2);
   border-radius: 2px;
 }
-.hamburger::before { top: -6px; }
-.hamburger::after { top: 6px; }
+.hamburger::before {
+  top: -6px;
+}
+.hamburger::after {
+  top: 6px;
+}
 
 .sidebar-mask {
   display: none;
@@ -306,15 +350,26 @@ async function logout() {
 
 /* 平板适配 */
 @media (max-width: 1024px) {
-  .admin-sidebar { width: 200px; flex-basis: 200px; }
-  .admin-content { padding: 20px; }
-  .admin-header { padding: 0 20px; }
+  .admin-sidebar {
+    width: 200px;
+    flex-basis: 200px;
+  }
+  .admin-content {
+    padding: 20px;
+  }
+  .admin-header {
+    padding: 0 20px;
+  }
 }
 
 /* 移动端适配 */
 @media (max-width: 768px) {
-  .mobile-menu-btn { display: block; }
-  .hide-mobile { display: none !important; }
+  .mobile-menu-btn {
+    display: block;
+  }
+  .hide-mobile {
+    display: none !important;
+  }
 
   .admin-sidebar {
     position: fixed;
@@ -325,8 +380,12 @@ async function logout() {
     transform: translateX(-100%);
     box-shadow: 2px 0 12px rgba(0, 0, 0, 0.15);
   }
-  .admin-sidebar.is-open { transform: translateX(0); }
-  .sidebar-mask { display: block; }
+  .admin-sidebar.is-open {
+    transform: translateX(0);
+  }
+  .sidebar-mask {
+    display: block;
+  }
 
   .admin-header {
     padding: 0 14px;
@@ -335,11 +394,19 @@ async function logout() {
   .admin-content {
     padding: 16px 14px;
   }
-  .page-title { font-size: 14px; }
-  .admin-user { gap: 6px; }
+  .page-title {
+    font-size: 14px;
+  }
+  .admin-user {
+    gap: 6px;
+  }
 }
 /* 通知列表滚动 */
-.notify-section { display: flex; flex-direction: column; gap: 4px; }
+.notify-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 .notify-list-wrap {
   max-height: 50vh;
   overflow-y: auto;
