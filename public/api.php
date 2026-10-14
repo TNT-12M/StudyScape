@@ -3754,7 +3754,16 @@ if ($action) {
                     $content = trim((string)($q['content'] ?? $q['text'] ?? ''));
                     if ($content === '' || mb_strlen($content) > 100000) continue;
                     $options = is_array($q['options'] ?? null) ? array_values(array_filter(array_map('strval', $q['options']))) : [];
-                    $kept[] = ['question_id' => (string)($q['source_qid'] ?? count($kept) + 1), 'question_type' => (string)($q['question_type'] ?? 'single'), 'question_content' => $content, 'question_options' => $options, 'answer' => (string)($q['correct_answer'] ?? ''), 'resolve' => (string)($q['explanation'] ?? ''), 'difficulty' => max(1, min(5, (int)($q['difficulty'] ?? 3))), 'points' => max(0, (float)($q['points'] ?? 1)), 'is_html' => !empty($q['is_html']) ? 1 : 0, 'subject' => $batch['subject'], 'education_level' => $batch['education_level']];
+                    // OCR 裁切的题目图片（worker 输出 images: [{base64}]，审核页可保留/编辑），
+                    // 透传为 question_images，由 pcvlConvert 去重后内嵌进题干 HTML，避免入库丢图
+                    $questionImages = [];
+                    if (is_array($q['images'] ?? null)) {
+                        foreach ($q['images'] as $img) {
+                            $b64 = is_array($img) ? trim((string)($img['base64'] ?? '')) : trim((string)$img);
+                            if ($b64 !== '') $questionImages[] = $b64;
+                        }
+                    }
+                    $kept[] = ['question_id' => (string)($q['source_qid'] ?? count($kept) + 1), 'question_type' => (string)($q['question_type'] ?? 'single'), 'question_content' => $content, 'question_options' => $options, 'question_images' => $questionImages, 'answer' => (string)($q['correct_answer'] ?? ''), 'resolve' => (string)($q['explanation'] ?? ''), 'difficulty' => max(1, min(5, (int)($q['difficulty'] ?? 3))), 'points' => max(0, (float)($q['points'] ?? 1)), 'is_html' => !empty($q['is_html']) ? 1 : 0, 'subject' => $batch['subject'], 'education_level' => $batch['education_level']];
                 }
                 if (!$kept) jsonOut(false, '没有可入库的题目');
                 $importData = ['paper_name' => $batch['file_name'], 'subject' => $batch['subject'], 'education_level' => $batch['education_level'], 'questions' => $kept];

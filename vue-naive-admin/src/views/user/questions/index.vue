@@ -47,9 +47,9 @@
 
 <script setup>
 import { computed, h, onMounted, reactive, ref } from 'vue'
-import { useSessionStore } from '@/store/modules/session'
 import { phpQuestionsApi } from '@/api/php-modules'
-import { sanitizeHtml, renderMathInHtml } from '@/views/user/components/question-utils'
+import { useSessionStore } from '@/store/modules/session'
+import { renderOption, renderRichText } from '@/views/user/components/question-utils'
 
 const session = useSessionStore()
 const questions = ref([])
@@ -75,28 +75,25 @@ const columns = [
   { title: '分类', key: 'category', width: 120 },
   { title: '学段', key: 'education_level', width: 100 },
   { title: '题干', key: 'content', minWidth: 300, ellipsis: { tooltip: true }, render: row => renderContent(row) },
-  { title: '选项', key: 'options', minWidth: 220, ellipsis: { tooltip: true }, render: row => formatOptions(row.options) },
+  { title: '选项', key: 'options', minWidth: 220, ellipsis: { tooltip: true }, render: row => renderOptionsCell(row.options) },
   { title: '难度', key: 'difficulty', width: 80 },
   { title: '分值', key: 'points', width: 80 },
   { title: '创建时间', key: 'created_at', width: 180 },
 ]
 
 function renderContent(row) {
-  const content = row.content || ''
-  return h('div', { class: 'question-content', innerHTML: renderMathInHtml(sanitizeHtml(content)) })
+  return h('div', { class: 'question-content', innerHTML: renderRichText(row.content || '') })
 }
 
-function formatOptions(options) {
-  if (options === null || options === undefined || options === '')
+function renderOptionsCell(options) {
+  if (!Array.isArray(options) || !options.length)
     return '-'
-  if (typeof options === 'string')
-    return options
-  try {
-    return JSON.stringify(options)
-  }
-  catch {
-    return String(options)
-  }
+  return h('div', { class: 'option-cell' }, options.map((option, index) =>
+    h('div', { class: 'option-cell-item', key: index }, [
+      h('span', { class: 'option-cell-letter' }, `${String.fromCharCode(65 + index)}.`),
+      h('span', { class: 'option-cell-text', innerHTML: renderOption(option) }),
+    ]),
+  ))
 }
 
 async function loadSubjects() {
@@ -164,12 +161,37 @@ onMounted(async () => {
   max-height: 88px;
   overflow: hidden;
   line-height: 1.6;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .question-content :deep(img) {
   max-width: 100%;
   max-height: 80px;
+  object-fit: contain;
+}
+.option-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.option-cell-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.option-cell-letter {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+.option-cell-text {
+  flex: 1;
+  min-width: 0;
+}
+.option-cell-text :deep(img) {
+  display: block;
+  max-width: 100%;
+  max-height: 56px;
   object-fit: contain;
 }
 .empty {
