@@ -1223,6 +1223,78 @@ function canResetPassword(string $email): bool {
     return ((int)($row['c'] ?? 0)) < 5;
 }
 
+/**
+ * 检查注册用途月度上限：每邮箱每月不超过 10 次发码请求（防止单邮箱反复刷）
+ */
+function canSendRegisterEmailCode(string $email): bool {
+    global $db;
+    ensureEmailCodeTable();
+    $startOfMonth = strtotime(date('Y-m-01 00:00:00'));
+    $row = @dbFetchOne($db, "SELECT COUNT(*) AS c FROM email_codes WHERE email=? AND purpose='register' AND created_at >= ?", [$email, $startOfMonth]);
+    return ((int)($row['c'] ?? 0)) < 10;
+}
+
+/**
+ * 每日上限：同一邮箱同一用途每天不超过 EMAIL_CODE_DAILY_MAX 次
+ * 返回 ['ok'=>bool, 'count'=>int]
+ */
+function canSendEmailCodeDaily(string $email, string $purpose): array {
+    global $db;
+    ensureEmailCodeTable();
+    $todayStart = strtotime(date('Y-m-d 00:00:00'));
+    $row = @dbFetchOne($db, "SELECT COUNT(*) AS c FROM email_codes WHERE email=? AND purpose=? AND created_at >= ?", [$email, $purpose, $todayStart]);
+    $count = (int)($row['c'] ?? 0);
+    return ['ok' => $count < EMAIL_CODE_DAILY_MAX, 'count' => $count];
+}
+
+/**
+ * 获取客户端真实 IP（处理 Cloudflare/CDN 代理头，兜底 REMOTE_ADDR）
+ */
+function getClientIp(): string {
+    foreach (['HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP'] as $header) {
+        if (!empty($_SERVER[$header])) {
+            $ip = trim(explode(',', $_SERVER[$header])[0]);
+            if (filter_var($ip, FILTER_VALIDATE_IP)) return $ip;
+        }
+    }
+    return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+}
+
+/**
+ * IP 级发码总频率检查：每 IP 每小时不超过 EMAIL_CODE_IP_HOURLY_MAX 次请求
+ * 使用 site_visit_rate_limits 表，失败放行（降级）
+ */
+function checkEmailIpRate(string $ip): bool {
+    try {
+        return siteRateAllowed('email_code_ip_' . $ip, EMAIL_CODE_IP_HOURLY_MAX, 3600);
+    } catch (Throwable $e) {
+        error_log('checkEmailIpRate error: ' . $e->getMessage());
+        return true;
+    }
+}
+
+/**
+ * per-IP 去重邮箱计数：同一 IP 在 EMAIL_CODE_IP_DIVERSITY_WINDOW 秒内发往不同邮箱数量上限
+ * 防止攻击者轮换大量不同伪造邮箱绕过 per-email 冷却
+ * 返回 ['ok'=>bool, 'unique_count'=>int, 'limit'=>int]
+ */
+function checkEmailIpDiversity(string $ip, string $email): array {
+    global $db;
+    try {
+        ensureEmailCodeTable();
+        $cutoff = time() - EMAIL_CODE_IP_DIVERSITY_WINDOW;
+        $row = @dbFetchOne($db, "SELECT COUNT(DISTINCT email) AS c FROM email_codes WHERE ip=? AND created_at >= ?", [$ip, $cutoff]);
+        $count = (int)($row['c'] ?? 0);
+        // 如果当前 email 已在之前出现过，不算新的"新增邮箱"
+        $isNew = $count === 0 || !@dbFetchOne($db, "SELECT 1 FROM email_codes WHERE ip=? AND email=? AND created_at >= ? LIMIT 1", [$ip, $email, $cutoff]);
+        $effectiveCount = $count + ($isNew ? 1 : 0);
+        return ['ok' => $effectiveCount <= EMAIL_CODE_IP_DIVERSITY_MAX, 'unique_count' => $effectiveCount, 'limit' => EMAIL_CODE_IP_DIVERSITY_MAX];
+    } catch (Throwable $e) {
+        error_log('checkEmailIpDiversity error: ' . $e->getMessage());
+        return ['ok' => true, 'unique_count' => 0, 'limit' => EMAIL_CODE_IP_DIVERSITY_MAX];
+    }
+}
+
 function encryptPassword(string $password): string {
     global $passwordKey;
     $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
@@ -1968,10 +2040,15 @@ if (!isset($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
-// 生成验证码
-function createCaptcha() {
-    $code = strtoupper(substr(md5(microtime()), 0, 4));
+// 生成图形验证码（5 位混合大写字母+数字，排除易混淆字符 0/O/1/I）
+function createCaptcha(): string {
+    static $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    $code = '';
+    for ($i = 0; $i < 5; $i++) {
+        $code .= $chars[random_int(0, strlen($chars) - 1)];
+    }
     $_SESSION['captcha_code'] = $code;
+    $_SESSION['captcha_expires'] = time() + 300; // 5 分钟过期
     return $code;
 }
 
@@ -2449,6 +2526,12 @@ define('LOGIN_THROTTLE_SESSION_LOCK', 300);  // 会话级：锁 5 分钟
 define('LOGIN_THROTTLE_IP_MAX', 20);         // IP 级：5 分钟内 20 次
 define('LOGIN_THROTTLE_IP_LOCK', 1800);      // IP 级：锁 30 分钟
 
+// 邮箱验证码发码防护常量
+define('EMAIL_CODE_DAILY_MAX', 15);           // 每邮箱每用途每天最多 15 次
+define('EMAIL_CODE_IP_HOURLY_MAX', 10);       // 每 IP 每小时总共最多 10 次发码请求
+define('EMAIL_CODE_IP_DIVERSITY_MAX', 5);     // 每 IP 在窗口内发往不同邮箱最多 5 个
+define('EMAIL_CODE_IP_DIVERSITY_WINDOW', 3600); // 去重窗口 1 小时
+
 function loginThrottleIpFile(): string {
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     $safeIp = preg_replace('/[^a-fA-F0-9.:_-]/', '_', $ip);
@@ -2634,7 +2717,9 @@ if ($action) {
                 $email = sanitizeInput($_POST['email'] ?? '');
                 $purpose = sanitizeInput($_POST['purpose'] ?? 'register'); // register | reset
                 $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
+                $ip = getClientIp();
 
+                // --- 第一层：基础格式 ---
                 if (!in_array($purpose, ['register', 'reset'], true)) {
                     jsonOut(false, '非法用途');
                 }
@@ -2644,34 +2729,53 @@ if ($action) {
                 if (!validateEmail($email)) {
                     jsonOut(false, '邮箱格式不正确');
                 }
-                if (!isset($_SESSION['captcha_code']) || $_SESSION['captcha_code'] !== $captcha) {
-                    unset($_SESSION['captcha_code']);
-                    jsonOut(false, '图片验证码错误');
-                }
-                unset($_SESSION['captcha_code']);
 
-                // 重置密码：检查邮箱是否存在
+                // --- 第二层：IP 级总频率（captcha 过了再查，省资源） ---
+                if (!checkEmailIpRate($ip)) {
+                    jsonOut(false, '请求过于频繁，请稍后再试');
+                }
+
+                // --- 第三层：captcha 校验 + 过期检查 ---
+                $captchaExpired = empty($_SESSION['captcha_expires']) || (int)$_SESSION['captcha_expires'] < time();
+                $captchaOk = !$captchaExpired && isset($_SESSION['captcha_code']) && hash_equals((string)$_SESSION['captcha_code'], $captcha);
+                unset($_SESSION['captcha_code'], $_SESSION['captcha_expires']);
+                if (!$captchaOk) {
+                    jsonOut(false, '图片验证码错误或已过期');
+                }
+
+                // --- 第四层：per-IP 去重邮箱检查（防轮换伪造邮箱绕过 per-email 冷却） ---
+                $div = checkEmailIpDiversity($ip, $email);
+                if (!$div['ok']) {
+                    error_log("send_email_code blocked by diversity limit: ip={$ip} count={$div['unique_count']}");
+                    jsonOut(false, '当前 IP 在短时间内尝试注册过多不同邮箱，请稍后再试');
+                }
+
+                // --- 第五层：reset 用途专属检查 ---
                 if ($purpose === 'reset') {
-                    $exist = dbFetchOne($db, "SELECT id FROM users WHERE email=?", [$email]);
-                    if (!$exist) {
-                        // 统一返回成功，避免枚举邮箱
-                        jsonOut(true, '如果该邮箱已注册，验证码将在 60 秒内发送');
-                    }
-                    // 频率限制：每月不超过 5 次
+                    // 不枚举邮箱（统一返回成功，但月度限流仍然生效）
                     if (!canResetPassword($email)) {
                         jsonOut(false, '该邮箱本月重置密码次数已达上限（5次），请下月再试');
                     }
                 }
 
-                // 注册：检查邮箱是否已被注册
+                // --- 第六层：register 用途专属检查 ---
                 if ($purpose === 'register') {
                     $exist = dbFetchOne($db, "SELECT id FROM users WHERE email=?", [$email]);
                     if ($exist) {
                         jsonOut(false, '该邮箱已被注册');
                     }
+                    if (!canSendRegisterEmailCode($email)) {
+                        jsonOut(false, '该邮箱本月注册验证码发送次数已达上限（10次），请下月再试');
+                    }
                 }
 
-                // 冷却期检查（60 秒）
+                // --- 第七层：邮箱每日上限 ---
+                $daily = canSendEmailCodeDaily($email, $purpose);
+                if (!$daily['ok']) {
+                    jsonOut(false, '该邮箱今日验证码发送次数已达上限，请明日再试');
+                }
+
+                // --- 第八层：60 秒冷却 ---
                 if (!canSendEmailCode($email, $purpose)) {
                     jsonOut(false, '验证码发送太频繁，请 60 秒后再试');
                 }
