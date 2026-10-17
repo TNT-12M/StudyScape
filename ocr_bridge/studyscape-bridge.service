@@ -1,0 +1,22 @@
+# 公网服务器运行: Bridge Relay TCP 1200 + PHP HTTP 1201
+# 安装:
+#   cp studyscape-bridge.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable studyscape-bridge && systemctl start studyscape-bridge
+#
+# 日志: journalctl -u studyscape-bridge -f
+
+[Unit]
+Description=StudyScape OCR Bridge Relay
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/lian/StudyScape
+ExecStart=/usr/bin/python3 /home/lian/StudyScape/ocr_bridge/bridge_server.py
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

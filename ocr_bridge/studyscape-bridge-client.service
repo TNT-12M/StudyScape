@@ -1,0 +1,24 @@
+# 家里云 ssh home 运行: 主动连接 Bridge Relay, 跑 MinerU pipeline
+# 安装:
+#   cp studyscape-bridge-client.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable studyscape-bridge-client && systemctl start studyscape-bridge-client
+#
+# 前置: MinerU flash tier parse-server 必须先启动 (mineru-flash.service)
+# 日志: journalctl -u studyscape-bridge-client -f
+
+[Unit]
+Description=StudyScape OCR Bridge Worker (家里云)
+After=network.target mineru-flash.service
+Wants=mineru-flash.service
+
+[Service]
+Type=simple
+User=lian
+WorkingDirectory=/home/lian/StudyScape
+ExecStart=/usr/bin/python3 /home/lian/StudyScape/ocr_bridge/bridge_client.py
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
