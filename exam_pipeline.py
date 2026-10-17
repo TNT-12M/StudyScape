@@ -25,6 +25,10 @@ import json
 import time
 import argparse
 import hashlib
+import base64
+import io
+import zipfile
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -93,31 +97,33 @@ def is_noise_content(content: str) -> bool:
 
 def mineru_parse_pdf(pdf_path: str, poll_interval: int = POLL_INTERVAL) -> dict:
     """
-    调用 MinerU flash tier 本地 parse-server，返回 middle_json PageJSON。
+    调用 MinerU flash tier 本地 parse-server，返回 (PageJSON, images_dir)。
     
     流程:
-      POST /v1/parse/jobs  →  获取 job_id
+      POST /v1/parse/jobs  →  获取 job_id (请求 zip + middle_json)
       POLL /v1/parse/jobs/{id}  →  等完成
-      GET /v1/files/{file_id}/content  →  下载 middle_json
+      GET /v1/files/{file_id}/content  →  下载 middle_json + zip
+      解压 zip → images_dir（图片文件落盘位置）
     
     Args:
         pdf_path: 绝对路径 PDF
         
     Returns:
-        PageJSON dict (schema: docvortex.middle)
+        (page_json, images_dir) — images_dir 是解压后的图片根目录（zip 里有 images/ 子目录），
+                                  若 zip 不可用则为 None
     """
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"PDF 不存在: {pdf_path}")
     
     print(f"[MinerU] 提交解析任务: {pdf_path}")
     
-    # Step 1: 创建解析任务
+    # Step 1: 创建解析任务（同时请求 middle_json 和 zip，zip 里有落盘图片）
     create_resp = requests.post(
         f"{MINERU_API_BASE}/v1/parse/jobs",
         json={
             "files": [{"source": {"type": "local", "path": pdf_path}}],
             "tier": "flash",
-            "output_formats": ["markdown", "middle_json"],
+            "output_formats": ["middle_json", "zip"],
         },
         timeout=30,
     )
@@ -171,24 +177,48 @@ def mineru_parse_pdf(pdf_path: str, poll_interval: int = POLL_INTERVAL) -> dict:
     output_files = file_obj.get("output_files", {})
     middle_json_info = output_files.get("middle_json")
     if not middle_json_info:
-        # 可能只有 markdown，没有 middle_json
         raise RuntimeError(f"未生成 middle_json, 可用输出: {list(output_files.keys())}")
     
-    file_id = middle_json_info.get("file_id")
-    if not file_id:
-        raise RuntimeError(f"middle_json 无 file_id: {json.dumps(middle_json_info, ensure_ascii=False)}")
+    # --- Step 4a: 下载 middle_json ---
+    mj_file_id = middle_json_info.get("file_id")
+    print(f"[MinerU] 下载 middle_json (file_id={mj_file_id})...")
+    mj_resp = requests.get(f"{MINERU_API_BASE}/v1/files/{mj_file_id}/content", timeout=60)
+    mj_resp.raise_for_status()
+    page_json = mj_resp.json()
     
-    # Step 4: 下载 middle_json
-    print(f"[MinerU] 下载 middle_json (file_id={file_id})...")
-    download_resp = requests.get(f"{MINERU_API_BASE}/v1/files/{file_id}/content", timeout=60)
-    download_resp.raise_for_status()
-    
-    page_json = download_resp.json()
     page_count = len(page_json.get("pages", []))
     block_count = sum(len(p.get("blocks", [])) for p in page_json.get("pages", []))
     print(f"[MinerU] ✅ PageJSON: {page_count} 页, {block_count} 个 blocks")
     
-    return page_json
+    # --- Step 4b: 下载 zip（含落盘图片），可选 ---
+    images_dir = None
+    zip_info = output_files.get("zip")
+    if zip_info and zip_info.get("file_id"):
+        try:
+            zip_fid = zip_info["file_id"]
+            print(f"[MinerU] 下载 zip (file_id={zip_fid})...")
+            zip_resp = requests.get(f"{MINERU_API_BASE}/v1/files/{zip_fid}/content", timeout=120)
+            zip_resp.raise_for_status()
+            
+            # 解压到临时目录
+            tmpdir = tempfile.mkdtemp(prefix="mineru_img_")
+            with zipfile.ZipFile(io.BytesIO(zip_resp.content), "r") as zf:
+                zf.extractall(tmpdir)
+            
+            # zip 内部通常有 images/ 子目录
+            candidates = [os.path.join(tmpdir, "images"), tmpdir]
+            for c in candidates:
+                if os.path.isdir(c) and any(f.lower().endswith(('.png','.jpg','.jpeg','.webp','.bmp')) for f in os.listdir(c)):
+                    images_dir = tmpdir  # 返回根目录，flatten 里拼相对路径
+                    break
+            if not images_dir:
+                images_dir = tmpdir  # 兜底：解压根目录
+            print(f"[MinerU] ✅ zip 解压 → {images_dir}")
+        except Exception as e:
+            print(f"[MinerU] ⚠️ zip 下载失败（不影响文字，只丢图片）: {e}")
+            images_dir = None
+    
+    return page_json, images_dir
 
 
 # ============================================================
@@ -230,6 +260,7 @@ def flatten_blocks(page_json: dict) -> list[dict]:
     """
     把 MinerU PageJSON 按阅读顺序扁平化为一个 blocks 列表。
     同时过滤噪声（header/footer/page_number/广告/注意事项）。
+    image block 保留 image_path / image_url 供后续关联题目。
     """
     flat = []
     pages = page_json.get("pages", [])
@@ -238,26 +269,45 @@ def flatten_blocks(page_json: dict) -> list[dict]:
     for page_idx, page in enumerate(pages):
         for block in page.get("blocks", []):
             btype = block.get("type", "text")
-            content = extract_text_from_block_content(block.get("content"))
+            content_raw = block.get("content")
+            content = extract_text_from_block_content(content_raw)
             
             # 1. MinerU 原生噪声 type → 跳过
             if btype in NOISE_BLOCK_TYPES:
                 skipped_noise += 1
                 continue
             
-            # 2. 正则噪声过滤
-            if is_noise_content(content):
+            # 2. 正则噪声过滤（但 image block 不做文本噪声过滤，它们可能只有路径）
+            if btype != "image" and is_noise_content(content):
                 skipped_noise += 1
                 continue
             
-            flat.append({
+            entry = {
                 "page_idx": page_idx,
                 "type": btype,
                 "bbox": block.get("bbox", [0, 0, 1, 1]),
                 "content": content,
                 "level": block.get("level"),
                 "index": block.get("index"),
-            })
+            }
+            
+            # image block → 保留图片路径/URL 信息
+            if btype == "image":
+                # MinerU flash tier image block content 可能是 dict: {"image_path": "images/xxx.png", ...}
+                # 或者顶层有 image_path 字段
+                img_path = None
+                img_url = None
+                if isinstance(content_raw, dict):
+                    img_path = content_raw.get("image_path") or content_raw.get("path")
+                    img_url = content_raw.get("image_url") or content_raw.get("url")
+                if not img_path:
+                    img_path = block.get("image_path") or block.get("path")
+                if not img_url:
+                    img_url = block.get("image_url") or block.get("url")
+                entry["image_path"] = img_path  # zip 解压后的相对路径（如 "images/xxx.png"）
+                entry["image_url"] = img_url    # 可能是 data URI 或 HTTP URL
+            
+            flat.append(entry)
     
     # 按 page_idx → 分栏 → y 排序
     # MinerU bbox 是归一化坐标 (0~1)，两栏试卷 x=0~0.4 左栏，x=0.4~1.0 右栏
@@ -450,6 +500,10 @@ def classify_block(block: dict) -> str:
     """
     content = block["content"]
     btype = block["type"]
+    
+    # image block —— 单独分类，保留给后续关联题目
+    if btype == "image":
+        return "image"
     
     if not content:
         return "separator"
@@ -671,12 +725,64 @@ def finalize_question(raw_q: dict, section_title: str, material_text: str) -> di
 # 模块 4: 题目 → Contract B JSON 转换
 # ============================================================
 
-def build_contract_b_questions(questions: list[dict]) -> list[dict]:
+def _read_image_as_base64(image_block: dict, images_dir: str | None) -> str | None:
+    """
+    从 image block 读取图片 → base64（用于 question_images 字段）。
+    
+    三种来源，按优先级:
+      1. image_url 是 data URI → 直接用
+      2. image_path + images_dir → 从本地 zip 解压目录读文件
+      3. image_url 是 http(s) → 下载（兜底）
+    """
+    # 1) 已经是 data URI
+    url = image_block.get("image_url") or ""
+    if url.startswith("data:image/"):
+        return url  # 直接返回
+    
+    # 2) 本地文件路径
+    rel_path = image_block.get("image_path")
+    if rel_path and images_dir:
+        # MinerU zip 里的路径可能是 "images/xxx.png" 或相对路径
+        candidates = [
+            os.path.join(images_dir, rel_path),
+            os.path.join(images_dir, "images", os.path.basename(rel_path)),
+            os.path.join(images_dir, os.path.basename(rel_path)),
+        ]
+        for fp in candidates:
+            if os.path.isfile(fp):
+                try:
+                    with open(fp, "rb") as f:
+                        data = f.read()
+                    mime = "image/png"
+                    ext = os.path.splitext(fp)[1].lower()
+                    if ext in (".jpg", ".jpeg"): mime = "image/jpeg"
+                    elif ext == ".webp": mime = "image/webp"
+                    elif ext == ".bmp": mime = "image/bmp"
+                    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+                except Exception:
+                    continue
+    
+    # 3) HTTP URL 兜底
+    if url.startswith("http"):
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                ct = r.headers.get("Content-Type", "image/png")
+                return f"data:{ct};base64,{base64.b64encode(r.content).decode()}"
+        except Exception:
+            pass
+    
+    return None
+
+
+def build_contract_b_questions(questions: list[dict], images_dir: str | None = None) -> list[dict]:
     """
     把切好的题目列表转成 StudyScape Contract B (PaperCutter-VL) 格式。
     
     关键: MinerU 经常把选项 A. B. C. D. 内联在题干文本里，
     这里会先从题干里把选项抠出来，再判断题型。
+    
+    image block 通过 images_dir + image_path 读成 base64 → question_images
     """
     output = []
     
@@ -685,6 +791,7 @@ def build_contract_b_questions(questions: list[dict]) -> list[dict]:
         options = []
         answer_text = ""
         resolve_text = ""
+        image_blocks = []  # 收集当前题关联的 image blocks
         
         if q.get("material_text"):
             content_parts.append(q["material_text"])
@@ -692,6 +799,11 @@ def build_contract_b_questions(questions: list[dict]) -> list[dict]:
         for block in q["blocks"]:
             cls = block["_class"]
             content = block["content"]
+            
+            # ★ image block → 收集，不进题干
+            if cls == "image":
+                image_blocks.append(block)
+                continue
             
             if cls == "option":
                 continue  # option blocks 在后面统一合并（去重+格式化）
@@ -756,12 +868,19 @@ def build_contract_b_questions(questions: list[dict]) -> list[dict]:
         except (ValueError, TypeError):
             qid = i + 1000
         
+        # ★ question_images: 从 image blocks + images_dir 读 base64
+        question_images = []
+        for ib in image_blocks:
+            img_b64 = _read_image_as_base64(ib, images_dir)
+            if img_b64:
+                question_images.append(img_b64)
+        
         item = {
             "question_id": qid,
             "question_type": qtype,
             "question_content": question_content,
             "question_options": options if options else [],
-            "question_images": [],
+            "question_images": question_images,
             "question_tables": [],
             "answer": answer_text,
             "resolve": resolve_text,
@@ -929,7 +1048,9 @@ def main():
     
     # --- Step 1: MinerU 解析 ---
     try:
-        page_json = mineru_parse_pdf(pdf_path)
+        page_json, images_dir = mineru_parse_pdf(pdf_path)
+        if images_dir:
+            print(f"\n📷 图片解压目录: {images_dir}")
     except requests.exceptions.ConnectionError:
         print(f"\n❌ MinerU parse-server 连接失败!")
         print(f"   请先启动:")
@@ -947,7 +1068,7 @@ def main():
     questions_raw = group_questions(blocks)
     
     # --- Step 4: Build Contract B ---
-    questions_cb = build_contract_b_questions(questions_raw)
+    questions_cb = build_contract_b_questions(questions_raw, images_dir=images_dir)
     
     # --- Step 5: Validate + Output ---
     questions_clean = validate_and_clean(questions_cb)
