@@ -1,13 +1,28 @@
 <template>
   <AppPage>
     <n-space vertical size="large">
-      <n-card title="PDF / 图片智能识别" segmented>
-        <n-alert type="info">上传后由服务端 OCR 处理，管理员审核、编辑或剔除题目后再统一入库。</n-alert>
-        <n-form inline class="upload-form">
-          <n-form-item label="文件"><n-upload :show-file-list="false" accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp,.tiff" :custom-request="upload"><n-button type="primary">选择 PDF / 图片</n-button></n-upload></n-form-item>
-          <n-form-item label="学段"><n-select v-model:value="form.education_level" :options="levels" style="width:130px" /></n-form-item>
-          <n-form-item label="科目"><n-input v-model:value="form.subject" placeholder="可选" /></n-form-item>
-        </n-form>
+      <n-card title="智能识别与审核" segmented>
+        <n-alert type="info">上传 PDF/图片由服务端 OCR 处理后进入审核，或直接导入已有的 JSON 跳过 OCR。两种方式均支持审核编辑后再统一入库。</n-alert>
+        <n-tabs v-model:value="activeTab" animated>
+          <n-tab-pane name="upload" tab="上传 PDF / 图片">
+            <n-form inline class="upload-form">
+              <n-form-item label="文件"><n-upload :show-file-list="false" accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp,.tiff" :custom-request="upload"><n-button type="primary">选择 PDF / 图片</n-button></n-upload></n-form-item>
+              <n-form-item label="学段"><n-select v-model:value="form.education_level" :options="levels" style="width:130px" /></n-form-item>
+              <n-form-item label="科目"><n-input v-model:value="form.subject" placeholder="可选" /></n-form-item>
+            </n-form>
+          </n-tab-pane>
+          <n-tab-pane name="import" tab="导入已有 JSON">
+            <n-form inline class="upload-form">
+              <n-form-item label="JSON 文件"><n-upload :show-file-list="false" accept=".json" :custom-request="importJson"><n-button type="success">选择 JSON 文件</n-button></n-upload></n-form-item>
+              <n-form-item label="试卷名"><n-input v-model:value="importForm.paper_name" placeholder="可选，默认用文件名" /></n-form-item>
+              <n-form-item label="学段"><n-select v-model:value="importForm.education_level" :options="levels" style="width:130px" /></n-form-item>
+              <n-form-item label="科目"><n-input v-model:value="importForm.subject" placeholder="可选，JSON 里有则自动读取" /></n-form-item>
+            </n-form>
+            <n-alert type="default" :show-icon="false" closable class="import-hint">
+              支持 Contract B 格式（MinerU pipeline 输出）或审核页格式，系统会自动识别 schema 并转换。
+            </n-alert>
+          </n-tab-pane>
+        </n-tabs>
       </n-card>
       <n-card title="识别批次" segmented>
         <n-data-table :columns="batchColumns" :data="batches" :loading="loading" :pagination="paginationProps" @update:page="onPageChange" @update:page-size="onPageSizeChange" />
@@ -83,7 +98,9 @@ const batches = ref([])
 const current = ref(null)
 const reviewCard = ref(null)
 const questions = ref([])
+const activeTab = ref('upload')
 const form = reactive({ education_level: 'junior', subject: '' })
+const importForm = reactive({ paper_name: '', education_level: 'senior', subject: '' })
 const levels = [{ label: '初中', value: 'junior' }, { label: '高中', value: 'senior' }]
 const page = ref(1)
 const pageSize = ref(20)
@@ -177,6 +194,17 @@ async function upload({ file }) {
     message.success(result.message || '已上传，等待 OCR')
     await loadBatches()
   } catch (error) { message.error(error.message || '上传失败') }
+}
+async function importJson({ file }) {
+  try {
+    const result = await phpOcrApi.importJson({ file: file.file, education_level: importForm.education_level, subject: importForm.subject, paper_name: importForm.paper_name })
+    message.success(result.message || 'JSON 导入成功')
+    await loadBatches()
+    // 自动跳转到新 batch 的审核页
+    if (result.data?.batch_id) {
+      await loadBatch(result.data.batch_id)
+    }
+  } catch (error) { message.error(error.message || 'JSON 导入失败') }
 }
 async function loadBatches() {
   loading.value = true

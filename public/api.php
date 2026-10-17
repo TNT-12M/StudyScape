@@ -3790,6 +3790,98 @@ if ($action) {
                 jsonOut(true, '文件已上传，OCR 处理中', ['batch_id' => $batchId, 'status' => 'running']);
                 break;
 
+            // ==================== 直接导入已有 JSON（跳过 OCR） ====================
+            case 'ocr_batch_import_json':
+                $uid = requireContentPermission('question_import');
+                if (empty($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) jsonOut(false, '请选择 JSON 文件');
+                $file = $_FILES['file'];
+                $ext = strtolower(pathinfo((string)$file['name'], PATHINFO_EXTENSION));
+                if ($ext !== 'json') jsonOut(false, '仅支持 .json 文件');
+                if ((int)$file['size'] > 20 * 1024 * 1024) jsonOut(false, 'JSON 不能超过 20MB');
+
+                $raw = @file_get_contents((string)$file['tmp_name']);
+                if ($raw === '' || $raw === false) jsonOut(false, 'JSON 文件读取失败');
+                $data = json_decode($raw, true);
+                if (!is_array($data)) jsonOut(false, 'JSON 格式无效');
+
+                $subject = normalizeSubject(sanitizeInput($_POST['subject'] ?? ($data['subject'] ?? '')));
+                $level = validateEducationLevel($_POST['education_level'] ?? ($data['education_level'] ?? 'junior')));
+                $paperName = sanitizeInput($_POST['paper_name'] ?? ($data['paper_name'] ?? pathinfo((string)$file['name'], PATHINFO_FILENAME)));
+
+                // 从 Contract B 格式或审核页格式里提取 questions
+                $rawQuestions = null;
+                if (isset($data['questions']) && is_array($data['questions'])) {
+                    $rawQuestions = $data['questions'];
+                } elseif (isset($data['result_json']['questions']) && is_array($data['result_json']['questions'])) {
+                    $rawQuestions = $data['result_json']['questions'];
+                } elseif (isset($data['data']['result_json']['questions']) && is_array($data['data']['result_json']['questions'])) {
+                    $rawQuestions = $data['data']['result_json']['questions'];
+                }
+                if (!$rawQuestions) jsonOut(false, 'JSON 中未找到 questions 数组');
+
+                // Schema 转换: Contract B → 审核页 questions 格式
+                $questions = [];
+                foreach ($rawQuestions as $idx => $q) {
+                    if (!is_array($q)) continue;
+
+                    // 兼容两种格式:
+                    // Contract B: question_content, question_options, question_type, answer, resolve, question_id
+                    // 审核页: content, options, question_type, correct_answer, explanation, source_qid
+                    $content = trim((string)($q['question_content'] ?? $q['content'] ?? ''));
+                    $options = is_array($q['question_options'] ?? null)
+                        ? array_values(array_filter(array_map('strval', $q['question_options'])))
+                        : (is_array($q['options'] ?? null)
+                            ? array_values(array_filter(array_map('strval', $q['options'])))
+                            : []);
+                    $qtype = (string)($q['question_type'] ?? $q['type'] ?? '');
+                    $answer = (string)($q['answer'] ?? $q['correct_answer'] ?? '');
+                    $resolve = (string)($q['resolve'] ?? $q['explanation'] ?? '');
+                    $qid = (string)($q['question_id'] ?? $q['source_qid'] ?? ($idx + 1));
+                    $difficulty = (int)($q['difficulty'] ?? 3);
+                    $points = (int)($q['points'] ?? 1);
+
+                    // 类型名标准化（中文 → 英文）
+                    $typeMap = [
+                        '单选题' => 'single', '单选' => 'single',
+                        '多选题' => 'multiple', '多选' => 'multiple',
+                        '判断题' => 'judge', '判断' => 'judge',
+                        '填空题' => 'fill', '填空' => 'fill',
+                        '简答题' => 'essay', '简答' => 'essay', '解答题' => 'essay', '解答' => 'essay',
+                        '选择题' => count($options) >= 4 ? 'single' : 'choice',
+                    ];
+                    $qtype = $typeMap[$qtype] ?? ($qtype ?: 'single');
+
+                    if ($content === '') continue;
+
+                    $questions[] = [
+                        'source_qid' => $qid,
+                        'question_type' => $qtype,
+                        'content' => $content,
+                        'options' => $options,
+                        'correct_answer' => $answer,
+                        'explanation' => $resolve,
+                        'difficulty' => max(1, min(5, $difficulty)),
+                        'points' => max(0, $points),
+                        'included' => true,
+                        'images' => [],
+                    ];
+                }
+
+                if (!$questions) jsonOut(false, 'JSON 中没有有效题目');
+
+                // 保存 JSON 到 data/ocr_batches/（供后续下载/检查）
+                $dir = __DIR__ . '/../data/ocr_batches';
+                if (!is_dir($dir)) @mkdir($dir, 0750, true);
+                $stored = 'ocr_import_' . bin2hex(random_bytes(16)) . '.json';
+                file_put_contents($dir . DIRECTORY_SEPARATOR . $stored, json_encode(['questions' => $questions], JSON_UNESCAPED_UNICODE));
+
+                // 插入 batch，直接 review 状态（跳过 running）
+                dbQuery($db, 'INSERT INTO ocr_import_batches(file_name, stored_name, subject, education_level, created_by, status, result_json) VALUES(?,?,?,?,?,\'review\',?)', [$paperName, $stored, $subject, $level, $uid, json_encode(['questions' => $questions], JSON_UNESCAPED_UNICODE)]);
+                $batchId = (int)$db->lastInsertRowID();
+
+                jsonOut(true, "已导入 " . count($questions) . " 道题目，进入审核", ['batch_id' => $batchId, 'status' => 'review', 'question_count' => count($questions)]);
+                break;
+
             case 'ocr_batch_list':
                 requireContentPermission('question_import');
                 $page = max(1, (int)($_POST['page'] ?? $_GET['page'] ?? 1));

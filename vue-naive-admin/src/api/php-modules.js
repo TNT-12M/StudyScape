@@ -91,6 +91,7 @@ export const phpMaterialRequestApi = {
 
 export const phpOcrApi = {
   create: data => phpAction('ocr_batch_create', data),
+  importJson: data => phpAction('ocr_batch_import_json', data),
   list: data => phpAction('ocr_batch_list', data),
   get: batch_id => phpAction('ocr_batch_get', { batch_id }),
   retry: batch_id => phpAction('ocr_batch_retry', { batch_id }),

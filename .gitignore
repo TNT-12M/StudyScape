@@ -39,6 +39,8 @@ check_*.php
 import_questions.php
 *_patch.php
 *_test.php
+_*.sh
+_*.py
 
 # ===== 测试数据 =====
 test/
