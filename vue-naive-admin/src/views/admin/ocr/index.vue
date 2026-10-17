@@ -233,7 +233,7 @@ let pollTimer = null
 onMounted(async () => {
   await loadBatches()
   pollTimer = setInterval(async () => {
-    const needRefresh = items.value.some(b => b.status === 'queued' || b.status === 'processing')
+    const needRefresh = batches.value.some(b => b.status === 'queued' || b.status === 'processing' || b.status === 'running')
     if (needRefresh) await loadBatches()
   }, 5000)
 })
