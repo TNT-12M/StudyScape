@@ -28,6 +28,7 @@ import time
 import os
 import secrets
 import struct
+import base64
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -255,7 +256,9 @@ async def handle_worker(reader, writer):
 
 # ======================= HTTP 1201 (PHP 接口) =======================
 def _worker_online():
-    STATE.worker_last_ping > 0 and (time.time() - STATE.worker_last_ping) < WORKER_TIMEOUT
+    """判断家里云 Worker 是否在线: 已认证 + 最近 WORKER_TIMEOUT 内有心跳"""
+    return bool(STATE.worker_writer) and (time.time() - STATE.worker_last_ping) < WORKER_TIMEOUT
+
 
 class PHPHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -270,25 +273,44 @@ class PHPHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_OPTIONS(self):
+        # CORS preflight
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
     def do_GET(self):
         path = urlparse(self.path).path
         # 健康检查
         if path == "/health":
             online = _worker_online()
-            self._send(200, {"bridge": "ok", "worker_online": online})
+            self._send(200, {
+                "bridge": "ok",
+                "worker_online": online,
+                "seconds_since_last_ping": int(time.time() - STATE.worker_last_ping) if STATE.worker_last_ping else None,
+                "queued_jobs": sum(1 for j in STATE.queue.values() if j["status"] in ("queued", "processing")),
+            })
             return
         # 查状态
         if path.startswith("/status/"):
             jid = path[len("/status/"):]
             job = asyncio.run_coroutine_threadsafe(STATE.get_status(jid), event_loop).result()
             if not job:
-                self._send(404, {"error": "not found"})
+                self._send(404, {"error": "任务不存在", "job_id": jid})
                 return
-            # 清理敏感字段
-            out = {k: v for k, v in job.items() if k in ("job_id", "status", "error", "result", "filename")}
+            # 清理敏感字段（file_b64 不回传）
+            out = {
+                "job_id": job["job_id"],
+                "status": job["status"],   # queued / processing / done / failed
+                "filename": job.get("filename", ""),
+                "error": job.get("error"),  # 失败时的错误字符串
+                "result": job.get("result"),  # done 时的 Contract B JSON
+            }
             self._send(200, out)
             return
-        self._send(404, {"error": "unknown endpoint"})
+        self._send(404, {"error": f"未知端点: {path}", "available": ["/health", "/status/{job_id}"]})
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -296,37 +318,86 @@ class PHPHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
 
         if path == "/upload":
+            # ① JSON 解析
             try:
-                payload = json.loads(body.decode("utf-8"))
-            except:
-                self._send(400, {"error": "invalid json"})
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except json.JSONDecodeError as e:
+                self._send(400, {
+                    "error": "JSON 格式错误",
+                    "detail": str(e),
+                    "hint": "检查 Content-Type 是否为 application/json",
+                })
                 return
 
-            # 必需字段
-            filename = payload.get("filename", "")
-            file_b64 = payload.get("file_b64", "")
+            # ② 必需字段
+            filename = payload.get("filename", "").strip()
+            file_b64 = payload.get("file_b64", "").strip()
             subject = payload.get("subject", "")
             education_level = payload.get("education_level", "")
+            paper_name = payload.get("paper_name", "")
 
-            if not filename or not file_b64:
-                self._send(400, {"error": "filename + file_b64 required"})
+            if not filename:
+                self._send(400, {"error": "缺少 filename 字段", "hint": "需要传原始 PDF/图片文件名"})
+                return
+            if not file_b64:
+                self._send(400, {"error": "缺少 file_b64 字段", "hint": "需要传文件的 base64 编码"})
                 return
 
-            # Worker 在线检查
+            # ③ base64 可解码性验证
+            try:
+                raw = base64.b64decode(file_b64)
+            except Exception as e:
+                self._send(400, {"error": "file_b64 解码失败", "detail": str(e)})
+                return
+
+            # ④ 文件大小上限 (50MB)
+            max_bytes = 50 * 1024 * 1024
+            if len(raw) > max_bytes:
+                self._send(413, {"error": f"文件过大 ({len(raw)//1024//1024}MB), 上限 50MB"})
+                return
+
+            # ⑤ Worker 在线检查
             if not _worker_online():
-                self._send(503, {"error": "worker offline"})
+                online_flag = bool(STATE.worker_writer)
+                last_ping = STATE.worker_last_ping
+                detail_parts = []
+                if not online_flag:
+                    detail_parts.append("家里云 Worker 尚未连入公网 bridge")
+                else:
+                    elapsed = int(time.time() - last_ping)
+                    detail_parts.append(f"Worker 心跳已断 {elapsed}s (超时 {WORKER_TIMEOUT}s)")
+                self._send(503, {
+                    "error": "worker offline",
+                    "detail": "; ".join(detail_parts),
+                    "hint": "家里云检查: sudo systemctl status studyscape-bridge-client",
+                })
                 return
 
-            # 入队
+            # ⑥ 推断文件类型
+            ftype = "pdf"
+            if raw[:8] == b"%PDF-":
+                ftype = "pdf"
+            elif raw[:3] == b"\xff\xd8\xff":
+                ftype = "jpg"
+            elif raw[:8] == b"\x89PNG\r\n\x1a\n":
+                ftype = "png"
+            elif raw[:4] == b"GIF8":
+                ftype = "gif"
+            elif raw[:12] == b"RIFF" and raw[8:12] == b"WEBP":
+                ftype = "webp"
+            log.info(f"收到上传: {filename} ({ftype}, {len(raw)//1024}KB) → subject={subject}")
+
+            # ⑦ 入队并推送
             job = {
                 "filename": filename,
                 "file_b64": file_b64,
+                "ftype": ftype,
                 "subject": subject,
                 "education_level": education_level,
+                "paper_name": paper_name or os.path.splitext(filename)[0],
             }
             jid = asyncio.run_coroutine_threadsafe(STATE.enqueue(job), event_loop).result()
 
-            # 推送给 Worker (TASK 直接带 data, 不用再 round-trip)
             async def push_to_worker():
                 async with STATE.worker_lock:
                     if STATE.worker_writer:
@@ -338,10 +409,14 @@ class PHPHandler(BaseHTTPRequestHandler):
                 return True
             asyncio.run_coroutine_threadsafe(push_to_worker(), event_loop)
 
-            self._send(202, {"job_id": jid, "status": "queued"})
+            self._send(202, {
+                "job_id": jid,
+                "status": "queued",
+                "message": "任务已提交, 等待家里云处理",
+            })
             return
 
-        self._send(404, {"error": "unknown endpoint"})
+        self._send(404, {"error": f"未知端点: {path}", "available": ["/upload (POST)"]})
 
 
 # ======================= 主入口 =======================

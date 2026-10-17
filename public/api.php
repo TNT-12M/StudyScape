@@ -1941,12 +1941,15 @@ try {
         education_level TEXT NOT NULL DEFAULT 'junior',
         result_json TEXT,
         error_message TEXT,
+        bridge_job_id TEXT,
         created_by INTEGER NOT NULL,
         retry_count INTEGER NOT NULL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         finished_at DATETIME
     )");
+    // ALTER TABLE 兼容: 老库补 bridge_job_id
+    try { $db->exec('ALTER TABLE ocr_import_batches ADD COLUMN bridge_job_id TEXT'); } catch (Throwable $ignored) {}
     $db->exec("CREATE INDEX IF NOT EXISTS idx_ocr_batches_owner ON ocr_import_batches(created_by, id DESC)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_ocr_batches_status ON ocr_import_batches(status, updated_at)");
 } catch (Exception $e) {
@@ -2110,45 +2113,150 @@ function siteRateAllowed(string $key, int $limit, int $window): bool {
     }
 }
 
+function ocrBridgeCall(string $method, string $path, array $data = null): array {
+    // 统一的 bridge HTTP 调用封装 (http://127.0.0.1:1201)
+    // 返回 ['ok' => bool, 'data' => array, 'http_code' => int, 'curl_error' => string]
+    $bridgeHost = 'http://127.0.0.1:1201';
+    $url = $bridgeHost . $path;
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);  // 15s 超时
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
+
+    if ($method === 'POST') {
+        $json = json_encode($data ?: [], JSON_UNESCAPED_UNICODE);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $json);
+    }
+
+    $resp = curl_exec($ch);
+    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr = curl_error($ch);
+    curl_close($ch);
+
+    $decoded = null;
+    if ($resp !== false && $resp !== '') {
+        $decoded = json_decode((string)$resp, true);
+    }
+
+    return [
+        'ok' => $resp !== false && $httpCode >= 200 && $httpCode < 400,
+        'data' => is_array($decoded) ? $decoded : [],
+        'http_code' => $httpCode,
+        'curl_error' => $curlErr ?: '',
+    ];
+}
+
 function ocrRefreshBatch(array $batch): array {
     global $db;
-    $dir = __DIR__ . '/../data/ocr_batches/';
-    $base = basename((string)$batch['stored_name']);
-    $resultPath = $dir . $base . '.json';
-    $logPath = $dir . $base . '.log';
-    if (($batch['status'] === 'queued' || $batch['status'] === 'running') && is_file($resultPath)) {
-        $json = @file_get_contents($resultPath);
-        $data = json_decode((string)$json, true);
-        if (is_array($data) && isset($data['questions']) && is_array($data['questions'])) {
-            dbQuery($db, "UPDATE ocr_import_batches SET status='review', result_json=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'committed'", [$json, (int)$batch['id']]);
-            $batch['status'] = 'review'; $batch['result_json'] = $json; $batch['error_message'] = null;
-        }
-    } elseif (($batch['status'] === 'queued' || $batch['status'] === 'running') && is_file($logPath) && filesize($logPath) > 0) {
-        $error = trim((string)@file_get_contents($logPath));
-        if ($error !== '') {
-            dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'committed'", [mb_substr($error, 0, 1000), (int)$batch['id']]);
-            $batch['status'] = 'failed'; $batch['error_message'] = mb_substr($error, 0, 1000);
-        }
+    // 已有 bridge_job_id 才刷新；新批次还没 start 过就跳过
+    $jobId = trim((string)($batch['bridge_job_id'] ?? ''));
+    if ($jobId === '') return $batch;
+
+    $curStatus = (string)($batch['status'] ?? '');
+    if ($curStatus === 'review' || $curStatus === 'committed' || $curStatus === 'failed') {
+        return $batch;  // 终态不刷新
     }
+
+    $resp = ocrBridgeCall('GET', '/status/' . urlencode($jobId));
+
+    // ① bridge 连不上（curl 超时/拒绝）
+    if ($resp['curl_error'] !== '') {
+        // 只是暂时连不上，不要标记失败；等下次刷新再试
+        return $batch;
+    }
+    // ② bridge 返回 404 任务不存在 → 大概率 bridge 重启过丢了队列
+    if ($resp['http_code'] === 404) {
+        dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message='bridge 任务已过期丢失 (可能 bridge_server 重启过), 请点重试重新提交', updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('review','committed','failed')", [(int)$batch['id']]);
+        $batch['status'] = 'failed';
+        $batch['error_message'] = 'bridge 任务已过期丢失 (可能 bridge_server 重启过), 请点重试重新提交';
+        return $batch;
+    }
+    // ③ bridge 其他错误
+    if (!$resp['ok']) {
+        return $batch;  // 临时错误，等下次
+    }
+
+    $bdata = $resp['data'];
+    $bStatus = (string)($bdata['status'] ?? '');
+
+    if ($bStatus === 'done' && isset($bdata['result']) && is_array($bdata['result'])) {
+        // ✅ 成功! 把 JSON 塞进 DB
+        $json = json_encode($bdata['result'], JSON_UNESCAPED_UNICODE);
+        dbQuery($db, "UPDATE ocr_import_batches SET status='review', result_json=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('review','committed','failed')", [$json, (int)$batch['id']]);
+        $batch['status'] = 'review';
+        $batch['result_json'] = $json;
+        $batch['error_message'] = null;
+    } elseif ($bStatus === 'failed') {
+        // ❌ Worker 处理失败 (pipeline 报错等)
+        $err = trim((string)($bdata['error'] ?? '未知错误'));
+        dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('review','committed','failed')", [mb_substr($err, 0, 1000), (int)$batch['id']]);
+        $batch['status'] = 'failed';
+        $batch['error_message'] = $err;
+    }
+
     return $batch;
 }
 
 function startOcrWorker(array $batch): void {
+    global $db;
     $root = realpath(__DIR__ . '/..');
     $dir = $root . DIRECTORY_SEPARATOR . 'data' . DIRECTORY_SEPARATOR . 'ocr_batches';
     $input = $dir . DIRECTORY_SEPARATOR . basename((string)$batch['stored_name']);
-    $output = $input . '.json';
-    $log = $input . '.log';
-    $python = getenv('PYTHON_BIN') ?: (PHP_OS_FAMILY === 'Windows' ? 'python' : 'python3');
-    $worker = $root . DIRECTORY_SEPARATOR . 'ocr' . DIRECTORY_SEPARATOR . 'worker.py';
-    if (!is_file($worker)) return;
-    $cmd = escapeshellarg($python) . ' ' . escapeshellarg($worker) . ' --input ' . escapeshellarg($input) . ' --output ' . escapeshellarg($output) . ' --subject ' . escapeshellarg((string)$batch['subject']) . ' --education-level ' . escapeshellarg((string)$batch['education_level']);
-    if (PHP_OS_FAMILY === 'Windows') {
-        $cmd = 'start /B "StudyScapeOCR" ' . $cmd . ' > ' . escapeshellarg($log) . ' 2>&1';
-        @pclose(@popen($cmd, 'r'));
-    } else {
-        @exec($cmd . ' > ' . escapeshellarg($log) . ' 2>&1 &');
+
+    if (!is_file($input)) {
+        dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message='上传文件丢失: " . SQLite3::escapeString(basename((string)$batch['stored_name'])) . "', updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$batch['id']]);
+        return;
     }
+
+    // ① 读文件 → base64
+    $raw = @file_get_contents($input);
+    if ($raw === false || $raw === '') {
+        dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message='文件读取失败', updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$batch['id']]);
+        return;
+    }
+    $b64 = base64_encode($raw);
+
+    // ② 调 bridge 1201/upload
+    $payload = [
+        'filename' => (string)$batch['file_name'],
+        'file_b64' => $b64,
+        'subject' => (string)($batch['subject'] ?? ''),
+        'education_level' => (string)($batch['education_level'] ?? ''),
+        'paper_name' => pathinfo((string)$batch['file_name'], PATHINFO_FILENAME),
+    ];
+    $resp = ocrBridgeCall('POST', '/upload', $payload);
+
+    // ③ bridge 不可达 (curl 错误)
+    if ($resp['curl_error'] !== '') {
+        $hint = strpos($resp['curl_error'], 'Connection refused') !== false
+            ? 'bridge_server (120.79.161.207:1201) 未启动, 公网服务器执行: sudo systemctl start studyscape-bridge'
+            : 'bridge 连接失败: ' . $resp['curl_error'];
+        dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?", [$hint, (int)$batch['id']]);
+        return;
+    }
+
+    // ④ bridge 返回业务错误 (4xx/5xx) — 带详细 error + detail + hint
+    if (!$resp['ok']) {
+        $bdata = $resp['data'];
+        $mainErr = trim((string)($bdata['error'] ?? ('HTTP ' . $resp['http_code'])));
+        $detail = trim((string)($bdata['detail'] ?? ''));
+        $hint = trim((string)($bdata['hint'] ?? ''));
+        $fullMsg = $mainErr;
+        if ($detail !== '') $fullMsg .= "\n详情: " . $detail;
+        if ($hint !== '') $fullMsg .= "\n建议: " . $hint;
+        dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?", [mb_substr($fullMsg, 0, 1500), (int)$batch['id']]);
+        return;
+    }
+
+    // ⑤ 成功! 拿 bridge_job_id 存 DB, status=queued
+    $jobId = trim((string)($resp['data']['job_id'] ?? ''));
+    if ($jobId === '') {
+        dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message='bridge 返回无 job_id', updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$batch['id']]);
+        return;
+    }
+    dbQuery($db, "UPDATE ocr_import_batches SET status='queued', bridge_job_id=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?", [$jobId, (int)$batch['id']]);
 }
 
 function recordSiteVisit(): void {
@@ -3783,7 +3891,7 @@ if ($action) {
                 $path = $dir . DIRECTORY_SEPARATOR . $stored;
                 if (!move_uploaded_file($file['tmp_name'], $path)) jsonOut(false, 'OCR 文件保存失败');
                 $resultName = $stored . '.json';
-                dbQuery($db, 'INSERT INTO ocr_import_batches(file_name, stored_name, subject, education_level, created_by, status) VALUES(?,?,?,?,?,\'running\')', [(string)$file['name'], $stored, $subject, $level, $uid]);
+                dbQuery($db, 'INSERT INTO ocr_import_batches(file_name, stored_name, subject, education_level, created_by, status) VALUES(?,?,?,?,?,\'queued\')', [(string)$file['name'], $stored, $subject, $level, $uid]);
                 $batchId = (int)$db->lastInsertRowID();
                 $batch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [$batchId]);
                 startOcrWorker($batch ?: ['id' => $batchId, 'stored_name' => $stored, 'subject' => $subject, 'education_level' => $level]);
