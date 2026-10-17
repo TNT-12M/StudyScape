@@ -163,6 +163,20 @@ function cleanOptionText(value) {
   return text.replace(/\s+/g, ' ').trim()
 }
 function normalizeQuestion(question) {
+  // ★ Pipeline → 前端字段名映射 (Contract B format → UI format)
+  if (question.question_content !== undefined && question.content === undefined) {
+    question.content = question.question_content
+  }
+  if (Array.isArray(question.question_options) && question.options === undefined) {
+    question.options = question.question_options
+  }
+  if (question.answer !== undefined && question.correct_answer === undefined) {
+    question.correct_answer = question.answer
+  }
+  if (question.resolve !== undefined && question.explanation === undefined) {
+    question.explanation = question.resolve
+  }
+
   const source = String(question.content || '').replace(/\r/g, '')
   const hasOptions = Array.isArray(question.options) && question.options.length > 0
 
