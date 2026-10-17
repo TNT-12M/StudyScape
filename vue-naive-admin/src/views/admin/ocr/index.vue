@@ -87,7 +87,7 @@
 </template>
 
 <script setup>
-import { h, nextTick } from 'vue'
+import { h, nextTick, onMounted, onUnmounted } from 'vue'
 import { phpOcrApi } from '@/api/php-modules'
 import { renderMathInHtml, renderOption, sanitizeHtml } from '@/views/user/components/question-utils'
 
@@ -227,7 +227,17 @@ async function commit() {
   try { const result = await phpOcrApi.commit({ batch_id: current.value.id, result_json: JSON.stringify({ ...current.value.result, questions: questions.value }) }); message.success(result.message || '已入库'); await loadBatches(); await loadBatch(current.value.id) } catch (error) { message.error(error.message) } finally { committing.value = false }
 }
 async function removeBatch(id) { try { await phpOcrApi.remove(id); message.success('批次已删除'); await loadBatches() } catch (error) { message.error(error.message) } }
-onMounted(loadBatches)
+
+// 自动轮询: 有 queued/processing 状态的批次时, 每 5s 刷新列表
+let pollTimer = null
+onMounted(async () => {
+  await loadBatches()
+  pollTimer = setInterval(async () => {
+    const needRefresh = items.value.some(b => b.status === 'queued' || b.status === 'processing')
+    if (needRefresh) await loadBatches()
+  }, 5000)
+})
+onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 </script>
 
 <style scoped>
