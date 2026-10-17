@@ -1,247 +1,207 @@
-# 学补在线刷题平台
+# StudyScape
 
-面向初高中学生的在线刷题、组卷考试、资料管理和智能题目导入平台。
+> **智能题库管理系统** — 从 PDF 试卷 OCR 识别 → 题目审核 → 入库管理，全流程自托管方案
 
-当前项目采用轻量单体架构：PHP 提供 API 和 Session，SQLite 保存业务数据，Vue 3 管理端负责正式的用户和管理界面，Python Worker 负责 PDF/图片 OCR。
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![PHP](https://img.shields.io/badge/php-8.1%2B-purple)](https://www.php.net/)
+[![Vue](https://img.shields.io/badge/vue-3-42b883)](https://vuejs.org/)
+[![SQLite](https://img.shields.io/badge/sqlite-3-003b57)](https://www.sqlite.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-## 功能
+---
 
-- 用户注册、登录、验证码和 Session 会话。
-- 初始账号 `lian` 自动初始化为不可删除的 root。
-- root、内容管理员、普通用户三级权限。
-- 题库浏览、题目编辑、批量 JSON 导入和 PaperCutter-VL 导入。
-- PDF/图片 OCR 批次处理、审核、编辑、剔除和入库。
-- root 组卷、发布、下架和管理考试。
-- 学生在线考试、自由刷题、提交、自评和结果查看。
-- 资料上传、编辑、下载和删除。
-- 用户反馈每日限制、管理员快捷回复、忽略和重新处理。
-- root 授权操作通知。
+## ✨ 特色亮点
 
-## 技术栈和架构
+| 亮点 | 说明 |
+|------|------|
+| 🏠 **分布式 OCR 架构** | 公网服务器只做展示/DB，家里云（本地大机器）跑 MinerU OCR — 省钱、效果好、可横向扩展 |
+| 🔑 **HMAC-SHA256 安全隧道** | 家里云主动连公网，Challenge-Response 认证；无密钥连接伪装成 HTTP 404 扫不到 |
+| 🧠 **MinerU Flash Tier OCR** | PP-DocLayoutV2 版面识别 + PP-OCRv6 文字识别 + PP-FormulaNet 公式识别 — 纯 ONNX CPU 推理 |
+| 📄 **PDF/图片 → 结构化 JSON** | 11/12 单选完整率 ~92%，自动切题、识别题型、提取选项、关联图片 |
+| 🖼️ **图片内嵌进题干** | 题目里的图表/公式图片自动转 base64 塞进 `question_images`，前端直接预览 |
+| ✅ **审核页预览 + 统一入库** | OCR 结果先过人工审核，确认无误再入库 — 避免脏数据污染题库 |
+| 💰 **零云服务依赖** | 彻底废弃阿里云/腾讯云 OCR API，全部本地跑 — 无 API 费用、无数据外泄风险 |
+| 🧩 **纯 OCR JSON 导入** | 自己的 pipeline 跑完后可直接上传 JSON，跳过 OCR 秒入审核 |
 
-```text
-浏览器
-  ├── Vue 3 + Vite + Naive UI 管理端（/admin）
-  └── 原生用户页面（public/*.html，逐步迁移到 Vue）
-          │ Fetch / Axios + PHP Session + CSRF
-          ▼
-      public/api.php
-          │
-          ├── SQLite exam.db
-          ├── materials/、uploads/ 文件存储
-          ├── data/ OCR 批次和运行数据
-          └── ocr/worker.py
-                  ├── 阿里云教育试卷结构化 OCR
-                  ├── PyMuPDF
-                  └── Pillow
+---
+
+## 🏗️ 架构总览
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           公网服务器 (小机器)                              │
+│                           PHP-FPM + SQLite + Nginx                        │
+│                                                                          │
+│  前端 Vue3 ──▶ api.php ──▶ bridge_server.py (127.0.0.1:1201)             │
+│                              │                                           │
+│                              │ TCP HMAC 长连接 (0.0.0.0:1200)            │
+└──────────────────────────────┼───────────────────────────────────────────┘
+                               │
+┌──────────────────────────────┼───────────────────────────────────────────┐
+│                           家里云/本地大机器                                │
+│                                                                          │
+│  bridge_client.py ──▶ exam_pipeline.py ──▶ MinerU Flash Tier ONNX        │
+│                       (PDF→JSON)         (版面识别 + OCR + 公式)          │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-主要技术：
+---
 
-| 层次 | 技术 |
-|---|---|
-| 后端 | PHP 8.2+、SQLite3 |
-| 会话和安全 | PHP Session、CSRF、登录限流、HTTP 安全头 |
-| 密码存储 | PHP libsodium `secretbox`，密钥位于项目外 |
-| 管理端 | Vue 3、Vite、Pinia、Vue Router、Naive UI、Axios |
-| OCR | Python、阿里云 OCR SDK、PyMuPDF、Pillow |
-| Web 服务 | 本地 PHP 内置服务器，生产 Nginx + PHP-FPM |
+## 🚀 两套部署方案
 
-## 目录结构
+### 方案 A：分布式架构（推荐 ⭐）
 
-```text
-.
-├── public/
-│   ├── api.php                 # PHP API 唯一入口
-│   ├── admin/                  # Vue 管理端生产构建结果
-│   ├── admin.html              # 旧入口，仅跳转 /admin
-│   ├── index.html              # 原生首页
-│   ├── auth.html               # 原生登录/注册页
-│   ├── questions.html          # 原生题库页
-│   ├── exam.html               # 原生考试页
-│   ├── practice.html           # 原生刷题页
-│   ├── materials.html          # 原生资料页
-│   └── assets/app.css
-├── vue-naive-admin/            # Vue 管理端源码，保留原项目 LICENSE 和作者信息
-├── ocr/
-│   ├── worker.py               # OCR Worker
-│   └── requirements.txt
-├── materials/                  # 永久资料存储
-├── uploads/                    # 临时上传目录
-├── data/                       # OCR 批次和运行数据，不应提交到 Git
-├── exam.db                     # SQLite 数据库，首次访问时自动创建
-├── php.ini                     # Windows 本地 PHP 配置
-├── start_server.bat            # Windows 启动脚本
-├── DEPLOYMENT.md               # 独立部署说明
-├── OCR流水线对接文档.md
-├── 题目答案自动匹配功能说明.md
-└── .gitignore
+> **适合**: 公网服务器 ≤ 4GB 内存、有本地闲置大机器 (≥ 8GB)、追求性价比
+
+| 机器 | 最低配置 | 职责 |
+|------|---------|------|
+| 公网服务器 | 2GB RAM, 2核 CPU, Ubuntu 22.04 | Nginx + PHP-FPM + SQLite + bridge_server |
+| 家里云/本地 | 8GB RAM, 4核 CPU, Ubuntu 22.04 | MinerU parse-server + bridge_client + exam_pipeline |
+
+**公网服务器**：
+```bash
+# 1. 拉代码
+cd /var/www
+git clone https://github.com/YOUR_USER/StudyScape.git && cd StudyScape
+
+# 2. 安装 PHP 依赖
+sudo apt install php-fpm php-sqlite3 php-curl php-gd php-mbstring -y
+
+# 3. 前端构建
+cd vue-naive-admin && npm install && npm run build && cd ..
+
+# 4. MinerU 不需要在公网装! bridge_server 只用 Python 标准库
+python3 --version  # >= 3.8 即可
+
+# 5. 生成共享密钥 (32字节 hex)
+python3 -c "import secrets; print(secrets.token_hex(32))"
+echo '把上面生成的密钥粘贴这里' > ocr_bridge/bridge_key.txt
+chmod 600 ocr_bridge/bridge_key.txt
+
+# 6. systemd 安装 bridge_server
+sudo cp ocr_bridge/studyscape-bridge.service /etc/systemd/system/
+sudo systemctl enable --now studyscape-bridge
+sudo ufw allow 1200/tcp  # 防火墙放行 Worker 连接
+
+# 7. Nginx 配置 → 把 public/ 作为 root 指向
 ```
 
-`exam.db`、上传资料、OCR 结果、日志和外部密码密钥属于运行数据，不应提交到代码仓库。
+**家里云/本地**：
+```bash
+# 1. 拉代码
+cd ~
+git clone https://github.com/YOUR_USER/StudyScape.git && cd StudyScape
 
-## 本地开发
+# 2. 装 MinerU (Flash Tier — 纯 ONNX, 不需要 GPU)
+pip3 install "mineru>=4.0"
 
-### 环境要求
+# 3. 启动 MinerU parse-server (systemd)
+sudo cp ocr_bridge/studyscape-bridge-client.service /etc/systemd/system/
+# 注意: 家里云还需要一个 mineru-flash.service (手动写, 见下方)
 
-- PHP 8.2+，扩展：`sqlite3`、`pdo_sqlite`、`gd`、`fileinfo`、`curl`、`mbstring`、`zip`、`xml`、`sodium`。
-- Python 3.10+，用于 OCR Worker。
-- 可选：Poppler、antiword 等文档转换工具。
-- Vue 管理端构建需要 Node.js 和 pnpm，或使用项目已有的 Bun 运行环境。
+# mineru-flash.service (家里云自己写):
+# [Unit]
+# Description=MinerU Flash Tier Parse Server
+# [Service]
+# User=$USER
+# ExecStart=/usr/bin/python3 -m mineru.parser.api_server --tier flash --host 127.0.0.1 --port 16580 --allow-local-source
+# [Install]
+# WantedBy=multi-user.target
 
-### 启动 PHP 服务
+sudo systemctl daemon-reload
+sudo systemctl enable --now mineru-flash studyscape-bridge-client
 
-Windows 可以编辑 `start_server.bat` 中的 `PHP_BIN` 后双击运行。也可以手动执行：
+# 4. 写入共享密钥 (和公网服务器完全一致!)
+#    推荐: scp 从公网服务器拷过来
+scp user@公网IP:/path/to/StudyScape/ocr_bridge/bridge_key.txt ocr_bridge/
+chmod 600 ocr_bridge/bridge_key.txt
+
+# 5. 验证
+sudo journalctl -u studyscape-bridge-client -f
+# 应该看到: ✅ 认证通过, 等待任务 ...
+```
+
+### 方案 B：单机全栈
+
+> **适合**: 公网服务器 ≥ 8GB RAM、不想维护两台机器、追求简单
+
+一台机器干所有事——把家里云那套 MinerU + bridge_client 也装在公网服务器上：
 
 ```bash
-php -c php.ini -S 127.0.0.1:8080 -t public/
+# 1. 基础环境 (同方案 A 公网部分)
+# 2. 额外装 MinerU
+pip3 install "mineru>=4.0" onnxruntime
+
+# 3. bridge_server + bridge_client 都装 (同一密钥文件)
+sudo cp ocr_bridge/studyscape-bridge.service /etc/systemd/system/
+sudo cp ocr_bridge/studyscape-bridge-client.service /etc/systemd/system/
+
+# 4. mineru-flash.service (手动创建, 同上)
+sudo systemctl daemon-reload
+sudo systemctl enable --now mineru-flash studyscape-bridge studyscape-bridge-client
 ```
 
-访问地址：
+---
 
-```text
-首页：http://127.0.0.1:8080/index.html
-登录：http://127.0.0.1:8080/auth.html
-管理端：http://127.0.0.1:8080/admin/
-API：http://127.0.0.1:8080/api.php?action=public_overview
+## 📁 目录结构
+
+```
+StudyScape/
+├── public/                    # PHP 后端 + 构建好的前端
+│   ├── api.php               # 所有 HTTP 接口 (统一入口)
+│   ├── admin/                # Vue3 前端构建产物 (dist)
+│   └── ...                   
+├── vue-naive-admin/           # Vue3 + Naive UI 前端源码
+│   ├── src/
+│   │   └── views/admin/ocr/  # OCR 审核页
+│   └── ...
+├── ocr_bridge/               # 分布式 OCR 桥接层 (核心!)
+│   ├── bridge_server.py      # 公网: TCP relay + localhost HTTP
+│   ├── bridge_client.py      # 家里云: 主动连 + 自动重连 + 调 pipeline
+│   ├── studyscape-bridge.service         # 公网 systemd
+│   └── studyscape-bridge-client.service  # 家里云 systemd
+├── exam_pipeline.py           # MinerU flash tier → Contract B JSON pipeline
+├── security/                  # 安全监控脚本 (geo_lookup, log_monitor)
+├── materials/                 # 上传资料存储
+├── .gitignore                # bridge_key.txt 不入库!
+└── README.md
 ```
 
-### 安装 OCR 依赖
+---
 
-```bash
-python -m pip install -r ocr/requirements.txt
-```
+## 🛠️ 技术栈
 
-OCR 需要阿里云 AccessKey。Worker 从项目外的 `AccessKey .env` 读取凭据；生产环境应通过服务器安全配置提供，禁止把密钥写入源码或提交 Git。
+| 层 | 技术 |
+|----|------|
+| 前端 | Vue 3 + Naive UI + Vite |
+| 后端 | PHP 8.1+ (单文件 api.php, SQLite) |
+| OCR | MinerU 4.x Flash Tier — PP-DocLayoutV2 + PP-OCRv6 + PP-FormulaNet |
+| 桥接 | asyncio (TCP) + HMAC-SHA256 认证 + 指数退避重连 |
+| 存储 | SQLite 3 (单文件, 零依赖) |
+| 部署 | systemd (自启守护) + Nginx (静态+PHP) |
 
-### 构建 Vue 管理端
+---
 
-```bash
-cd vue-naive-admin
-pnpm install
-pnpm build
-```
+## 🔐 安全说明
 
-生产环境变量已经配置为：
+1. **bridge_key.txt 永远不入库** — `.gitignore` 排除，手动写入，权限 600
+2. **Challenge-Response 认证** — 密钥永远不出现在网络上，只传 HMAC 签名
+3. **无密钥连接 → HTTP 404 伪装** — 扫端口的人以为这是个普通 web 服务器
+4. **bridge_server HTTP 只绑 localhost** — 127.0.0.1:1201 不上公网
+5. **OCR 零云 API 依赖** — 数据不出局域网，彻底无泄露风险
 
-```text
-VITE_USE_HASH=true
-VITE_PUBLIC_PATH=/admin/
-VITE_PHP_API_URL=/api.php
-```
+---
 
-构建后将 `vue-naive-admin/dist/` 内容同步到 `public/admin/`：
+## 🧪 快速测试
 
-```bash
-rm -rf ../public/admin
-mkdir -p ../public/admin
-cp -R dist/. ../public/admin/
-```
+部署好后，在前端 OCR 审核页：
 
-## 权限模型
+1. **Tab1 上传 PDF** → 走 bridge → 家里云 MinerU 处理 → 自动回填审核页
+2. **Tab2 导入已有 JSON** → 跳过 OCR，秒入审核
+3. 审核确认后点 **统一入库** → 进题库
 
-| 角色 | 权限 |
-|---|---|
-| `root` | 全部平台权限，包括用户授权、反馈处理、题库、OCR、资料和考试发布 |
-| `content_admin` | 题库查看/增删改、JSON 导入、OCR 审核入库、资料上传/编辑/删除/下载 |
-| `user` | 刷题、考试、资料下载、提交反馈和查看自己的反馈回复 |
+---
 
-特殊规则：
+## 📄 License
 
-- 用户名 `lian` 是初始 root，不能删除、禁用或降权。
-- 只有初始 `lian` 可以新增或撤销其他 root。
-- 所有 root 可以授权或撤销 `content_admin`。
-- content_admin 无法组卷、发布/下架考试、管理用户或处理反馈。
-- 所有权限在 PHP 后端实时校验，前端菜单隐藏不构成安全边界。
-
-首次初始化会创建：
-
-```text
-用户名：lian
-邮箱：44175149@qq.com
-初始密码：lian120208
-```
-
-密码不会明文保存。部署后应按运维流程管理初始密码；当前系统不提供网页端密码读取接口。
-
-## 密码密钥
-
-默认密钥路径：
-
-```text
-/etc/studyscape/password.key
-```
-
-也可以通过环境变量覆盖：
-
-```text
-PASSWORD_KEY_FILE=/path/to/password.key
-```
-
-密钥由 PHP 首次运行时自动生成，使用 32 字节随机值和 libsodium `secretbox`。密钥必须与 `exam.db` 成对备份；密钥丢失后无法解密已有密码。密钥不能写入项目、数据库、日志或 HTTP 响应。
-
-## 主要 API
-
-所有 API 使用 `public/api.php?action=<action>`。
-
-公开接口：
-
-- `public_overview`、`captcha`、`register`、`login`、`logout`、`check_session`。
-
-用户接口：
-
-- `get_dashboard`
-- `paper_list`、`paper_get`
-- `attempt_start_exam`、`attempt_get`、`attempt_submit`、`attempt_result`、`attempt_self_grade`、`attempt_list_mine`
-- `practice_subjects`、`practice_start`、`practice_submit`、`practice_result`、`practice_self_grade`
-- `material_list`、`material_get_token`、`material_download`
-- `feedback_submit`、`feedback_list_mine`
-- `notification_list`、`notification_unread_count`、`notification_mark_read`
-
-内容管理接口：
-
-- `question_stats`、`get_subjects`、`list_questions`、`get_question`
-- `add_question`、`update_question`、`delete_question`
-- `bulk_move_questions`、`bulk_update_question_category`、`bulk_delete_questions`
-- `import_questions_json`
-- `ocr_batch_create`、`ocr_batch_list`、`ocr_batch_get`、`ocr_batch_retry`、`ocr_batch_delete`、`ocr_batch_commit`
-- `material_upload`、`material_update`、`material_delete`
-
-root 接口：
-
-- `get_admin_panel`
-- `create_root`、`grant_root`、`revoke_root`
-- `grant_content_admin`、`revoke_content_admin`
-- `admin_feedback_list`、`admin_feedback_update`
-- `admin_access_stats`
-- `paper_save`、`paper_publish`、`paper_unpublish`、`paper_delete`
-
-以下危险接口已经移除，历史请求统一返回“功能已移除”：
-
-- `admin_danger_challenge`
-- `clear_users`
-- `reset_db`
-
-## 数据和备份
-
-运行时目录需要由 PHP-FPM 用户读写：
-
-```text
-exam.db
-materials/
-uploads/
-data/
-/etc/studyscape/password.key
-```
-
-备份时必须同时备份 `exam.db` 和 `password.key`。不要把 `data/`、上传资料或生产密钥加入 Git。
-
-## 相关文档
-
-- [DEPLOYMENT.md](DEPLOYMENT.md)：Ubuntu/Nginx/PHP-FPM/Vue/OCR 完整部署步骤。
-- [OCR流水线对接文档.md](OCR流水线对接文档.md)：OCR Worker 与 PaperCutter-VL JSON 对接。
-- [题目答案自动匹配功能说明.md](题目答案自动匹配功能说明.md)：题目和答案导入匹配规则。
-
-## 开源许可
-
-Vue 管理端保留上游项目的 `LICENSE` 文件、作者署名和 MIT 协议。项目自身代码和文档按仓库现有授权约定使用。
+MIT — 自由使用、修改、分发。
