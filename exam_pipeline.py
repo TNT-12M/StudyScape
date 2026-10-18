@@ -277,8 +277,9 @@ def flatten_blocks(page_json: dict) -> list[dict]:
                 skipped_noise += 1
                 continue
             
-            # 2. 正则噪声过滤（但 image block 不做文本噪声过滤，它们可能只有路径）
-            if btype != "image" and is_noise_content(content):
+            # 2. 正则噪声过滤（image/chart/table 三种图片块 content 经常是空的,
+            #    is_noise_content 的空字符串检测会误杀它们 → 跳过文本噪声检查）
+            if btype not in ("image", "chart", "table") and is_noise_content(content):
                 skipped_noise += 1
                 continue
             
@@ -882,6 +883,29 @@ def build_contract_b_questions(questions: list[dict], images_dir: str | None = N
         except (ValueError, TypeError):
             qid = i + 1000
         
+        # ★ 广告/水印图过滤:
+        # 如果题干完全不含图引用关键词 ("如图"/"见表"等), 且 image block 在页面底部 20% 区域
+        # 且图片高度正常 (>15% 页面高度, 不是小角标), 则判定为广告/水印 → 跳过
+        IMAGE_REF_KEYWORDS = ["如图", "见表", "如图所示", "如图,", "如图，", "见图",
+                               "上图", "下图", "图表", "图形", "图像", "表中", "下表", "上表", "直方图", "统计图"]
+        has_image_ref = any(kw in question_content for kw in IMAGE_REF_KEYWORDS)
+        if not has_image_ref and image_blocks:
+            before = len(image_blocks)
+            filtered = []
+            for ib in image_blocks:
+                bbox = ib.get("bbox", [0, 0, 1, 1])
+                y1 = bbox[3] if len(bbox) > 3 else 1.0
+                y0 = bbox[1] if len(bbox) > 1 else 0.0
+                img_h = y1 - y0
+                # 可疑: 图片底部在页面底部 20% 区域 + 高度 > 15% 页面 (不是小 icon)
+                if y1 > 0.8 and img_h > 0.15:
+                    print(f"  [广告过滤] 跳过可疑图: page={ib['page_idx']} y1={y1:.2f} h={img_h:.2f} (题干无图引用)")
+                    continue
+                filtered.append(ib)
+            image_blocks = filtered
+            if len(image_blocks) < before:
+                print(f"  [广告过滤] qid={q['qid_text']}: {before} → {len(image_blocks)} 张")
+
         # ★ question_images: 从 image blocks + images_dir 读 base64
         question_images = []
         for ib in image_blocks:
