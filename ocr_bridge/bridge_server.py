@@ -92,7 +92,7 @@ class FrameProto:
 
 # ======================= 全局状态 =======================
 class BridgeState:
-    def __init__(self):
+    def __init__(self, persist_dir=None):
         self.worker_reader = None
         self.worker_writer = None
         self.worker_last_ping = 0
@@ -100,6 +100,63 @@ class BridgeState:
         self.queue = {}     # job_id → job dict {enqueued_at, status, data, result}
         self.next_id = 0
         self.lock = asyncio.Lock()
+        # ★ 磁盘持久化: bridge 重启不丢 jobs
+        if persist_dir is None:
+            persist_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_bridge_jobs")
+        self.persist_dir = persist_dir
+        os.makedirs(self.persist_dir, exist_ok=True)
+        self._load_persisted()
+
+    def _job_file(self, jid):
+        return os.path.join(self.persist_dir, f"{jid}.json")
+
+    def _persist(self, jid, job):
+        """写磁盘 (只存状态/result/error, 不存 data[base64] 节省空间)"""
+        slim = {k: v for k, v in job.items() if k != "data"}
+        try:
+            with open(self._job_file(jid), "w", encoding="utf-8") as f:
+                json.dump(slim, f, ensure_ascii=False)
+        except Exception as e:
+            logging.warning(f"持久化失败 {jid}: {e}")
+
+    def _delete_persist(self, jid):
+        try:
+            fp = self._job_file(jid)
+            if os.path.exists(fp):
+                os.remove(fp)
+        except Exception:
+            pass
+
+    def _load_persisted(self):
+        """启动时从磁盘加载遗留 jobs
+        
+        processing 状态的 job 在 bridge 重启后 worker 那边也丢了 → 改 failed
+        queued 的继续等 worker 拉
+        """
+        loaded = 0
+        try:
+            for fn in os.listdir(self.persist_dir):
+                if not fn.endswith(".json"):
+                    continue
+                fp = os.path.join(self.persist_dir, fn)
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        job = json.load(f)
+                    jid = job.get("job_id") or fn[:-5]
+                    if job.get("status") == "processing":
+                        job["status"] = "failed"
+                        job["error"] = "bridge 重启恢复, processing 任务已失效"
+                        job["finished_at"] = job.get("finished_at") or time.time()
+                        self._persist(jid, job)
+                    self.queue[jid] = job
+                    self.next_id = max(self.next_id, int(jid.split("_")[-1]) if "_" in jid else 0)
+                    loaded += 1
+                except Exception as e:
+                    logging.warning(f"加载遗留 job {fn} 失败: {e}")
+        except Exception as e:
+            logging.warning(f"扫描持久化目录失败: {e}")
+        if loaded:
+            logging.info(f"★ 从磁盘加载 {loaded} 个遗留 jobs")
 
     async def enqueue(self, job):
         async with self.lock:
@@ -109,6 +166,7 @@ class BridgeState:
             job["status"] = "queued"
             job["enqueued_at"] = time.time()
             self.queue[jid] = job
+            self._persist(jid, job)
         return jid
 
     async def dequeue(self):
@@ -118,6 +176,7 @@ class BridgeState:
                 if job["status"] == "queued":
                     job["status"] = "processing"
                     job["started_at"] = time.time()
+                    self._persist(jid, job)
                     return jid, job
         return None
 
@@ -128,6 +187,7 @@ class BridgeState:
                 self.queue[jid]["result"] = result_json
                 self.queue[jid]["error"] = error
                 self.queue[jid]["finished_at"] = time.time()
+                self._persist(jid, self.queue[jid])
 
     async def get_status(self, jid):
         async with self.lock:
@@ -141,12 +201,14 @@ class BridgeState:
                 if job["status"] in ("done", "failed"):
                     if now - job.get("finished_at", 0) > RESULT_TTL:
                         del self.queue[jid]
+                        self._delete_persist(jid)
                 elif job["status"] == "queued":
                     if now - job.get("enqueued_at", 0) > 600:
                         # 10 分钟没被 worker 取走 → 超时
                         job["status"] = "failed"
                         job["error"] = "timeout: worker unavailable"
                         job["finished_at"] = now
+                        self._persist(jid, job)
 
 
 STATE = BridgeState()
