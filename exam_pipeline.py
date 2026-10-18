@@ -291,13 +291,14 @@ def flatten_blocks(page_json: dict) -> list[dict]:
                 "index": block.get("index"),
             }
             
-            # ★ 图片类型: image / chart / table —— MinerU flash tier 三种块都带 image_path
-            # image_path 藏在嵌套结构里: block.content[0].image_path (数组里的 dict)
+            # ★ 图片类型: image / chart / table —— MinerU flash tier 返回的 page_json 里 image block
+            # 没有 image_path 字段! 只有 type / index / bbox / content (content[0] 是 body dict)
+            # 图片文件名在 zip 解压目录里: page_{page_idx}_{type}_{index}.jpg → 自己拼!
             IMAGE_TYPES = {"image", "chart", "table"}
             if btype in IMAGE_TYPES:
                 img_path = None
                 img_url = None
-                # 优先级: 嵌套 content[0] > 顶层 block 字段 > content_raw (仅当它是 dict)
+                # 先试 JSON 里有没有 (兼容旧版本/其他 tier)
                 nested = None
                 if isinstance(content_raw, list) and content_raw:
                     nested = content_raw[0] if isinstance(content_raw[0], dict) else None
@@ -310,7 +311,12 @@ def flatten_blocks(page_json: dict) -> list[dict]:
                     img_path = block.get("image_path") or block.get("path")
                 if not img_url:
                     img_url = block.get("image_url") or block.get("url")
-                entry["image_path"] = img_path  # zip 解压后的相对路径（如 "images/page_0_chart_14.jpg"）
+                # MinerU flash tier 兜底: 自己拼 zip 解压后的文件名
+                # zip 解压后文件在 images/ 子目录: images/page_{page_idx}_{btype}_{index}.jpg
+                if not img_path:
+                    block_index = block.get("index", entry.get("index", 0))
+                    img_path = f"images/page_{page_idx}_{btype}_{block_index}.jpg"
+                entry["image_path"] = img_path
                 entry["image_url"] = img_url
                 entry["btype_original"] = btype  # 保留原始 type 供 classify_block 用
             
