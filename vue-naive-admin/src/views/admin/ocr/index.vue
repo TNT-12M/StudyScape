@@ -176,6 +176,18 @@ function normalizeQuestion(question) {
   if (question.resolve !== undefined && question.explanation === undefined) {
     question.explanation = question.resolve
   }
+  // ★ 图片映射: 后端 question_images (base64 字符串数组) → 前端 images ({base64} 对象数组)
+  // 后端格式: ["base64str1", "base64str2"]
+  // 前端期望: [{base64: "base64str1"}, {base64: "base64str2"}]
+  if (Array.isArray(question.question_images) && question.images === undefined) {
+    question.images = question.question_images
+      .filter(img => img && typeof img === 'string')
+      .map(b64 => ({ base64: b64 }))
+  }
+  // 兜底: 兼容某些接口直接返回 images (对象数组)
+  if (!Array.isArray(question.images)) {
+    question.images = []
+  }
 
   const source = String(question.content || '').replace(/\r/g, '')
   const hasOptions = Array.isArray(question.options) && question.options.length > 0
