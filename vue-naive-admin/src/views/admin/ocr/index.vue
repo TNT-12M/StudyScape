@@ -28,7 +28,7 @@
         <n-data-table :columns="batchColumns" :data="batches" :loading="loading" :pagination="paginationProps" @update:page="onPageChange" @update:page-size="onPageSizeChange" />
       </n-card>
       <n-card v-if="current" ref="reviewCard" :title="`审核：${current.file_name}`" segmented class="review-card">
-        <template #header-extra><n-space><n-button @click="selectAll(true)">全部保留</n-button><n-button @click="selectAll(false)">全部剔除</n-button><n-button type="primary" :loading="committing" @click="commit">统一入库</n-button></n-space></template>
+          <template #header-extra><n-space><n-button v-if="current.status==='review' || current.status==='committed'" @click="downloadAIPrompt">📄 下载 AI 提示词</n-button><n-button @click="selectAll(true)">全部保留</n-button><n-button @click="selectAll(false)">全部剔除</n-button><n-button type="primary" :loading="committing" @click="commit">统一入库</n-button></n-space></template>
         <n-alert v-if="current.error_message" type="error">
           <template #icon>⚠️</template>
           <div class="ocr-error-detail">
@@ -113,9 +113,39 @@ const paginationProps = computed(() => ({
 }))
 const totalCount = ref(0)
 const statusMap = { running: '处理中', queued: '排队中', review: '待审核', failed: '失败', committed: '已入库' }
+const stageMap = {
+  mineru_starting: '⚡ MinerU 解析中...',
+  pipeline_running: '🔧 Pipeline 构建题目...',
+  done: '✅ 识别完成',
+}
+function renderBatchStatus(row) {
+  const status = row.status || ''
+  const stage = row.stage || ''
+  const qpos = row.queue_position || 0
+
+  // 已完成/终态: 简单显示
+  if (['review', 'committed', 'failed'].includes(status)) {
+    return h('span', { class: `status-${status}` }, statusMap[status] || status)
+  }
+
+  // queued: 显示队列位置
+  if (status === 'queued') {
+    let text = '排队中'
+    if (qpos > 0) text += ` (队列第 ${qpos} 位)`
+    return h('span', { class: 'status-queued' }, text)
+  }
+
+  // processing/running: 显示具体阶段
+  if (status === 'processing' || status === 'running') {
+    const stageText = stageMap[stage] || '处理中...'
+    return h('span', { class: 'status-processing' }, stageText)
+  }
+
+  return h('span', statusMap[status] || status)
+}
 const batchColumns = [
   { title: '文件名', key: 'file_name', ellipsis: { tooltip: true } },
-  { title: '状态', key: 'status', width: 100, render: row => h('span', { class: `status-${row.status}` }, statusMap[row.status] || row.status) },
+  { title: '状态', key: 'status', width: 180, render: renderBatchStatus },
   { title: '题目数', key: 'question_count', width: 90 },
   { title: '错误', key: 'error_message', ellipsis: { tooltip: true }, render: row => row.error_message ? h('span', { style: 'color: var(--n-error-color)' }, prettyOcrError(row.error_message)) : '-' },
   { title: '操作', key: 'actions', width: 220, render: row => h('div', { class: 'actions' }, [h('button', { class: 'action-button primary', onClick: () => loadBatch(row.id) }, '审核'), h('button', { class: 'action-button danger', onClick: () => removeBatch(row.id) }, '删除')]) },
@@ -247,6 +277,11 @@ async function loadBatch(id) {
   try { const result = await phpOcrApi.get(id); current.value = result.data?.batch || null; questions.value = (current.value?.result?.questions || []).map(normalizeQuestion); await nextTick(); reviewCard.value?.$el?.scrollIntoView({ behavior: 'smooth', block: 'start' }) } catch (error) { message.error(error.message) }
 }
 function selectAll(value) { questions.value.forEach(question => { question.included = value }) }
+function downloadAIPrompt() {
+  if (!current.value?.id) return
+  phpOcrApi.export(current.value.id)
+  message.success('开始下载 AI 提示词纯文本')
+}
 async function commit() {
   if (!current.value?.id) return
   committing.value = true

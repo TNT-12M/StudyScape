@@ -23,6 +23,7 @@ import base64
 import io
 import secrets
 import struct
+import subprocess
 import logging
 import traceback
 
@@ -33,12 +34,70 @@ KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_key.
 PIPELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "exam_pipeline.py")
 PIPELINE_TIMEOUT = 300   # 单任务最大 5 分钟
 
+# MinerU parse-server 挂起配置
+MINERU_SERVICE = "mineru-flash"
+MINERU_COLD_START_WAIT = 15   # MinerU 冷启动等 15s
+IDLE_SUSPEND_SECONDS = 300    # 5 分钟无任务自动挂起 MinerU
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("bridge-client")
+
+# ======================= MinerU 挂起/拉起 =======================
+_mineru_last_task = 0  # 最后一次处理任务的时间戳
+
+
+def _mineru_active():
+    """systemctl is-active mineru-flash"""
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", MINERU_SERVICE],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def _mineru_start():
+    """systemctl start mineru-flash + 等冷启动"""
+    if _mineru_active():
+        return True
+    log.info(f"  ⚡ 拉起 {MINERU_SERVICE} (冷启动等待 {MINERU_COLD_START_WAIT}s)...")
+    try:
+        subprocess.run(["systemctl", "start", MINERU_SERVICE], timeout=10)
+        time.sleep(MINERU_COLD_START_WAIT)
+        # 再确认一次
+        if _mineru_active():
+            log.info(f"  ✅ {MINERU_SERVICE} 已启动")
+            return True
+        else:
+            log.error(f"  ❌ {MINERU_SERVICE} 启动失败")
+            return False
+    except Exception as e:
+        log.error(f"  ❌ 启动异常: {e}")
+        return False
+
+
+def _mineru_stop():
+    """systemctl stop mineru-flash"""
+    if not _mineru_active():
+        return
+    log.info(f"  💤 挂起 {MINERU_SERVICE} (空闲 {IDLE_SUSPEND_SECONDS}s)...")
+    try:
+        subprocess.run(["systemctl", "stop", MINERU_SERVICE], timeout=10)
+    except Exception as e:
+        log.warning(f"  停止异常: {e}")
+
+
+def _check_idle_suspend():
+    """主循环里定期调用: 空闲超时就挂起 MinerU"""
+    if _mineru_active() and time.time() - _mineru_last_task > IDLE_SUSPEND_SECONDS:
+        _mineru_stop()
+
 
 # ======================= 密钥加载 =======================
 if not os.path.exists(KEY_FILE):
@@ -106,13 +165,21 @@ async def run_worker():
 
             loop_lock = asyncio.Lock()
 
-            # --- 主循环: 心跳 + 收任务 ---
+            # --- 主循环: 心跳 + 收任务 + idle 检查 ---
             last_ping = 0
+            last_idle_check = 0
             while True:
+                now = time.time()
+
                 # 发心跳
-                if time.time() - last_ping > 10:
+                if now - last_ping > 10:
                     await FrameProto.send(writer, {"type": "PING"})
-                    last_ping = time.time()
+                    last_ping = now
+
+                # ★ 每 60s 检查一次空闲挂起
+                if now - last_idle_check > 60:
+                    _check_idle_suspend()
+                    last_idle_check = now
 
                 # 等消息 (20s 超时)
                 try:
@@ -154,12 +221,24 @@ async def run_worker():
 # ======================= 任务处理 =======================
 async def handle_task(writer, job_id, task_data, lock):
     """串行处理一个任务"""
+    global _mineru_last_task
     async with lock:
+        _mineru_last_task = time.time()  # 更新活跃时间
         try:
             filename = task_data.get("filename", "unknown.pdf")
             file_b64 = task_data.get("file_b64", "")
             subject = task_data.get("subject", "")
             education_level = task_data.get("education_level", "")
+
+            # ★ 上报阶段: MinerU 解析中
+            await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "mineru_starting"})
+
+            # ★ MinerU 挂起中就拉起 (冷启动可能 10-20s)
+            loop = asyncio.get_event_loop()
+            miner_ok = await loop.run_in_executor(None, _mineru_start)
+            if not miner_ok:
+                await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "MinerU parse-server 启动失败"})
+                return
 
             # 写临时文件
             tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_jobs")
@@ -171,6 +250,9 @@ async def handle_task(writer, job_id, task_data, lock):
                 f.write(base64.b64decode(file_b64))
 
             log.info(f"  处理 {filename} ({len(file_b64)//1024}KB base64) → {tmp_in}")
+
+            # ★ 上报阶段: Pipeline 构建中
+            await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "pipeline_running"})
 
             # 调用 exam_pipeline.py
             proc = await asyncio.create_subprocess_exec(
@@ -196,6 +278,9 @@ async def handle_task(writer, job_id, task_data, lock):
                 log.error(f"  pipeline rc={proc.returncode}: {stderr[:300]}")
                 await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": f"pipeline rc={proc.returncode}"})
                 return
+
+            # ★ 上报阶段: 完成
+            await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "done"})
 
             # 读结果
             if not os.path.exists(tmp_out):

@@ -97,6 +97,14 @@ export const phpOcrApi = {
   retry: batch_id => phpAction('ocr_batch_retry', { batch_id }),
   remove: batch_id => phpAction('ocr_batch_delete', { batch_id }),
   commit: data => phpAction('ocr_batch_commit', data),
+  // 下载 AI 提示词纯文本 (返回文件下载, 不走 phpAction JSON 封装)
+  export: batch_id => {
+    const token = localStorage.getItem('token') || ''
+    const baseURL = (import.meta.env.VITE_API_BASE || '/api.php') + '?action=ocr_batch_export'
+    const url = `${baseURL}&batch_id=${batch_id}&token=${encodeURIComponent(token)}&t=${Date.now()}`
+    window.location.href = url  // 直接触发浏览器下载
+    return Promise.resolve()
+  },
 }
 
 export const phpFeedbackApi = {

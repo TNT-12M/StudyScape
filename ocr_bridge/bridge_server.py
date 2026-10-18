@@ -172,13 +172,18 @@ class BridgeState:
     async def dequeue(self):
         """Worker 拉取一个待处理任务。返回 (jid, job_data) 或 None"""
         async with self.lock:
-            for jid, job in list(self.queue.items()):
-                if job["status"] == "queued":
-                    job["status"] = "processing"
-                    job["started_at"] = time.time()
-                    self._persist(jid, job)
-                    return jid, job
-        return None
+            queued_sorted = sorted(
+                [(jid, job) for jid, job in self.queue.items() if job["status"] == "queued"],
+                key=lambda x: x[1]["enqueued_at"]
+            )
+            if not queued_sorted:
+                return None
+            jid, job = queued_sorted[0]
+            job["status"] = "processing"
+            job["started_at"] = time.time()
+            job["stage"] = "mineru_starting"
+            self._persist(jid, job)
+            return jid, job
 
     async def set_result(self, jid, result_json, error=None):
         async with self.lock:
@@ -186,12 +191,38 @@ class BridgeState:
                 self.queue[jid]["status"] = "done" if error is None else "failed"
                 self.queue[jid]["result"] = result_json
                 self.queue[jid]["error"] = error
+                self.queue[jid]["stage"] = "done" if error is None else "failed"
                 self.queue[jid]["finished_at"] = time.time()
+                self._persist(jid, self.queue[jid])
+
+    async def update_stage(self, jid, stage):
+        """Worker 上报进度阶段"""
+        async with self.lock:
+            if jid in self.queue:
+                self.queue[jid]["stage"] = stage
                 self._persist(jid, self.queue[jid])
 
     async def get_status(self, jid):
         async with self.lock:
-            return self.queue.get(jid)
+            job = self.queue.get(jid)
+            if not job:
+                return None
+            # 计算队列位置: 当前 processing = 0, queued 按 enqueued_at 排
+            qpos = 0
+            if job["status"] == "queued":
+                all_queued = sorted(
+                    [j for j in self.queue.values() if j["status"] == "queued"],
+                    key=lambda j: j["enqueued_at"]
+                )
+                for i, qj in enumerate(all_queued):
+                    if qj.get("job_id") == jid:
+                        qpos = i + 1
+                        break
+            out = dict(job)
+            out["queue_position"] = qpos
+            # 不回传 data (base64)
+            out.pop("data", None)
+            return out
 
     async def cleanup_old(self):
         now = time.time()
@@ -282,6 +313,13 @@ async def handle_worker(reader, writer):
                     if mtype == "PING":
                         await FrameProto.send(writer, {"type": "PONG"})
                         STATE.worker_last_ping = time.time()
+
+                    elif mtype == "PROGRESS":
+                        jid = msg.get("job_id")
+                        stage = msg.get("stage", "")
+                        if jid and stage:
+                            await STATE.update_stage(jid, stage)
+                            log.info(f"  📊 {jid} stage={stage}")
 
                     elif mtype == "RESULT":
                         jid = msg.get("job_id")
