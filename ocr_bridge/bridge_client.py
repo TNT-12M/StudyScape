@@ -51,10 +51,10 @@ _mineru_last_task = 0  # 最后一次处理任务的时间戳
 
 
 def _mineru_active():
-    """systemctl is-active mineru-flash"""
+    """sudo systemctl is-active mineru-flash"""
     try:
         result = subprocess.run(
-            ["systemctl", "is-active", MINERU_SERVICE],
+            ["sudo", "systemctl", "is-active", MINERU_SERVICE],
             capture_output=True, text=True, timeout=5
         )
         return result.stdout.strip() == "active"
@@ -63,12 +63,12 @@ def _mineru_active():
 
 
 def _mineru_start():
-    """systemctl start mineru-flash + 等冷启动"""
+    """sudo systemctl start mineru-flash + 等冷启动"""
     if _mineru_active():
         return True
     log.info(f"  ⚡ 拉起 {MINERU_SERVICE} (冷启动等待 {MINERU_COLD_START_WAIT}s)...")
     try:
-        subprocess.run(["systemctl", "start", MINERU_SERVICE], timeout=10)
+        subprocess.run(["sudo", "systemctl", "start", MINERU_SERVICE], timeout=10)
         time.sleep(MINERU_COLD_START_WAIT)
         # 再确认一次
         if _mineru_active():
@@ -83,12 +83,12 @@ def _mineru_start():
 
 
 def _mineru_stop():
-    """systemctl stop mineru-flash"""
+    """sudo systemctl stop mineru-flash"""
     if not _mineru_active():
         return
     log.info(f"  💤 挂起 {MINERU_SERVICE} (空闲 {IDLE_SUSPEND_SECONDS}s)...")
     try:
-        subprocess.run(["systemctl", "stop", MINERU_SERVICE], timeout=10)
+        subprocess.run(["sudo", "systemctl", "stop", MINERU_SERVICE], timeout=10)
     except Exception as e:
         log.warning(f"  停止异常: {e}")
 
