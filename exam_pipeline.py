@@ -291,21 +291,28 @@ def flatten_blocks(page_json: dict) -> list[dict]:
                 "index": block.get("index"),
             }
             
-            # image block → 保留图片路径/URL 信息
-            if btype == "image":
-                # MinerU flash tier image block content 可能是 dict: {"image_path": "images/xxx.png", ...}
-                # 或者顶层有 image_path 字段
+            # ★ 图片类型: image / chart / table —— MinerU flash tier 三种块都带 image_path
+            # image_path 藏在嵌套结构里: block.content[0].image_path (数组里的 dict)
+            IMAGE_TYPES = {"image", "chart", "table"}
+            if btype in IMAGE_TYPES:
                 img_path = None
                 img_url = None
-                if isinstance(content_raw, dict):
-                    img_path = content_raw.get("image_path") or content_raw.get("path")
-                    img_url = content_raw.get("image_url") or content_raw.get("url")
+                # 优先级: 嵌套 content[0] > 顶层 block 字段 > content_raw (仅当它是 dict)
+                nested = None
+                if isinstance(content_raw, list) and content_raw:
+                    nested = content_raw[0] if isinstance(content_raw[0], dict) else None
+                elif isinstance(content_raw, dict):
+                    nested = content_raw
+                if nested:
+                    img_path = nested.get("image_path") or nested.get("path")
+                    img_url = nested.get("image_url") or nested.get("url")
                 if not img_path:
                     img_path = block.get("image_path") or block.get("path")
                 if not img_url:
                     img_url = block.get("image_url") or block.get("url")
-                entry["image_path"] = img_path  # zip 解压后的相对路径（如 "images/xxx.png"）
-                entry["image_url"] = img_url    # 可能是 data URI 或 HTTP URL
+                entry["image_path"] = img_path  # zip 解压后的相对路径（如 "images/page_0_chart_14.jpg"）
+                entry["image_url"] = img_url
+                entry["btype_original"] = btype  # 保留原始 type 供 classify_block 用
             
             flat.append(entry)
     
@@ -501,8 +508,9 @@ def classify_block(block: dict) -> str:
     content = block["content"]
     btype = block["type"]
     
-    # image block —— 单独分类，保留给后续关联题目
-    if btype == "image":
+    # ★ 所有图片类型 —— image / chart / table 都带 image_path, 统一归为 image
+    # (MinerU flash tier: 三种块都在嵌套 content[0] 里有 image_path)
+    if btype in ("image", "chart", "table"):
         return "image"
     
     if not content:
