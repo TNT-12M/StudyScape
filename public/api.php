@@ -3981,7 +3981,7 @@ if ($action) {
                 $page = max(1, (int)($_POST['page'] ?? $_GET['page'] ?? 1));
                 $size = max(1, min(50, (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 20)));
                 $total = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM ocr_import_batches')['c'] ?? 0);
-                $items = dbFetchAll($db, 'SELECT id, file_name, stored_name, status, subject, education_level, error_message, retry_count, created_at, updated_at, finished_at, json_extract(result_json, "$.questions") AS questions_json FROM ocr_import_batches ORDER BY id DESC LIMIT ? OFFSET ?', [$size, ($page - 1) * $size]);
+                $items = dbFetchAll($db, 'SELECT id, file_name, stored_name, status, subject, education_level, bridge_job_id, error_message, retry_count, created_at, updated_at, finished_at, json_extract(result_json, "$.questions") AS questions_json FROM ocr_import_batches ORDER BY id DESC LIMIT ? OFFSET ?', [$size, ($page - 1) * $size]);
                 foreach ($items as &$item) {
                     $item = ocrRefreshBatch($item);
                     $raw = (string)($item['result_json'] ?? $item['questions_json'] ?? '');
@@ -3998,7 +3998,7 @@ if ($action) {
             case 'ocr_batch_get':
                 requireContentPermission('question_import');
                 $id = (int)($_POST['batch_id'] ?? $_GET['batch_id'] ?? 0);
-                $batch = dbFetchOne($db, 'SELECT id, file_name, stored_name, status, subject, education_level, result_json, error_message, retry_count, created_at, updated_at, finished_at FROM ocr_import_batches WHERE id=?', [$id]);
+                $batch = dbFetchOne($db, 'SELECT id, file_name, stored_name, status, subject, education_level, bridge_job_id, result_json, error_message, retry_count, created_at, updated_at, finished_at FROM ocr_import_batches WHERE id=?', [$id]);
                 if (!$batch) jsonOut(false, 'OCR 批次不存在');
                 $batch = ocrRefreshBatch($batch);
                 $batch['result'] = $batch['result_json'] ? json_decode($batch['result_json'], true) : null;
