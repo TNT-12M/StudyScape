@@ -32,6 +32,7 @@ SERVER_HOST = "120.79.161.207"
 SERVER_PORT = 1200
 KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_key.txt")
 PIPELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "exam_pipeline.py")
+PDF_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export_pdf.py")
 PIPELINE_TIMEOUT = 300   # 单任务最大 5 分钟
 
 # MinerU parse-server 挂起配置
@@ -220,91 +221,150 @@ async def run_worker():
 
 # ======================= 任务处理 =======================
 async def handle_task(writer, job_id, task_data, lock):
-    """串行处理一个任务"""
+    """串行处理一个任务 — 按 task_type 分发"""
     global _mineru_last_task
     async with lock:
-        _mineru_last_task = time.time()  # 更新活跃时间
+        task_type = task_data.get("task_type", "ocr_pipeline")
+
+        if task_type == "export_pdf":
+            await _handle_export_pdf(writer, job_id, task_data)
+        else:
+            await _handle_ocr(writer, job_id, task_data)
+
+
+async def _handle_export_pdf(writer, job_id, task_data):
+    """导出 PDF — 纯 CPU 任务, 不需要 MinerU"""
+    try:
+        _mineru_last_task = time.time()  # 也算活跃
+        export_input = task_data.get("export_input", {})
+
+        # 写临时 JSON → 跑 export_pdf.py → 读 PDF → base64
+        tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_jobs")
+        os.makedirs(tmpdir, exist_ok=True)
+        tmp_in = os.path.join(tmpdir, f"{job_id}_export.json")
+        tmp_out = os.path.join(tmpdir, f"{job_id}.pdf")
+
+        with open(tmp_in, "w", encoding="utf-8") as f:
+            json.dump(export_input, f, ensure_ascii=False)
+
+        log.info(f"  📄 {job_id}: 生成 PDF ({len(export_input.get('questions', []))} 题)")
+
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, PDF_SCRIPT, tmp_in, tmp_out,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.wait(), 120)
+
+        if proc.returncode != 0:
+            stderr = (await proc.stderr.read()).decode()
+            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": f"pdf rc={proc.returncode}: {stderr[:200]}"})
+            return
+
+        with open(tmp_out, "rb") as f:
+            pdf_b64 = base64.b64encode(f.read()).decode()
+
+        # 清理
+        for p in (tmp_in, tmp_out):
+            try: os.remove(p)
+            except: pass
+
+        await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "result": {"pdf_b64": pdf_b64}})
+        log.info(f"  ✅ {job_id} PDF 生成 OK ({len(pdf_b64)//1024}KB base64)")
+
+    except Exception as e:
+        log.error(f"  {job_id} export_pdf: {e}\n{traceback.format_exc()}")
         try:
-            filename = task_data.get("filename", "unknown.pdf")
-            file_b64 = task_data.get("file_b64", "")
-            subject = task_data.get("subject", "")
-            education_level = task_data.get("education_level", "")
+            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": str(e)[:200]})
+        except:
+            pass
 
-            # ★ 上报阶段: MinerU 解析中
-            await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "mineru_starting"})
 
-            # ★ MinerU 挂起中就拉起 (冷启动可能 10-20s)
-            loop = asyncio.get_event_loop()
-            miner_ok = await loop.run_in_executor(None, _mineru_start)
-            if not miner_ok:
-                await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "MinerU parse-server 启动失败"})
-                return
+async def _handle_ocr(writer, job_id, task_data):
+    """OCR Pipeline 任务 — MinerU 解析 + 题目构建"""
+    global _mineru_last_task
+    _mineru_last_task = time.time()  # 更新活跃时间
+    try:
+        filename = task_data.get("filename", "unknown.pdf")
+        file_b64 = task_data.get("file_b64", "")
+        subject = task_data.get("subject", "")
+        education_level = task_data.get("education_level", "")
 
-            # 写临时文件
-            tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_jobs")
-            os.makedirs(tmpdir, exist_ok=True)
-            tmp_in = os.path.join(tmpdir, f"{job_id}_{filename}")
-            tmp_out = os.path.join(tmpdir, f"{job_id}_result.json")
+        # ★ 上报阶段: MinerU 解析中
+        await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "mineru_starting"})
 
-            with open(tmp_in, "wb") as f:
-                f.write(base64.b64decode(file_b64))
+        # ★ MinerU 挂起中就拉起 (冷启动可能 10-20s)
+        loop = asyncio.get_event_loop()
+        miner_ok = await loop.run_in_executor(None, _mineru_start)
+        if not miner_ok:
+            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "MinerU parse-server 启动失败"})
+            return
 
-            log.info(f"  处理 {filename} ({len(file_b64)//1024}KB base64) → {tmp_in}")
+        # 写临时文件
+        tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_jobs")
+        os.makedirs(tmpdir, exist_ok=True)
+        tmp_in = os.path.join(tmpdir, f"{job_id}_{filename}")
+        tmp_out = os.path.join(tmpdir, f"{job_id}_result.json")
 
-            # ★ 上报阶段: Pipeline 构建中
-            await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "pipeline_running"})
+        with open(tmp_in, "wb") as f:
+            f.write(base64.b64decode(file_b64))
 
-            # 调用 exam_pipeline.py
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, PIPELINE_SCRIPT,
-                tmp_in,
-                "-o", tmp_out,
-                "--subject", subject or "综合",
-                "--education_level", education_level or "",
-                "--paper_name", os.path.splitext(filename)[0],
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                await asyncio.wait_for(proc.wait(), PIPELINE_TIMEOUT)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "pipeline timeout"})
-                return
+        log.info(f"  处理 {filename} ({len(file_b64)//1024}KB base64) → {tmp_in}")
 
-            if proc.returncode != 0:
-                stderr = (await proc.stderr.read()).decode()
-                log.error(f"  pipeline rc={proc.returncode}: {stderr[:300]}")
-                await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": f"pipeline rc={proc.returncode}"})
-                return
+        # ★ 上报阶段: Pipeline 构建中
+        await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "pipeline_running"})
 
-            # ★ 上报阶段: 完成
-            await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "done"})
+        # 调用 exam_pipeline.py
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, PIPELINE_SCRIPT,
+            tmp_in,
+            "-o", tmp_out,
+            "--subject", subject or "综合",
+            "--education_level", education_level or "",
+            "--paper_name", os.path.splitext(filename)[0],
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            await asyncio.wait_for(proc.wait(), PIPELINE_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "pipeline timeout"})
+            return
 
-            # 读结果
-            if not os.path.exists(tmp_out):
-                await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "pipeline no output file"})
-                return
+        if proc.returncode != 0:
+            stderr = (await proc.stderr.read()).decode()
+            log.error(f"  pipeline rc={proc.returncode}: {stderr[:300]}")
+            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": f"pipeline rc={proc.returncode}"})
+            return
 
-            with open(tmp_out, "r", encoding="utf-8") as f:
-                result = json.load(f)
+        # ★ 上报阶段: 完成
+        await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "done"})
 
-            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "result": result})
-            qcount = len(result.get("questions", []))
-            log.info(f"  ✅ {job_id} 完成 → {qcount} 道题")
+        # 读结果
+        if not os.path.exists(tmp_out):
+            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "pipeline no output file"})
+            return
 
-            # 清理
-            for p in (tmp_in, tmp_out):
-                try: os.remove(p)
-                except: pass
+        with open(tmp_out, "r", encoding="utf-8") as f:
+            result = json.load(f)
 
-        except Exception as e:
-            log.error(f"  {job_id}: {e}\n{traceback.format_exc()}")
-            try:
-                await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": str(e)[:200]})
-            except:
-                pass
+        await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "result": result})
+        qcount = len(result.get("questions", []))
+        log.info(f"  ✅ {job_id} 完成 → {qcount} 道题")
+
+        # 清理
+        for p in (tmp_in, tmp_out):
+            try: os.remove(p)
+            except: pass
+
+    except Exception as e:
+        log.error(f"  {job_id}: {e}\n{traceback.format_exc()}")
+        try:
+            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": str(e)[:200]})
+        except:
+            pass
 
 
 if __name__ == "__main__":

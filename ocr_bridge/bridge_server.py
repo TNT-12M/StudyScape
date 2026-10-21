@@ -244,6 +244,22 @@ class BridgeState:
 
 STATE = BridgeState()
 
+# PDF 缓存目录 (给 api.php 直接读)
+PDF_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_pdf_cache")
+os.makedirs(PDF_CACHE_DIR, exist_ok=True)
+
+
+def _save_pdf(jid, pdf_b64):
+    """把 worker 回传的 PDF base64 落盘"""
+    try:
+        raw = base64.b64decode(pdf_b64)
+        fp = os.path.join(PDF_CACHE_DIR, f"{jid}.pdf")
+        with open(fp, "wb") as f:
+            f.write(raw)
+        log.info(f"  💾 PDF 落盘: {fp} ({len(raw)//1024}KB)")
+    except Exception as e:
+        log.warning(f"  PDF 落盘失败 {jid}: {e}")
+
 # ======================= TCP 认证 =======================
 async def handle_worker(reader, writer):
     addr = writer.get_extra_info("peername")
@@ -326,6 +342,9 @@ async def handle_worker(reader, writer):
                         result = msg.get("result")
                         error = msg.get("error")
                         await STATE.set_result(jid, result, error)
+                        # PDF 导出结果直接落盘 (方便 api.php 直接读)
+                        if result and result.get("pdf_b64"):
+                            _save_pdf(jid, result["pdf_b64"])
                         log.info(f"  📦 Worker 完成 {jid}: status={'OK' if error is None else 'FAIL'}")
 
                     elif mtype == "BYE":
@@ -516,7 +535,44 @@ class PHPHandler(BaseHTTPRequestHandler):
             })
             return
 
-        self._send(404, {"error": f"未知端点: {path}", "available": ["/upload (POST)"]})
+        if path == "/export_pdf":
+            """接收 PDF 导出请求: 题目 JSON → 家里云生成 PDF → 回传 base64"""
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except json.JSONDecodeError as e:
+                self._send(400, {"error": "JSON 格式错误", "detail": str(e)})
+                return
+
+            export_input = payload.get("export_input")
+            if not export_input or not isinstance(export_input, dict):
+                self._send(400, {"error": "缺少 export_input 字段"})
+                return
+            questions = export_input.get("questions", [])
+            if not questions:
+                self._send(400, {"error": "questions 为空"})
+                return
+
+            if not _worker_online():
+                self._send(503, {"error": "worker offline"})
+                return
+
+            job = {"task_type": "export_pdf", "export_input": export_input}
+            jid = asyncio.run_coroutine_threadsafe(STATE.enqueue(job), event_loop).result()
+
+            async def push_to_worker():
+                async with STATE.worker_lock:
+                    if STATE.worker_writer:
+                        await FrameProto.send(STATE.worker_writer, {
+                            "type": "TASK",
+                            "job_id": jid,
+                            "data": job,
+                        })
+            asyncio.run_coroutine_threadsafe(push_to_worker(), event_loop)
+
+            self._send(202, {"job_id": jid, "status": "queued", "message": "PDF 生成任务已提交"})
+            return
+
+        self._send(404, {"error": f"未知端点: {path}", "available": ["/upload (POST)", "/export_pdf (POST)"]})
 
 
 # ======================= 主入口 =======================

@@ -28,7 +28,7 @@
         <n-data-table :columns="batchColumns" :data="batches" :loading="loading" :pagination="paginationProps" @update:page="onPageChange" @update:page-size="onPageSizeChange" />
       </n-card>
       <n-card v-if="current" ref="reviewCard" :title="`审核：${current.file_name}`" segmented class="review-card">
-          <template #header-extra><n-space><n-button v-if="current.status==='review' || current.status==='committed'" @click="downloadAIPrompt">📄 下载 AI 提示词</n-button><n-button @click="selectAll(true)">全部保留</n-button><n-button @click="selectAll(false)">全部剔除</n-button><n-button type="primary" :loading="committing" @click="commit">统一入库</n-button></n-space></template>
+          <template #header-extra><n-space><n-button v-if="current.status==='review' || current.status==='committed'" @click="downloadAIPrompt">📄 下载 AI 提示词 PDF</n-button><n-button v-if="current.status==='review' || current.status==='committed'" @click="importAIModal = true">📋 批量粘贴导入答案</n-button><n-button @click="selectAll(true)">全部保留</n-button><n-button @click="selectAll(false)">全部剔除</n-button><n-button type="primary" :loading="committing" @click="commit">统一入库</n-button></n-space></template>
         <n-alert v-if="current.error_message" type="error">
           <template #icon>⚠️</template>
           <div class="ocr-error-detail">
@@ -83,6 +83,19 @@
         </n-list>
       </n-card>
     </n-space>
+    <!-- 批量粘贴导入答案模态框 -->
+    <n-modal v-model:show="importAIModal" preset="card" title="📋 批量粘贴 AI 答案" style="width: 640px" :mask-closable="false">
+      <n-alert type="info" :show-icon="false" class="import-hint">
+        把网页版 AI 返回的 <b>JSON</b> 整段复制过来（Ctrl+C），粘贴到下面的文本框（Ctrl+V），点击确定后会自动填充每道题的答案、解析和难度。
+      </n-alert>
+      <n-input v-model:value="aiJsonText" type="textarea" :rows="14" placeholder='粘贴 AI 返回的 JSON, 格式示例:&#10;{&quot;answers&quot;: [&#10;  {&quot;qid&quot;: 1, &quot;answer&quot;: &quot;C&quot;, &quot;explanation&quot;: &quot;...&quot;, &quot;difficulty&quot;: 3},&#10;  {&quot;qid&quot;: 2, &quot;answer&quot;: &quot;B&quot;, &quot;explanation&quot;: &quot;...&quot;, &quot;difficulty&quot;: 2}&#10;]}' />
+      <template #action>
+        <n-space justify="end">
+          <n-button @click="importAIModal = false">取消</n-button>
+          <n-button type="primary" :loading="importingAI" @click="confirmImportAI">✅ 确定导入</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </AppPage>
 </template>
 
@@ -280,7 +293,69 @@ function selectAll(value) { questions.value.forEach(question => { question.inclu
 function downloadAIPrompt() {
   if (!current.value?.id) return
   phpOcrApi.export(current.value.id)
-  message.success('开始下载 AI 提示词纯文本')
+  message.info('PDF 生成中, 浏览器将自动下载...')
+}
+const importAIModal = ref(false)
+const aiJsonText = ref('')
+const importingAI = ref(false)
+function confirmImportAI() {
+  if (!aiJsonText.value.trim()) { message.warning('请先粘贴 JSON'); return }
+  importingAI.value = true
+  try {
+    // 容错: 去掉 JSON 前后的 markdown ```json ... ``` 包裹
+    let text = aiJsonText.value.trim()
+    const mdMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+    if (mdMatch) text = mdMatch[1].trim()
+
+    let parsed
+    try { parsed = JSON.parse(text) }
+    catch (e) { message.error('JSON 格式错误: ' + e.message); return }
+
+    // 兼容两种格式: {"answers":[...]} 或 直接数组 [{qid:1,...}]
+    let answers = parsed?.answers
+    if (!Array.isArray(answers) && Array.isArray(parsed)) answers = parsed
+    if (!Array.isArray(answers) || !answers.length) { message.error('没找到 answers 数组'); return }
+
+    let matched = 0
+    let qidFieldOk = false
+    for (const ans of answers) {
+      const qid = ans.qid ?? ans.question_id ?? ans.index ?? ans.num
+      let target = null
+      // 1. 按 source_qid 匹配 (pipeline 输出里的 qid)
+      if (qid != null) {
+        qidFieldOk = true
+        target = questions.value.find(q => String(q.source_qid) === String(qid))
+        // 2. 按 index 匹配 (如果上面找不到)
+        if (!target && typeof qid === 'number') {
+          target = questions.value[qid - 1]
+        }
+      }
+      // 3. 如果 ans 没有 qid, 按顺序依次填充
+      if (!target) {
+        const idx = answers.indexOf(ans)
+        target = questions.value[idx]
+      }
+
+      if (target) {
+        if (ans.answer != null) target.correct_answer = String(ans.answer).trim()
+        if (ans.explanation != null) target.explanation = String(ans.explanation).trim()
+        if (ans.difficulty != null) target.difficulty = Math.max(1, Math.min(5, parseInt(ans.difficulty) || 3))
+        matched++
+      }
+    }
+
+    if (matched === 0) {
+      message.error('AI 返回的题号和当前试卷不匹配')
+    } else {
+      message.success(`✅ 已导入 ${matched}/${questions.value.length} 道题的答案`)
+      importAIModal.value = false
+      aiJsonText.value = ''
+    }
+  } catch (e) {
+    message.error('导入失败: ' + e.message)
+  } finally {
+    importingAI.value = false
+  }
 }
 async function commit() {
   if (!current.value?.id) return

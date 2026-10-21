@@ -4085,73 +4085,72 @@ if ($action) {
                 $questions = $data['questions'] ?? [];
                 if (!$questions) jsonOut(false, '该批次还没有识别结果');
 
-                // 拼纯文本 + AI 提示词
                 $paperName = pathinfo((string)$batch['file_name'], PATHINFO_FILENAME);
-                $lines = [];
-                $lines[] = "========================================";
-                $lines[] = "试卷: {$paperName}";
-                $lines[] = "题目数: " . count($questions);
-                $lines[] = "========================================";
-                $lines[] = "";
-                $lines[] = "【AI 提示词】";
-                $lines[] = "请为下面每道题目生成: (1) 正确答案 (2) 详细解析 (3) 难度评分(1-5)";
-                $lines[] = "输出格式: 每题前加 === 题号 === 分隔线, 答案/解析/难度分三行, markdown 格式";
-                $lines[] = "如果题目包含图片, 图片内容已在题干中描述, 请基于描述答题";
-                $lines[] = "";
 
-                foreach ($questions as $i => $q) {
-                    $num = $i + 1;
-                    $lines[] = "=== 第 {$num} 题 ===";
-                    $qtype = $q['question_type'] ?? ($q['type'] ?? '');
-                    if ($qtype) $lines[] = "题型: {$qtype}";
+                // 组装 export_input (bridge_server 传给家里云 PDF 生成脚本)
+                $exportInput = [
+                    'paper_name' => $paperName,
+                    'subject' => $data['subject'] ?? '',
+                    'questions' => $questions,
+                ];
 
-                    // 题干
-                    $content = $q['question_content'] ?? ($q['content'] ?? '');
-                    if ($content) {
-                        $content = str_replace(["\r\n", "\r"], "\n", $content);
-                        $lines[] = "题干: {$content}";
+                // ① 提交给 bridge_server (公网机本机)
+                $bridgePort = 1201;
+                $ch = curl_init("http://127.0.0.1:{$bridgePort}/export_pdf");
+                curl_setopt_array($ch, [
+                    CURLOPT_POST => true,
+                    CURLOPT_POSTFIELDS => json_encode(['export_input' => $exportInput], JSON_UNESCAPED_UNICODE),
+                    CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_TIMEOUT => 10,
+                ]);
+                $resp = curl_exec($ch);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                curl_close($ch);
+
+                if ($httpCode !== 202) jsonOut(false, 'Bridge 提交失败: ' . $resp);
+                $submit = json_decode($resp, true);
+                $jobId = $submit['job_id'] ?? '';
+                if (!$jobId) jsonOut(false, 'Bridge 返回异常');
+
+                // ② 轮询状态 (最多 60s)
+                $pdfCacheDir = __DIR__ . '/../ocr_bridge/_pdf_cache';
+                $pdfPath = $pdfCacheDir . "/{$jobId}.pdf";
+
+                for ($i = 0; $i < 30; $i++) {
+                    // 文件存在 = 家里云已经生成好 + bridge_server 落盘了
+                    if (file_exists($pdfPath) && filesize($pdfPath) > 100) {
+                        break;
                     }
 
-                    // 选项
-                    $options = $q['question_options'] ?? ($q['options'] ?? []);
-                    if (is_array($options) && !empty($options)) {
-                        $lines[] = "选项:";
-                        foreach ($options as $oi => $opt) {
-                            $letter = chr(65 + $oi);
-                            $lines[] = "  {$letter}. {$opt}";
-                        }
+                    $ch2 = curl_init("http://127.0.0.1:{$bridgePort}/status/{$jobId}");
+                    curl_setopt_array($ch2, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 5]);
+                    $sresp = curl_exec($ch2);
+                    $scode = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+                    curl_close($ch2);
+
+                    if ($scode === 200) {
+                        $s = json_decode($sresp, true);
+                        $sstatus = $s['status'] ?? '';
+                        if ($sstatus === 'failed') jsonOut(false, 'PDF 生成失败: ' . ($s['error'] ?? 'unknown'));
                     }
 
-                    // 已有答案/解析 (如果有)
-                    $ans = $q['answer'] ?? ($q['correct_answer'] ?? '');
-                    if ($ans) $lines[] = "参考答案: {$ans}";
-                    $resolve = $q['resolve'] ?? ($q['explanation'] ?? '');
-                    if ($resolve) {
-                        $resolve = str_replace(["\r\n", "\r"], "\n", $resolve);
-                        $lines[] = "已有解析: {$resolve}";
-                    }
-
-                    // 图片标记
-                    $hasImg = !empty($q['question_images']) || !empty($q['images']);
-                    if ($hasImg) $lines[] = "※ 本题包含图片 (图片已单独保存)";
-
-                    $lines[] = "";
+                    usleep(2000000); // 2s
                 }
 
-                $lines[] = "";
-                $lines[] = "========================================";
-                $lines[] = "请依次为以上 " . count($questions) . " 道题生成答案和解析";
-                $lines[] = "========================================";
+                // ③ 读 PDF 输出给浏览器
+                if (!file_exists($pdfPath)) {
+                    jsonOut(false, 'PDF 生成超时, 请稍后重试');
+                }
 
-                $text = implode("\n", $lines);
-                $filename = "{$paperName}_AI提示词_" . date('Ymd_His') . ".txt";
+                $pdfRaw = file_get_contents($pdfPath);
+                $filename = "{$paperName}_AI提示词_" . date('Ymd_His') . ".pdf";
 
-                // 返回文件下载 (Content-Disposition attachment)
-                header('Content-Type: text/plain; charset=utf-8');
+                header('Content-Type: application/pdf');
                 header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '"');
-                header('Content-Length: ' . strlen($text));
+                header('Content-Length: ' . strlen($pdfRaw));
                 header('Cache-Control: no-cache, must-revalidate');
-                echo $text;
+                echo $pdfRaw;
                 exit;
 
             // ==================== 危险操作已移除 ====================
