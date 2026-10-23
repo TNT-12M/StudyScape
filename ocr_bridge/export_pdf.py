@@ -21,22 +21,83 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.colors import HexColor, black
 
-# ======================= 中文字体注册 =======================
+# ======================= 中文字体注册 (自动发现) =======================
 FONT_NAME = "Helvetica"
-cjk_fonts = [
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-]
-for fp in cjk_fonts:
-    if os.path.exists(fp):
+FONT_REGISTERED_PATH = None
+
+def _find_cjk_font():
+    """用 fc-list 自动找系统中可用的中文字体文件"""
+    import subprocess as _sp
+    # 优先级: 从 fc-list 找 .ttc / .ttf / .otf 中文字体
+    for cmd in [
+        ['fc-list', ':lang=zh', ':file'],
+        ['fc-list', ':lang=zh'],
+        ['fc-list', ':file'],
+    ]:
         try:
-            pdfmetrics.registerFont(TTFont("CJK", fp))
-            FONT_NAME = "CJK"
-            break
+            r = _sp.run(cmd, capture_output=True, text=True, timeout=8)
+            if r.returncode == 0 and r.stdout.strip():
+                # fc-list 输出格式: "/path/to/font.ttc: Font Name: style"
+                for line in r.stdout.strip().split('\n'):
+                    if ':' in line:
+                        path = line.split(':', 1)[0].strip().strip('"')
+                        if path.endswith(('.ttc', '.ttf', '.otf')) and os.path.isfile(path):
+                            return path
         except Exception:
             continue
+    return None
+
+def _try_register(fp, family_name="CJK"):
+    """尝试用 reportlab 注册一个字体文件"""
+    if not fp or not os.path.isfile(fp):
+        return False
+    try:
+        pdfmetrics.registerFont(TTFont(family_name, fp))
+        return True
+    except Exception as e:
+        # .ttc 需要指定 subfontIndex
+        if fp.endswith('.ttc'):
+            try:
+                pdfmetrics.registerFont(TTFont(family_name, fp, subfontIndex=0))
+                return True
+            except Exception:
+                pass
+        print(f"  ⚠️ 注册失败 {fp}: {e}")
+        return False
+
+# 1. fc-list 自动发现
+_found = _find_cjk_font()
+if _found and _try_register(_found, "CJK"):
+    FONT_NAME = "CJK"
+    FONT_REGISTERED_PATH = _found
+else:
+    # 2. 硬编码常见路径兜底 (Debian/Ubuntu/CentOS/Arch)
+    _fallback_paths = [
+        # wqy 文泉驿
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
+        # Noto CJK
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        # 思源
+        "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf",
+        "/usr/share/fonts/truetype/source-han-sans/SourceHanSansSC-Regular.otf",
+        # Debian fonts-noto-cjk
+        "/usr/share/fonts/truetype/noto-cjk/NotoSansCJK-Regular.ttc",
+        # 用户目录
+        os.path.expanduser("~/.local/share/fonts/wqy-zenhei.ttc"),
+        os.path.expanduser("~/.fonts/wqy-zenhei.ttc"),
+    ]
+    for _fp in _fallback_paths:
+        if _try_register(_fp, "CJK"):
+            FONT_NAME = "CJK"
+            FONT_REGISTERED_PATH = _fp
+            break
+
+print(f"📝 export_pdf.py 字体: {FONT_NAME} ({FONT_REGISTERED_PATH or 'NO CJK FOUND, 用 Helvetica!'})", flush=True)
 
 # ======================= 样式 =======================
 styles = getSampleStyleSheet()
