@@ -126,14 +126,22 @@ const paginationProps = computed(() => ({
 }))
 const totalCount = ref(0)
 const statusMap = { running: '处理中', queued: '排队中', review: '待审核', failed: '失败', committed: '已入库' }
+// ★ 细粒度 OCR 阶段 (对应 bridge_client 发的 PROGRESS 消息)
 const stageMap = {
-  mineru_starting: '⚡ MinerU 解析中...',
-  pipeline_running: '🔧 Pipeline 构建题目...',
+  mineru_starting: '⚡ MinerU 冷启动...',
+  mineru_uploading: '📤 MinerU 上传 PDF...',
+  mineru_parsing: '🔍 MinerU 解析中',      // 带 progress: "3/10 页"
+  mineru_downloading: '📥 下载解析结果...',
+  flatten_blocks: '🔧 整理文本块...',
+  group_questions: '✂️ 切分题目...',
+  validate_questions: '✅ 校验有效题...',  // 带 progress: "识别出 21 道"
+  pipeline_running: '🔧 Pipeline 处理中...',  // 兜底 (兼容旧 bridge_client)
   done: '✅ 识别完成',
 }
 function renderBatchStatus(row) {
   const status = row.status || ''
   const stage = row.stage || ''
+  const progress = row.progress || ''
   const qpos = row.queue_position || 0
 
   // 已完成/终态: 简单显示
@@ -148,9 +156,16 @@ function renderBatchStatus(row) {
     return h('span', { class: 'status-queued' }, text)
   }
 
-  // processing/running: 显示具体阶段
+  // processing/running: 主阶段 + 子进度
   if (status === 'processing' || status === 'running') {
     const stageText = stageMap[stage] || '处理中...'
+    if (progress) {
+      // 双行显示: 主阶段 + 子进度
+      return h('div', { class: 'status-processing' }, [
+        h('div', {}, stageText),
+        h('div', { class: 'status-progress' }, progress),
+      ])
+    }
     return h('span', { class: 'status-processing' }, stageText)
   }
 
@@ -161,7 +176,13 @@ const batchColumns = [
   { title: '状态', key: 'status', width: 180, render: renderBatchStatus },
   { title: '题目数', key: 'question_count', width: 90 },
   { title: '错误', key: 'error_message', ellipsis: { tooltip: true }, render: row => row.error_message ? h('span', { style: 'color: var(--n-error-color)' }, prettyOcrError(row.error_message)) : '-' },
-  { title: '操作', key: 'actions', width: 220, render: row => h('div', { class: 'actions' }, [h('button', { class: 'action-button primary', onClick: () => loadBatch(row.id) }, '审核'), h('button', { class: 'action-button danger', onClick: () => removeBatch(row.id) }, '删除')]) },
+  { title: '操作', key: 'actions', width: 280, render: row => h('div', { class: 'actions' }, [
+    h('button', { class: 'action-button primary', onClick: () => loadBatch(row.id) }, '审核'),
+    (row.status === 'review' || row.status === 'committed')
+      ? h('button', { class: 'action-button', onClick: () => { loadBatch(row.id).then(() => importAIModal.value = true) } }, '📋 导入答案')
+      : null,
+    h('button', { class: 'action-button danger', onClick: () => removeBatch(row.id) }, '删除')
+  ].filter(Boolean)) },
 ]
 function letter(index) { return String.fromCharCode(65 + (index || 0)) }
 function safeHtml(value) { return renderMathInHtml(sanitizeHtml(value || '')) }
@@ -364,14 +385,20 @@ async function commit() {
 }
 async function removeBatch(id) { try { await phpOcrApi.remove(id); message.success('批次已删除'); await loadBatches() } catch (error) { message.error(error.message) } }
 
-// 自动轮询: 有 queued/processing 状态的批次时, 每 5s 刷新列表
+// 自动轮询: 有 queued/processing 状态的批次时, 每 3s 刷新列表
 let pollTimer = null
 onMounted(async () => {
   await loadBatches()
   pollTimer = setInterval(async () => {
     const needRefresh = batches.value.some(b => b.status === 'queued' || b.status === 'processing' || b.status === 'running')
-    if (needRefresh) await loadBatches()
-  }, 5000)
+    if (needRefresh) {
+      await loadBatches()
+      // 如果正在查看的 current 也在处理, 顺便刷新详情卡片
+      if (current.value && (current.value.status === 'queued' || current.value.status === 'processing')) {
+        try { await loadBatch(current.value.id) } catch {}
+      }
+    }
+  }, 3000)
 })
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 </script>
@@ -383,4 +410,5 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .ocr-error-raw { margin-top: 8px; }
 .ocr-error-raw summary { cursor: pointer; font-size: 12px; opacity: 0.7; }
 .ocr-error-raw pre { margin: 8px 0 0; padding: 10px; background: rgba(0,0,0,0.06); border-radius: 4px; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }.review-card { scroll-margin-top: 20px; }.excluded { opacity: .45; }.preview { padding: 10px 0; line-height: 1.7; white-space: pre-wrap; }.preview :deep(img) { max-width: 100%; max-height: 360px; }.option-edit-list { display: flex; flex-direction: column; gap: 8px; width: 100%; }.option-edit-row { display: flex; align-items: center; gap: 8px; }.option-letter { font-weight: 600; flex-shrink: 0; min-width: 22px; }.option-input { flex: 1; min-width: 0; }.option-rendered { flex: 1; min-height: 22px; line-height: 1.6; padding: 4px 8px; cursor: text; border: 1px dashed transparent; border-radius: 4px; word-break: break-word; }.option-rendered:hover { border-color: var(--n-border-color); background: var(--n-color-hover); }.stem-rendered { min-height: 60px; line-height: 1.7; padding: 8px 10px; cursor: text; border: 1px dashed transparent; border-radius: 4px; white-space: pre-wrap; word-break: break-word; }.stem-rendered:hover { border-color: var(--n-border-color); background: var(--n-color-hover); }.opt-btn { width: 30px; height: 30px; border: 1px solid var(--n-border-color); background: var(--n-color); color: var(--n-text-color); border-radius: 4px; cursor: pointer; font-size: 16px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }.opt-btn.del:hover { color: #fff; background: var(--n-error-color); border-color: var(--n-error-color); }.opt-btn.add:hover { color: #fff; background: var(--n-primary-color); border-color: var(--n-primary-color); }.question-image { display: block; max-width: 100%; max-height: 360px; margin: 8px 0; }.edit-form { margin-top: 12px; }.actions { display: flex; gap: 8px; }.action-button { border: 1px solid var(--n-border-color); background: var(--n-color); color: var(--n-text-color); padding: 5px 10px; border-radius: 4px; cursor: pointer; }.action-button.primary { color: #fff; background: var(--n-primary-color); border-color: var(--n-primary-color); }.action-button.danger { color: #fff; background: var(--n-error-color); border-color: var(--n-error-color); }
+.status-progress { font-size: 12px; color: var(--n-text-color-3); line-height: 1.4; margin-top: 2px; }
 </style>

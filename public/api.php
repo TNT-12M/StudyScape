@@ -2181,8 +2181,9 @@ function ocrRefreshBatch(array $batch): array {
     $bdata = $resp['data'];
     $bStatus = (string)($bdata['status'] ?? '');
 
-    // ★ 透出阶段 + 队列位置 (供前端进度显示)
+    // ★ 透出阶段 + 进度提示 + 队列位置 (供前端细粒度进度显示)
     $batch['stage'] = (string)($bdata['stage'] ?? '');
+    $batch['progress'] = (string)($bdata['progress'] ?? '');
     $batch['queue_position'] = (int)($bdata['queue_position'] ?? 0);
 
     if ($bStatus === 'done' && isset($bdata['result']) && is_array($bdata['result'])) {

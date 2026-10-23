@@ -311,8 +311,8 @@ async def _handle_ocr(writer, job_id, task_data):
 
         log.info(f"  处理 {filename} ({len(file_b64)//1024}KB base64) → {tmp_in}")
 
-        # ★ 上报阶段: Pipeline 构建中
-        await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "pipeline_running"})
+        # ★ 上报阶段: Pipeline 已启动, MinerU 正在上传
+        await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "mineru_uploading"})
 
         # 调用 exam_pipeline.py
         proc = await asyncio.create_subprocess_exec(
@@ -325,6 +325,65 @@ async def _handle_ocr(writer, job_id, task_data):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+
+        # ★ 逐行解析 pipeline stdout → 发细粒度 PROGRESS
+        # exam_pipeline.py print 格式: [MinerU] xxx / [Flatten] xxx / [Group] xxx / [Validate] xxx
+        _prev_stage = None
+        _progress_lines = []  # 收集关键行用于日志
+        try:
+            async for raw_line in proc.stdout:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                _progress_lines.append(line)
+                # 最多保留 30 行 (日志用)
+                if len(_progress_lines) > 30:
+                    _progress_lines = _progress_lines[-30:]
+
+                # 按关键字匹配阶段 (pipeline 输出顺序: MinerU → Flatten → Group → Validate)
+                new_stage = None
+                progress_hint = None  # 进度提示, 如 "3/10 页"
+
+                if "[MinerU] 提交" in line:
+                    new_stage = "mineru_uploading"
+                elif "[MinerU] job_id=" in line or ("轮询" in line and "MinerU" not in _prev_stage):
+                    new_stage = "mineru_parsing"
+                elif "[MinerU]" in line and "/" in line and ("(" in line or "页" in line or "/" in line):
+                    # MinerU 轮询进度: "[MinerU]   processing  3/10  (15s)"
+                    new_stage = "mineru_parsing"
+                    m = __import__("re").search(r'(\d+)/(\d+)', line)
+                    if m:
+                        progress_hint = f"{m.group(1)}/{m.group(2)} 页"
+                elif "[MinerU] ✅ 完成" in line or "[MinerU] 下载" in line:
+                    new_stage = "mineru_downloading"
+                elif "[MinerU] ✅ PageJSON" in line or "[MinerU] ✅ zip" in line or "[MinerU] ✅ zip 解压" in line:
+                    new_stage = "flatten_blocks"
+                elif "[MinerU] ✅" in line:
+                    new_stage = "flatten_blocks"
+                elif "[Flatten] ✅" in line:
+                    new_stage = "group_questions"
+                elif "[Group] ✅ 切出" in line:
+                    new_stage = "validate_questions"
+                    m = __import__("re").search(r'切出 (\d+) 道', line)
+                    if m: progress_hint = f"识别出 {m.group(1)} 道"
+                elif "[Validate]" in line and "✅" in line:
+                    new_stage = "done"
+                elif "[MinerU] 完成" in line:
+                    new_stage = "mineru_downloading"
+
+                # 只在阶段变化或有进度提示时发 PROGRESS
+                if new_stage and (new_stage != _prev_stage or progress_hint):
+                    payload = {"type": "PROGRESS", "job_id": job_id, "stage": new_stage}
+                    if progress_hint:
+                        payload["progress"] = progress_hint
+                    await FrameProto.send(writer, payload)
+                    _prev_stage = new_stage
+                    log.info(f"  📊 {job_id} → {new_stage}{' ('+progress_hint+')' if progress_hint else ''}")
+
+        except Exception as e:
+            log.error(f"  stdout 读取异常: {e}")
+
+        # 等进程结束
         try:
             await asyncio.wait_for(proc.wait(), PIPELINE_TIMEOUT)
         except asyncio.TimeoutError:
@@ -335,8 +394,8 @@ async def _handle_ocr(writer, job_id, task_data):
 
         if proc.returncode != 0:
             stderr = (await proc.stderr.read()).decode()
-            log.error(f"  pipeline rc={proc.returncode}: {stderr[:300]}")
-            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": f"pipeline rc={proc.returncode}"})
+            log.error(f"  pipeline rc={proc.returncode}: {stderr[:500]}")
+            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": f"pipeline rc={proc.returncode}: {stderr[:200]}"})
             return
 
         # ★ 上报阶段: 完成

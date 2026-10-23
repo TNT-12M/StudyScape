@@ -195,11 +195,13 @@ class BridgeState:
                 self.queue[jid]["finished_at"] = time.time()
                 self._persist(jid, self.queue[jid])
 
-    async def update_stage(self, jid, stage):
-        """Worker 上报进度阶段"""
+    async def update_stage(self, jid, stage, progress=""):
+        """Worker 上报进度阶段 + 可选进度提示 (如 '3/10 页')"""
         async with self.lock:
             if jid in self.queue:
                 self.queue[jid]["stage"] = stage
+                if progress:
+                    self.queue[jid]["progress"] = progress
                 self._persist(jid, self.queue[jid])
 
     async def get_status(self, jid):
@@ -333,9 +335,10 @@ async def handle_worker(reader, writer):
                     elif mtype == "PROGRESS":
                         jid = msg.get("job_id")
                         stage = msg.get("stage", "")
+                        progress = msg.get("progress", "")
                         if jid and stage:
-                            await STATE.update_stage(jid, stage)
-                            log.info(f"  📊 {jid} stage={stage}")
+                            await STATE.update_stage(jid, stage, progress)
+                            log.info(f"  📊 {jid} stage={stage}{' progress='+progress if progress else ''}")
 
                     elif mtype == "RESULT":
                         jid = msg.get("job_id")
