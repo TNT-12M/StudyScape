@@ -38,7 +38,7 @@
               <n-input v-model:value="regForm.email" placeholder="@example.com" />
             </n-form-item>
             <div class="captcha-row">
-              <n-input v-model:value="regForm.captcha" placeholder="图片验证码" maxlength="4" />
+              <n-input v-model:value="regForm.captcha" placeholder="图片验证码" maxlength="5" />
               <img :src="regCaptchaUrl" alt="验证码" title="点击刷新" @click="refreshRegCaptcha">
             </div>
             <div class="email-code-row">
@@ -64,7 +64,7 @@
               <n-input v-model:value="resetForm.email" placeholder="注册时使用的邮箱" />
             </n-form-item>
             <div class="captcha-row">
-              <n-input v-model:value="resetForm.captcha" placeholder="图片验证码" maxlength="4" />
+              <n-input v-model:value="resetForm.captcha" placeholder="图片验证码" maxlength="5" />
               <img :src="resetCaptchaUrl" alt="验证码" title="点击刷新" @click="refreshResetCaptcha">
             </div>
             <div class="email-code-row">
@@ -167,7 +167,7 @@ const emailSending = ref(false)
 const emailCountdown = ref(0)
 let emailTimer = null
 
-const canSendEmailCode = computed(() => regForm.email && /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(regForm.email) && regForm.captcha.length >= 4)
+const canSendEmailCode = computed(() => regForm.email && /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(regForm.email) && regForm.captcha.length >= 5)
 
 function refreshRegCaptcha() {
   regCaptchaUrl.value = phpAuthApi.captchaUrl()
@@ -239,7 +239,7 @@ const resetEmailSending = ref(false)
 const resetCountdown = ref(0)
 let resetTimer = null
 
-const canSendResetCode = computed(() => resetForm.email && /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(resetForm.email) && resetForm.captcha.length >= 4)
+const canSendResetCode = computed(() => resetForm.email && /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(resetForm.email) && resetForm.captcha.length >= 5)
 
 function refreshResetCaptcha() {
   resetCaptchaUrl.value = phpAuthApi.captchaUrl()
