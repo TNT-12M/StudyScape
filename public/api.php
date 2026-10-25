@@ -4133,7 +4133,7 @@ if ($action) {
                 if (!$kept) jsonOut(false, '没有可入库的题目');
                 $importData = ['paper_name' => $batch['file_name'], 'subject' => $batch['subject'], 'education_level' => $batch['education_level'], 'questions' => $kept];
                 $normalized = [];
-                importExtractQuestions($importData, $batch['subject'] ?: '综合', $normalized);
+                importExtractQuestions($importData, $batch['subject'] ?: '综合', $normalized, $batch['education_level'] ?: '');
                 $inserted = 0; $skipped = 0;
                 foreach ($normalized as $q) {
                     $exists = dbFetchOne($db, 'SELECT id FROM questions WHERE content=? AND subject=? AND education_level=? LIMIT 1', [$q['content'], $q['subject'], $q['education_level']]);
@@ -4753,7 +4753,7 @@ if ($action) {
                 }
 
                 $questions = [];
-                importExtractQuestions($data, $detectedSubject, $questions);
+                importExtractQuestions($data, $detectedSubject, $questions, $rawEducationLevel);
 
                 // OCR 流水线适配：提取 match_key 并归一化，用于题目-答案精准匹配
                 // 归一化：去掉"答案/试卷/真题/原卷完整版"等后缀，使题目和答案文件的 match_key 一致
@@ -6037,19 +6037,24 @@ jsonOut(false, "请通过API接口调用");
 //   {试卷名称, 第I卷选择题: {题目列表:[{题号,题干,选项:{A:..}, 答案}]},
 //    第II卷非选择题:{题目列表:[{题号,题干,分值,小问:[{小问序号,问题,参考答案}]}]}}
 // 也支持扁平数组：[{subject, question_type, content, options, correct_answer, explanation, ...}]
-function importExtractQuestions(array $data, string $subject, array &$questions): void {
+function importExtractQuestions(array $data, string $subject, array &$questions, string $educationLevel = ''): void {
     // 模式0a：PaperCutter-VL 包装格式（{match_key, paper_name, subject, education_level, questions: [...]}）
     if (isset($data['questions']) && is_array($data['questions'])) {
         // 从包装层提取科目（覆盖"综合"默认值）
         if (!empty($data['subject']) && ($subject === '' || $subject === '综合')) {
             $subject = trim($data['subject']);
         }
+        // 从包装层提取学段 (覆盖空)
+        if ($educationLevel === '' && !empty($data['education_level'])) {
+            $educationLevel = trim($data['education_level']);
+        }
         $data = $data['questions'];
     }
     // 模式0b：PaperCutter-VL 扁平格式（含 question_id/question_content/question_options/question_images 等）
     if (pcvl_isPaperCutterVL($data)) {
         $pcvlSubject = $subject !== '' ? $subject : pcvl_detectSubject($data);
-        pcvlConvertPaperCutterVL($data, $pcvlSubject, $questions);
+        $pcvlLevel = $educationLevel !== '' ? $educationLevel : pcvl_detectLevel($data);
+        pcvlConvertPaperCutterVL($data, $pcvlSubject, $questions, $pcvlLevel);
         return;
     }
     // 模式1：扁平数组（每条已是标准结构）
@@ -6435,7 +6440,7 @@ function pcvl_detectSubject(array $data): string {
  * PaperCutter-VL 格式 → 系统扁平数组
  * 主要处理：题型识别、选项（去除 A./B. 前缀）、题干 HTML 富化（base64 图片嵌入、表格内嵌）
  */
-function pcvlConvertPaperCutterVL(array $data, string $subject, array &$questions): void {
+function pcvlConvertPaperCutterVL(array $data, string $subject, array &$questions, string $educationLevel = ''): void {
     $typeMap = [
         '单选题' => 'single', '单选题（四选一）' => 'single',
         '多选题' => 'multiple', '多选题（不定项）' => 'multiple',
@@ -6550,7 +6555,7 @@ function pcvlConvertPaperCutterVL(array $data, string $subject, array &$question
             'subject'        => normalizeSubject($subject),
             'question_type'  => $typeKey,
             'category'       => $typeKey,
-            'education_level'=> '',   // 由外层按当前选择的学段覆盖
+            'education_level'=> $educationLevel,   // ★ 用批次/外层传入的学段, 不硬编码空
             'content'        => $content,
             'options'        => !empty($options) ? $options : null,
             'correct_answer' => $answerText,
