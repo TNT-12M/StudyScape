@@ -105,11 +105,19 @@ async function download(material) {
     const token = result.data?.download_token
     if (!token) throw new Error('下载授权失败')
     const apiUrl = import.meta.env.VITE_PHP_API_URL || '/api.php'
-    const link = document.createElement('a')
-    link.href = `${apiUrl}?action=material_download&token=${encodeURIComponent(token)}`
-    link.target = '_blank'
-    link.rel = 'noopener'
-    link.click()
+    const url = `${apiUrl}?action=material_download&token=${encodeURIComponent(token)}`
+    const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent)
+    if (isIOS) {
+      // iOS Safari 会拦截隐藏 iframe/target=_blank, 用 window.open 允许用户确认
+      window.open(url, '_self')
+      window.$message?.info('iOS Safari 会直接预览文件, 请在预览页点右上角分享 → 存储到文件 App', { duration: 6000 })
+    } else {
+      const link = document.createElement('a')
+      link.href = url
+      link.target = '_blank'
+      link.rel = 'noopener'
+      link.click()
+    }
   }
   catch (err) { window.$message?.error(err.message || '下载失败') }
   finally { downloading.value = null }

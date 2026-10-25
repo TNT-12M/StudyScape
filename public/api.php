@@ -2150,14 +2150,34 @@ function ocrBridgeCall(string $method, string $path, array $data = null): array 
 
 function ocrRefreshBatch(array $batch): array {
     global $db;
-    // 已有 bridge_job_id 才刷新；新批次还没 start 过就跳过
-    $jobId = trim((string)($batch['bridge_job_id'] ?? ''));
-    if ($jobId === '') return $batch;
-
     $curStatus = (string)($batch['status'] ?? '');
+    $jobId = trim((string)($batch['bridge_job_id'] ?? ''));
+
+    // ★ 僵尸自愈: queued 但没有 bridge_job_id (startOcrWorker 崩溃跳过了)
+    if ($jobId === '' && ($curStatus === 'queued' || $curStatus === 'running')) {
+        $age = time() - strtotime($batch['created_at'] ?? 'now');
+        if ($age > 3600) {
+            // 超过 1 小时还没入队 → startOcrWorker 当时炸了, 标记失败让用户重试
+            dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message='OCR 入队超时 (可能当时 bridge_server 不在线), 请点删除后重新上传', updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$batch['id']]);
+            $batch['status'] = 'failed';
+            $batch['error_message'] = 'OCR 入队超时, 请重新上传';
+            return $batch;
+        }
+        // 还没超时 → 自动 retry startOcrWorker
+        if ($age > 30) {
+            startOcrWorker($batch);
+            // retry 后重查 DB 状态
+            $batch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [(int)$batch['id']]) ?: $batch;
+            $jobId = trim((string)($batch['bridge_job_id'] ?? ''));
+            $curStatus = (string)($batch['status'] ?? '');
+        }
+    }
+
     if ($curStatus === 'review' || $curStatus === 'committed' || $curStatus === 'failed') {
         return $batch;  // 终态不刷新
     }
+
+    if ($jobId === '') return $batch;
 
     $resp = ocrBridgeCall('GET', '/status/' . urlencode($jobId));
 
@@ -5929,8 +5949,8 @@ if ($action) {
                     http_response_code(403);
                     die("下载链接与当前登录用户不匹配");
                 }
-                // 一次性
-                unset($_SESSION['download_tokens'][$token]);
+                // ★ token 不一次性消费 — 留 5 分钟宽限让 iOS Safari 重试/预检
+                // unset($_SESSION['download_tokens'][$token]);  // 之前注释掉, 改为过期自动清理
                 $rel = trim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string)$info['file_path']), DIRECTORY_SEPARATOR);
                 $abs = __DIR__ . '/../' . $rel;
                 // 目录穿越防御
@@ -5947,12 +5967,14 @@ if ($action) {
                 // 输出
                 $filename = (string)($info['filename'] ?? 'download');
                 header('Content-Type: application/octet-stream');
+                header('Accept-Ranges: bytes');          // iOS Safari 需要, 支持断点续传
+                header('X-Content-Type-Options: nosniff'); // 防 MIME-sniffing, iOS 不强行预览
                 header('Content-Length: ' . filesize($realAbs));
-                $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
-                if (preg_match('/MSIE|Trident|Edge/i', $ua)) {
+                // ★ 优先用 RFC 5987 UTF-8 (iOS/Chrome/Firefox 支持), 老 IE 走 rawurlencode
+                if (preg_match('/MSIE|Trident|Edge/i', $_SERVER['HTTP_USER_AGENT'] ?? '')) {
                     header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '"');
                 } else {
-                    header('Content-Disposition: attachment; filename*=UTF-8\'\'' . rawurlencode($filename));
+                    header('Content-Disposition: attachment; filename="' . str_replace('"', '', $filename) . '"; filename*=UTF-8\'\'' . rawurlencode($filename));
                 }
                 header('Cache-Control: no-store, no-cache, must-revalidate');
                 header('Pragma: no-cache');
