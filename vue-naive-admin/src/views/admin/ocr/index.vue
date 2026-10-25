@@ -29,6 +29,19 @@
       </n-card>
       <n-card v-if="current" ref="reviewCard" :title="`审核：${current.file_name}`" segmented class="review-card">
           <template #header-extra><n-space><n-tooltip trigger="hover"><template #trigger><n-button :disabled="current.status!=='review' && current.status!=='committed'" @click="downloadAIPrompt">📄 下载 AI 提示词 PDF</n-button></template>OCR 完成后可用<template v-if="current.status==='queued' || current.status==='processing'">（当前: {{ current.stage || '处理中' }}）</template></n-tooltip><n-tooltip trigger="hover"><template #trigger><n-button :disabled="current.status!=='review' && current.status!=='committed'" @click="importAIModal = true">📋 批量粘贴导入答案</n-button></template>OCR 完成后可用，将 AI 返回的 JSON 粘贴进来自动填充<template v-if="current.status==='queued' || current.status==='processing'">（当前: {{ current.stage || '处理中' }}）</template></n-tooltip><n-button @click="selectAll(true)">全部保留</n-button><n-button @click="selectAll(false)">全部剔除</n-button><n-button type="primary" :loading="committing" @click="commit">统一入库</n-button></n-space></template>
+          <!-- 批次标签编辑: 学段 + 学科 -->
+          <n-alert v-if="current" class="batch-meta-alert" type="info" closable :show-icon="true" title="🏷️ 批次标签">
+            <n-space align="center">
+              <span>学段：</span>
+              <n-select v-if="current.status!=='queued' && current.status!=='processing'" v-model:value="currentMeta.education_level" :options="levels" style="width:130px" />
+              <n-tag v-else size="medium" bordered>{{ levels.find(l => l.value === currentMeta.education_level)?.label || '-' }}</n-tag>
+              <span style="margin-left:12px">学科：</span>
+              <n-select v-if="current.status!=='queued' && current.status!=='processing'" v-model:value="currentMeta.subject" :options="fullSubjectOptions" clearable filterable allow-create style="width:160px" placeholder="选或输入" />
+              <n-tag v-else size="medium" bordered>{{ currentMeta.subject || '-' }}</n-tag>
+              <n-button v-if="current.status!=='queued' && current.status!=='processing'" size="small" :loading="savingMeta" @click="saveMeta">💾 保存标签</n-button>
+              <n-tag v-if="savedMetaHint" size="small" type="success" :bordered="false">{{ savedMetaHint }}</n-tag>
+            </n-space>
+          </n-alert>
         <n-alert v-if="current.error_message" type="error">
           <template #icon>⚠️</template>
           <div class="ocr-error-detail">
@@ -130,6 +143,29 @@ const ocrSubjectOptions = computed(() => {
 })
 // 页面加载时拉一次全量科目
 phpQuestionsApi.subjects({}).then(r => { subjects.value = r.data?.subjects || [] }).catch(() => {})
+
+// 审核卡片批次标签编辑
+const currentMeta = reactive({ education_level: 'junior', subject: '' })
+const savingMeta = ref(false)
+const savedMetaHint = ref('')
+// K12 完整学科下拉 (前端硬编码全部 + DB 动态合并, 比上传页的多一个信息技术)
+const fullSubjectOptions = computed(() => {
+  const preset = ['语文', '数学', '英语', '物理', '化学', '生物', '历史', '地理', '政治', '道德与法治', '道法', '信息技术', '综合']
+  const all = [...preset, ...subjects.value]
+  const seen = new Set()
+  return all.filter(s => { if (seen.has(s)) return false; seen.add(s); return true })
+    .map(s => ({ label: s, value: s }))
+})
+async function saveMeta() {
+  if (!current.value?.id) return
+  savingMeta.value = true; savedMetaHint.value = ''
+  try {
+    await phpOcrApi.setMeta({ batch_id: current.value.id, education_level: currentMeta.education_level, subject: currentMeta.subject })
+    savedMetaHint.value = '✓ 已保存'
+    setTimeout(() => { savedMetaHint.value = '' }, 2000)
+  } catch (error) { message.error(error.message || '保存失败') }
+  finally { savingMeta.value = false }
+}
 const page = ref(1)
 const pageSize = ref(20)
 const paginationProps = computed(() => ({
@@ -323,7 +359,19 @@ async function loadBatches() {
 function onPageChange(p) { page.value = p; loadBatches() }
 function onPageSizeChange(s) { pageSize.value = s; page.value = 1; loadBatches() }
 async function loadBatch(id) {
-  try { const result = await phpOcrApi.get(id); current.value = result.data?.batch || null; questions.value = (current.value?.result?.questions || []).map(normalizeQuestion); await nextTick(); reviewCard.value?.$el?.scrollIntoView({ behavior: 'smooth', block: 'start' }) } catch (error) { message.error(error.message) }
+  try {
+    const result = await phpOcrApi.get(id)
+    current.value = result.data?.batch || null
+    // 同步批次标签到可编辑的 currentMeta
+    if (current.value) {
+      currentMeta.education_level = current.value.education_level || 'junior'
+      currentMeta.subject = current.value.subject || ''
+      savedMetaHint.value = ''
+    }
+    questions.value = (current.value?.result?.questions || []).map(normalizeQuestion)
+    await nextTick()
+    reviewCard.value?.$el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  } catch (error) { message.error(error.message) }
 }
 function selectAll(value) { questions.value.forEach(question => { question.included = value }) }
 function downloadAIPrompt() {

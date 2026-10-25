@@ -99,6 +99,7 @@ export const phpOcrApi = {
   retry: batch_id => phpAction('ocr_batch_retry', { batch_id }),
   remove: batch_id => phpAction('ocr_batch_delete', { batch_id }),
   commit: data => phpAction('ocr_batch_commit', data),
+  setMeta: data => phpAction('ocr_batch_set_meta', data),
   // 下载 AI 提示词纯文本 (返回文件下载, 不走 phpAction JSON 封装)
   export: batch_id => {
     const token = localStorage.getItem('token') || ''

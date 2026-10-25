@@ -4085,6 +4085,24 @@ if ($action) {
                 jsonOut(true, 'OCR 批次已删除');
                 break;
 
+            case 'ocr_batch_set_meta':
+                // 审核时标记批次学科/学段 (commit 时 questions 继承批次的 subject/education_level)
+                requireContentPermission('question_import');
+                $id = (int)($_POST['batch_id'] ?? 0);
+                $subject = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
+                $level = validateEducationLevel($_POST['education_level'] ?? '', '');
+                if ($id <= 0) jsonOut(false, '批次 ID 无效');
+                $batch = dbFetchOne($db, 'SELECT id FROM ocr_import_batches WHERE id=?', [$id]);
+                if (!$batch) jsonOut(false, '批次不存在');
+                $fields = []; $params = [];
+                if ($subject !== '')   { $fields[] = 'subject=?';   $params[] = $subject; }
+                if ($level !== '')     { $fields[] = 'education_level=?'; $params[] = $level; }
+                if (!$fields) jsonOut(false, '至少填写学科或学段');
+                $params[] = $id;
+                dbQuery($db, 'UPDATE ocr_import_batches SET ' . implode(', ', $fields) . ', updated_at=CURRENT_TIMESTAMP WHERE id=?', $params);
+                jsonOut(true, '批次标签已更新', ['subject' => $subject, 'education_level' => $level]);
+                break;
+
             case 'ocr_batch_commit':
                 requireContentPermission('question_import');
                 $id = (int)($_POST['batch_id'] ?? 0);
