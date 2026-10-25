@@ -38,7 +38,7 @@ TCP_PORT = 1200          # Worker 连接端口 (公网)
 HTTP_PORT = 1201         # PHP 本地接口 (仅 localhost)
 KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_key.txt")
 WORKER_TIMEOUT = 30      # Worker 心跳超时 (秒)
-RESULT_TTL = 86400       # 结果缓存 24 小时 (秒) — 给 PHP 端足够时间捞取
+RESULT_TTL = 14400        # 结果缓存 4 小时 (秒) — 公网机磁盘小, 且 PHP 端捞完就删了
 
 logging.basicConfig(
     level=logging.INFO,
