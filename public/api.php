@@ -4644,6 +4644,20 @@ if ($action) {
                 jsonOut(true, '批量修改分类成功', ['updated' => $db->changes()]);
                 break;
 
+            case 'bulk_update_question_subject':
+                requireContentPermission('question_edit');
+                $ids = json_decode($_POST['ids'] ?? '[]', true);
+                if (!is_array($ids) || count($ids) < 1 || count($ids) > 500) jsonOut(false, '请选择1-500道题目');
+                $ids = array_values(array_unique(array_filter(array_map('intval', $ids), fn($id) => $id > 0)));
+                if (!$ids) jsonOut(false, '题目ID无效');
+                $subject = trim((string)($_POST['subject'] ?? ''));
+                if ($subject === '') jsonOut(false, '学科不能为空');
+                $subject = normalizeSubject($subject);
+                $in = implode(',', array_fill(0, count($ids), '?'));
+                dbQuery($db, "UPDATE questions SET subject=?, updated_at=CURRENT_TIMESTAMP WHERE id IN ($in)", array_merge([$subject], $ids));
+                jsonOut(true, '批量修改学科成功', ['updated' => $db->changes()]);
+                break;
+
             // ---------- 批量删除题目及其关联记录 ----------
             case 'bulk_delete_questions':
                 requireContentPermission('question_edit');

@@ -39,6 +39,7 @@ export const phpQuestionsApi = {
   importJson: data => phpAction('import_questions_json', data),
   bulkMove: data => phpAction('bulk_move_questions', data),
   bulkCategory: data => phpAction('bulk_update_question_category', data),
+  bulkSubject: data => phpAction('bulk_update_question_subject', data),
   bulkRemove: data => phpAction('bulk_delete_questions', data),
   importOcr: data => phpAction('import_questions_json', data),
 }

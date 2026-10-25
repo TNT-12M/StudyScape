@@ -45,6 +45,8 @@
           <NSpace>
             <NButton :disabled="!selectedIds.length" @click="bulkCategory">
               批量改分类
+            </NButton><NButton :disabled="!selectedIds.length" @click="bulkSubject">
+              批量改学科
             </NButton><NButton :disabled="!selectedIds.length" @click="bulkMove">
               批量移动学段
             </NButton><NButton type="error" :disabled="!selectedIds.length" @click="bulkDelete">
@@ -394,6 +396,20 @@ async function bulkCategory() {
     return
   try {
     await phpQuestionsApi.bulkCategory({ ids: selectedIds.value, category })
+    selectedIds.value = []
+    message.success('批量修改成功')
+    await loadQuestions()
+  }
+  catch (error) {
+    message.error(error.message)
+  }
+}
+async function bulkSubject() {
+  const subject = await chooseValue('修改学科', subjectOptions.value)
+  if (!subject)
+    return
+  try {
+    await phpQuestionsApi.bulkSubject({ ids: selectedIds.value, subject })
     selectedIds.value = []
     message.success('批量修改成功')
     await loadQuestions()

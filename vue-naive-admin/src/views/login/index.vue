@@ -48,7 +48,10 @@
               </n-button>
             </div>
             <n-form-item label="密码">
-              <n-input v-model:value="regForm.password" type="password" placeholder="至少 6 位" />
+              <n-input v-model:value="regForm.password" type="password" show-password-on="mousedown" placeholder="至少 6 位" />
+            </n-form-item>
+            <n-form-item label="确认密码">
+              <n-input v-model:value="regForm.confirm_password" type="password" show-password-on="mousedown" placeholder="再次输入密码" />
             </n-form-item>
             <n-button type="primary" block :loading="loading" attr-type="submit">
               创建账号
@@ -84,6 +87,9 @@
               </div>
               <n-form-item label="新密码">
                 <n-input v-model:value="resetForm.new_password" type="password" show-password-on="mousedown" placeholder="至少 6 位" />
+              </n-form-item>
+              <n-form-item label="确认新密码">
+                <n-input v-model:value="resetForm.confirm_new_password" type="password" show-password-on="mousedown" placeholder="再次输入新密码" />
               </n-form-item>
               <n-button type="primary" block :loading="resetLoading" attr-type="submit">
                 重置密码
@@ -172,7 +178,7 @@ function goForgot() {
 }
 
 // ===== 注册 =====
-const regForm = reactive({ username: '', email: '', password: '', captcha: '', email_code: '' })
+const regForm = reactive({ username: '', email: '', password: '', confirm_password: '', captcha: '', email_code: '' })
 const regCaptchaUrl = ref('')
 const emailSending = ref(false)
 const emailCountdown = ref(0)
@@ -216,7 +222,7 @@ async function sendRegEmailCode() {
 }
 
 async function register() {
-  if (!regForm.username || !regForm.email || !regForm.password || !regForm.captcha || !regForm.email_code)
+  if (!regForm.username || !regForm.email || !regForm.password || !regForm.confirm_password || !regForm.captcha || !regForm.email_code)
     return $message.warning('请完整填写注册信息')
   if (!/^[\u4e00-\u9fa5\w\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]+$/u.test(regForm.username))
     return $message.warning('用户名只能包含中文、英文、数字、下划线和表情符号')
@@ -224,6 +230,8 @@ async function register() {
     return $message.warning('用户名至少 2 个字符')
   if (regForm.password.length < 6)
     return $message.warning('密码至少 6 位')
+  if (regForm.password !== regForm.confirm_password)
+    return $message.warning('两次输入的密码不一致')
   if (regForm.email_code.length !== 6)
     return $message.warning('邮箱验证码为 6 位数字')
   loading.value = true
@@ -243,7 +251,7 @@ async function register() {
 }
 
 // ===== 忘记密码/重置密码 =====
-const resetForm = reactive({ account: '', nickname: '', email: '', captcha: '', email_code: '', new_password: '' })
+const resetForm = reactive({ account: '', nickname: '', email: '', captcha: '', email_code: '', new_password: '', confirm_new_password: '' })
 const resetCaptchaUrl = ref('')
 const resetLoading = ref(false)
 const resetEmailSending = ref(false)
@@ -320,10 +328,12 @@ async function sendResetEmailCode() {
 }
 
 async function doReset() {
-  if (!resetConfirmed.value || !resetForm.email || !resetForm.email_code || !resetForm.new_password)
+  if (!resetConfirmed.value || !resetForm.email || !resetForm.email_code || !resetForm.new_password || !resetForm.confirm_new_password)
     return $message.warning('请完整填写所有信息')
   if (resetForm.new_password.length < 6)
     return $message.warning('新密码至少 6 位')
+  if (resetForm.new_password !== resetForm.confirm_new_password)
+    return $message.warning('两次输入的密码不一致')
   if (resetForm.email_code.length !== 6)
     return $message.warning('邮箱验证码为 6 位数字')
   resetLoading.value = true
