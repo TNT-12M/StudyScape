@@ -405,6 +405,14 @@ async function bulkCategory() {
   }
 }
 async function bulkSubject() {
+  // 确保科目下拉有值 (不依赖页面已加载的 subjects, 直接拉全量)
+  if (!subjects.value.length) {
+    try {
+      const r = await phpQuestionsApi.subjects({})
+      subjects.value = r.data?.subjects || []
+    }
+    catch { /* 忽略, 让 chooseValue 处理空选项 */ }
+  }
   const subject = await chooseValue('修改学科', subjectOptions.value)
   if (!subject)
     return
