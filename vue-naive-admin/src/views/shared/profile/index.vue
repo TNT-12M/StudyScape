@@ -29,8 +29,8 @@
             </n-form-item>
           </n-gi>
           <n-gi>
-            <n-form-item label="昵称" path="nickname">
-              <n-input v-model:value="form.nickname" maxlength="20" show-count placeholder="中英文/数字/下划线，最多20字" />
+            <n-form-item label="用户名" path="username">
+              <n-input v-model:value="form.username" maxlength="20" show-count placeholder="中英文/数字/下划线，最多20字，每月可改 5 次" />
             </n-form-item>
           </n-gi>
           <n-gi>
@@ -41,11 +41,6 @@
           <n-gi>
             <n-form-item label="年级" path="grade">
               <n-select v-model:value="form.grade" clearable :options="gradeOptions" placeholder="请选择年级" />
-            </n-form-item>
-          </n-gi>
-          <n-gi>
-            <n-form-item label="用户名">
-              <n-input :value="session.user?.username || ''" disabled />
             </n-form-item>
           </n-gi>
           <n-gi>
@@ -104,7 +99,7 @@ const router = useRouter()
 const formRef = ref(null)
 const saving = ref(false)
 const form = reactive({
-  nickname: '',
+  username: '',
   avatar: '',
   gender: 'secret',
   grade: null,
@@ -209,12 +204,13 @@ const isImageUrl = (value) => {
 }
 
 const rules = {
-  nickname: {
+  username: {
     validator: (_, value) => {
       const text = String(value || '').trim()
-      if (text === '') return true
-      if ([...text].length > 20) return new Error('昵称不能超过 20 个字符')
-      if (!/^[\u4e00-\u9fa5a-zA-Z0-9_\s\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]+$/u.test(text)) return new Error('昵称只能包含中文、英文、数字、下划线、空格和表情符号')
+      if (text === '') return new Error('用户名不能为空')
+      if ([...text].length < 2) return new Error('用户名至少 2 个字符')
+      if ([...text].length > 20) return new Error('用户名最多 20 个字符')
+      if (!/^[\u4e00-\u9fa5a-zA-Z0-9_]+$/.test(text)) return new Error('用户名只能包含中文、英文、数字、下划线')
       return true
     },
     trigger: ['blur', 'input'],
@@ -225,7 +221,7 @@ const rules = {
   },
 }
 
-const displayName = computed(() => form.nickname.trim() || session.user?.username || '用户')
+const displayName = computed(() => form.username.trim() || session.user?.username || '用户')
 const initial = computed(() => displayName.value.slice(0, 1).toUpperCase())
 const avatarPreview = ref('')
 watch(() => form.avatar, (value) => {
@@ -234,7 +230,7 @@ watch(() => form.avatar, (value) => {
 watch(() => session.user, (user) => {
   if (!user) return
   Object.assign(form, {
-    nickname: user.nickname || '',
+    username: user.username || '',
     avatar: user.avatar || '',
     gender: user.gender || 'secret',
     grade: user.grade || null,
@@ -271,13 +267,14 @@ async function save() {
 
     saving.value = true
     await session.updateProfile({
-      nickname: form.nickname.trim(),
+      username: form.username.trim(),
+      nickname: '',   // 不再改昵称，留空让后端保持原值
       avatar: form.avatar.trim(),
       gender: form.gender,
       grade: form.grade || '',
     })
     Object.assign(form, {
-      nickname: session.user?.nickname || '',
+      username: session.user?.username || '',
       avatar: session.user?.avatar || '',
       gender: session.user?.gender || 'secret',
       grade: session.user?.grade || null,

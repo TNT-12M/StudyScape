@@ -2777,6 +2777,7 @@ $csrfBypass = [
     'captcha',
     'check_session',
     'send_email_code',
+    'lookup_reset_email',
     'reset_password',
     'question_stats',
     'get_subjects',
@@ -2825,6 +2826,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 if ($action) {
     try {
         switch ($action) {
+            // ==================== 找回密码: 邮箱 → 用户名自动匹配 ====================
+            case 'lookup_reset_email':
+                $email = sanitizeInput($_POST['email'] ?? '');
+                $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
+                if (!validateEmail($email)) jsonOut(false, '邮箱格式不正确');
+                if (empty($captcha)) jsonOut(false, '请填写图片验证码');
+                // 图片验证码 (和 send_email_code 共用)
+                if (!isset($_SESSION['captcha_code']) || $_SESSION['captcha_code'] !== $captcha) {
+                    unset($_SESSION['captcha_code']);
+                    jsonOut(false, '图片验证码错误');
+                }
+                unset($_SESSION['captcha_code']);
+                $u = dbFetchOne($db, 'SELECT username, nickname FROM users WHERE email=?', [$email]);
+                if (!$u) jsonOut(false, '该邮箱未注册，请确认后再试');
+                jsonOut(true, '请确认是该账号', [
+                    'username' => $u['username'],
+                    'nickname' => $u['nickname'] ?? '',
+                ]);
+
             // ==================== 发送邮箱验证码 ====================
             case 'send_email_code':
                 $email = sanitizeInput($_POST['email'] ?? '');
@@ -2836,8 +2856,11 @@ if ($action) {
                 if (!in_array($purpose, ['register', 'reset'], true)) {
                     jsonOut(false, '非法用途');
                 }
-                if (empty($email) || empty($captcha)) {
-                    jsonOut(false, '请填写邮箱和图片验证码');
+                if (empty($email)) {
+                    jsonOut(false, '请填写邮箱');
+                }
+                if ($purpose === 'register' && empty($captcha)) {
+                    jsonOut(false, '请填写图片验证码');
                 }
                 if (!validateEmail($email)) {
                     jsonOut(false, '邮箱格式不正确');
@@ -2848,12 +2871,14 @@ if ($action) {
                     jsonOut(false, '请求过于频繁，请稍后再试');
                 }
 
-                // --- 第三层：captcha 校验 + 过期检查 ---
-                $captchaExpired = empty($_SESSION['captcha_expires']) || (int)$_SESSION['captcha_expires'] < time();
-                $captchaOk = !$captchaExpired && isset($_SESSION['captcha_code']) && hash_equals((string)$_SESSION['captcha_code'], $captcha);
-                unset($_SESSION['captcha_code'], $_SESSION['captcha_expires']);
-                if (!$captchaOk) {
-                    jsonOut(false, '图片验证码错误或已过期');
+                // --- 第三层：captcha 校验 (reset 流程已在 lookup_reset_email 消耗过 captcha, 这里跳过) ---
+                if ($purpose === 'register') {
+                    $captchaExpired = empty($_SESSION['captcha_expires']) || (int)$_SESSION['captcha_expires'] < time();
+                    $captchaOk = !$captchaExpired && isset($_SESSION['captcha_code']) && hash_equals((string)$_SESSION['captcha_code'], $captcha);
+                    unset($_SESSION['captcha_code'], $_SESSION['captcha_expires']);
+                    if (!$captchaOk) {
+                        jsonOut(false, '图片验证码错误或已过期');
+                    }
                 }
 
                 // --- 第四层：per-IP 去重邮箱检查（防轮换伪造邮箱绕过 per-email 冷却） ---
@@ -3050,13 +3075,12 @@ if ($action) {
 
             // ==================== 重置密码 ====================
             case 'reset_password':
-                $account = trim((string)($_POST['account'] ?? ''));
                 $email = sanitizeInput($_POST['email'] ?? '');
                 $emailCode = trim($_POST['email_code'] ?? '');
                 $newPassword = $_POST['new_password'] ?? '';
                 $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
 
-                if (empty($account) || empty($email) || empty($emailCode) || empty($newPassword) || empty($captcha)) {
+                if (empty($email) || empty($emailCode) || empty($newPassword) || empty($captcha)) {
                     jsonOut(false, '请完整填写所有信息');
                 }
 
@@ -3071,11 +3095,11 @@ if ($action) {
                     jsonOut(false, '邮箱格式不正确');
                 }
 
-                // 查找用户：支持用户名或邮箱
-                $u = dbFetchOne($db, "SELECT * FROM users WHERE (username=? OR email=?) AND email=?", [$account, $account, $email]);
+                // 查找用户：仅靠邮箱（前端已自动匹配显示用户名）
+                $u = dbFetchOne($db, "SELECT * FROM users WHERE email=?", [$email]);
                 if (!$u) {
                     // 统一提示，避免枚举
-                    jsonOut(false, '账号或邮箱不匹配');
+                    jsonOut(false, '该邮箱未注册');
                 }
 
                 // 校验邮箱验证码（一次性）
@@ -3265,7 +3289,15 @@ if ($action) {
                     }
                 }
 
-                dbQuery($db, 'UPDATE users SET nickname=?, avatar=?, gender=?, grade=? WHERE id=?', [$nickname, $avatar, $gender, $grade, $uid]);
+                // nickname 为 null 表示前端没传 (不再改昵称), 保持原值
+                $setParts = ['avatar=?', 'gender=?', 'grade=?'];
+                $params = [$avatar, $gender, $grade];
+                if ($nickname !== null) {
+                    $setParts[] = 'nickname=?';
+                    $params[] = $nickname;
+                }
+                $params[] = $uid;
+                dbQuery($db, 'UPDATE users SET ' . implode(', ', $setParts) . ' WHERE id=?', $params);
                 $updated = dbFetchOne($db, "SELECT id, username, email, nickname, avatar, gender, grade, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [$uid]);
                 if (!$updated || !(int)$updated['is_active']) jsonOut(false, '用户资料更新失败');
                 $updated['role'] = $updated['username'] === 'lian' ? 'root' : ($updated['role'] ?? ((int)$updated['is_admin'] ? 'root' : 'user'));
