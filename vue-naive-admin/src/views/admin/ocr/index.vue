@@ -8,7 +8,7 @@
             <n-form inline class="upload-form">
               <n-form-item label="文件"><n-upload :show-file-list="false" accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp,.tiff" :custom-request="upload"><n-button type="primary">选择 PDF / 图片</n-button></n-upload></n-form-item>
               <n-form-item label="学段"><n-select v-model:value="form.education_level" :options="levels" style="width:130px" /></n-form-item>
-              <n-form-item label="科目"><n-input v-model:value="form.subject" placeholder="可选" /></n-form-item>
+              <n-form-item label="科目"><n-select v-model:value="form.subject" :options="ocrSubjectOptions" clearable filterable allow-create style="width:150px" placeholder="必填, 或输入新科目" /></n-form-item>
             </n-form>
           </n-tab-pane>
           <n-tab-pane name="import" tab="导入已有 JSON">
@@ -16,7 +16,7 @@
               <n-form-item label="JSON 文件"><n-upload :show-file-list="false" accept=".json" :custom-request="importJson"><n-button type="success">选择 JSON 文件</n-button></n-upload></n-form-item>
               <n-form-item label="试卷名"><n-input v-model:value="importForm.paper_name" placeholder="可选，默认用文件名" /></n-form-item>
               <n-form-item label="学段"><n-select v-model:value="importForm.education_level" :options="levels" style="width:130px" /></n-form-item>
-              <n-form-item label="科目"><n-input v-model:value="importForm.subject" placeholder="可选，JSON 里有则自动读取" /></n-form-item>
+              <n-form-item label="科目"><n-select v-model:value="importForm.subject" :options="ocrSubjectOptions" clearable filterable allow-create style="width:150px" placeholder="可选, 默认综合" /></n-form-item>
             </n-form>
             <n-alert type="default" :show-icon="false" closable class="import-hint">
               支持 Contract B 格式（MinerU pipeline 输出）或审核页格式，系统会自动识别 schema 并转换。
@@ -101,7 +101,7 @@
 
 <script setup>
 import { h, nextTick, onMounted, onUnmounted } from 'vue'
-import { phpOcrApi } from '@/api/php-modules'
+import { phpOcrApi, phpQuestionsApi } from '@/api/php-modules'
 import { renderMathInHtml, renderOption, sanitizeHtml } from '@/views/user/components/question-utils'
 
 const message = window.$message
@@ -115,6 +115,21 @@ const activeTab = ref('upload')
 const form = reactive({ education_level: 'junior', subject: '' })
 const importForm = reactive({ paper_name: '', education_level: 'senior', subject: '' })
 const levels = [{ label: '初中', value: 'junior' }, { label: '高中', value: 'senior' }]
+
+// OCR 页面专用科目下拉 (从 questions 表全量枚举 + 常用预设)
+const subjects = ref([])
+const ocrSubjectOptions = computed(() => {
+  const fromDB = subjects.value.map(s => ({ label: s, value: s }))
+  const preset = ['语文', '数学', '英语', '物理', '化学', '生物', '历史', '地理', '政治', '道德与法治', '道法', '综合']
+  const all = [...preset, ...subjects.value]
+  const seen = new Set()
+  return all.filter(s => {
+    if (seen.has(s)) return false
+    seen.add(s); return true
+  }).map(s => ({ label: s, value: s }))
+})
+// 页面加载时拉一次全量科目
+phpQuestionsApi.subjects({}).then(r => { subjects.value = r.data?.subjects || [] }).catch(() => {})
 const page = ref(1)
 const pageSize = ref(20)
 const paginationProps = computed(() => ({

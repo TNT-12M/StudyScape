@@ -422,6 +422,7 @@ class PHPHandler(BaseHTTPRequestHandler):
             if not job:
                 self._send(404, {"error": "任务不存在", "job_id": jid})
                 return
+            qpos = int(job.get("queue_position", 0))
             # 清理敏感字段（file_b64 不回传）
             out = {
                 "job_id": job["job_id"],
@@ -429,6 +430,9 @@ class PHPHandler(BaseHTTPRequestHandler):
                 "filename": job.get("filename", ""),
                 "error": job.get("error"),  # 失败时的错误字符串
                 "result": job.get("result"),  # done 时的 Contract B JSON
+                "stage": job.get("stage", ""),          # ★ 细粒度阶段
+                "progress": job.get("progress", ""),    # ★ 进度提示 (如 "3/10 页")
+                "queue_position": qpos,                 # ★ 队列位置
             }
             self._send(200, out)
             return
