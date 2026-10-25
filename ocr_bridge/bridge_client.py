@@ -328,69 +328,85 @@ async def _handle_ocr(writer, job_id, task_data):
 
         # ★ 逐行解析 pipeline stdout → 发细粒度 PROGRESS
         # exam_pipeline.py print 格式: [MinerU] xxx / [Flatten] xxx / [Group] xxx / [Validate] xxx
+        # ★ 整个 stdout 循环 + proc.wait 都包在 PIPELINE_TIMEOUT 内, 防止 MinerU 挂起导致永远卡死
         _prev_stage = None
         _progress_lines = []  # 收集关键行用于日志
+        _stdout_done = asyncio.Event()
+
+        async def _read_stdout():
+            nonlocal _prev_stage, _progress_lines
+            try:
+                async for raw_line in proc.stdout:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    _progress_lines.append(line)
+                    if len(_progress_lines) > 30:
+                        _progress_lines = _progress_lines[-30:]
+
+                    new_stage = None
+                    progress_hint = None
+
+                    if "[MinerU] 提交" in line:
+                        new_stage = "mineru_uploading"
+                    elif "[MinerU] job_id=" in line or ("轮询" in line and "MinerU" not in _prev_stage):
+                        new_stage = "mineru_parsing"
+                    elif "[MinerU]" in line and "/" in line and ("(" in line or "页" in line or "/" in line):
+                        new_stage = "mineru_parsing"
+                        m = __import__("re").search(r'(\d+)/(\d+)', line)
+                        if m:
+                            progress_hint = f"{m.group(1)}/{m.group(2)} 页"
+                    elif "[MinerU] ✅ 完成" in line or "[MinerU] 下载" in line:
+                        new_stage = "mineru_downloading"
+                    elif "[MinerU] ✅ PageJSON" in line or "[MinerU] ✅ zip" in line or "[MinerU] ✅ zip 解压" in line:
+                        new_stage = "flatten_blocks"
+                    elif "[MinerU] ✅" in line:
+                        new_stage = "flatten_blocks"
+                    elif "[Flatten] ✅" in line:
+                        new_stage = "group_questions"
+                    elif "[Group] ✅ 切出" in line:
+                        new_stage = "validate_questions"
+                        m = __import__("re").search(r'切出 (\d+) 道', line)
+                        if m: progress_hint = f"识别出 {m.group(1)} 道"
+                    elif "[Validate]" in line and "✅" in line:
+                        new_stage = "done"
+                    elif "[MinerU] 完成" in line:
+                        new_stage = "mineru_downloading"
+
+                    if new_stage and (new_stage != _prev_stage or progress_hint):
+                        payload = {"type": "PROGRESS", "job_id": job_id, "stage": new_stage}
+                        if progress_hint:
+                            payload["progress"] = progress_hint
+                        await FrameProto.send(writer, payload)
+                        _prev_stage = new_stage
+                        log.info(f"  📊 {job_id} → {new_stage}{' ('+progress_hint+')' if progress_hint else ''}")
+            finally:
+                _stdout_done.set()
+
+        reader_task = asyncio.create_task(_read_stdout())
+
         try:
-            async for raw_line in proc.stdout:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                _progress_lines.append(line)
-                # 最多保留 30 行 (日志用)
-                if len(_progress_lines) > 30:
-                    _progress_lines = _progress_lines[-30:]
-
-                # 按关键字匹配阶段 (pipeline 输出顺序: MinerU → Flatten → Group → Validate)
-                new_stage = None
-                progress_hint = None  # 进度提示, 如 "3/10 页"
-
-                if "[MinerU] 提交" in line:
-                    new_stage = "mineru_uploading"
-                elif "[MinerU] job_id=" in line or ("轮询" in line and "MinerU" not in _prev_stage):
-                    new_stage = "mineru_parsing"
-                elif "[MinerU]" in line and "/" in line and ("(" in line or "页" in line or "/" in line):
-                    # MinerU 轮询进度: "[MinerU]   processing  3/10  (15s)"
-                    new_stage = "mineru_parsing"
-                    m = __import__("re").search(r'(\d+)/(\d+)', line)
-                    if m:
-                        progress_hint = f"{m.group(1)}/{m.group(2)} 页"
-                elif "[MinerU] ✅ 完成" in line or "[MinerU] 下载" in line:
-                    new_stage = "mineru_downloading"
-                elif "[MinerU] ✅ PageJSON" in line or "[MinerU] ✅ zip" in line or "[MinerU] ✅ zip 解压" in line:
-                    new_stage = "flatten_blocks"
-                elif "[MinerU] ✅" in line:
-                    new_stage = "flatten_blocks"
-                elif "[Flatten] ✅" in line:
-                    new_stage = "group_questions"
-                elif "[Group] ✅ 切出" in line:
-                    new_stage = "validate_questions"
-                    m = __import__("re").search(r'切出 (\d+) 道', line)
-                    if m: progress_hint = f"识别出 {m.group(1)} 道"
-                elif "[Validate]" in line and "✅" in line:
-                    new_stage = "done"
-                elif "[MinerU] 完成" in line:
-                    new_stage = "mineru_downloading"
-
-                # 只在阶段变化或有进度提示时发 PROGRESS
-                if new_stage and (new_stage != _prev_stage or progress_hint):
-                    payload = {"type": "PROGRESS", "job_id": job_id, "stage": new_stage}
-                    if progress_hint:
-                        payload["progress"] = progress_hint
-                    await FrameProto.send(writer, payload)
-                    _prev_stage = new_stage
-                    log.info(f"  📊 {job_id} → {new_stage}{' ('+progress_hint+')' if progress_hint else ''}")
-
-        except Exception as e:
-            log.error(f"  stdout 读取异常: {e}")
-
-        # 等进程结束
-        try:
+            # ★ 总超时 PIPELINE_TIMEOUT (300s), 保护整个 stdout 循环 + proc.wait
             await asyncio.wait_for(proc.wait(), PIPELINE_TIMEOUT)
         except asyncio.TimeoutError:
+            log.error(f"  pipeline timeout ({PIPELINE_TIMEOUT}s) — 杀进程")
             proc.kill()
             await proc.wait()
-            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "pipeline timeout"})
+            # 等 stdout reader 收尾
+            try:
+                await asyncio.wait_for(reader_task, 5)
+            except:
+                reader_task.cancel()
+            await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": f"pipeline timeout ({PIPELINE_TIMEOUT}s)"})
             return
+
+        # 进程结束后, 等 stdout reader 把最后几行读完 (最多 10s)
+        try:
+            await asyncio.wait_for(reader_task, 10)
+        except asyncio.TimeoutError:
+            reader_task.cancel()
+        except Exception:
+            pass
 
         if proc.returncode != 0:
             stderr = (await proc.stderr.read()).decode()

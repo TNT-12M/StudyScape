@@ -111,8 +111,11 @@ class BridgeState:
         return os.path.join(self.persist_dir, f"{jid}.json")
 
     def _persist(self, jid, job):
-        """写磁盘 (只存状态/result/error, 不存 data[base64] 节省空间)"""
-        slim = {k: v for k, v in job.items() if k != "data"}
+        """写磁盘 —— queued/processing 必须完整存 data (含 file_b64), done/failed 排除 data 省空间"""
+        if job.get("status") in ("done", "failed"):
+            slim = {k: v for k, v in job.items() if k != "data"}
+        else:
+            slim = job  # queued/processing 完整存, 重启恢复后 worker 能继续干
         try:
             with open(self._job_file(jid), "w", encoding="utf-8") as f:
                 json.dump(slim, f, ensure_ascii=False)
@@ -242,6 +245,22 @@ class BridgeState:
                         job["error"] = "timeout: worker unavailable"
                         job["finished_at"] = now
                         self._persist(jid, job)
+
+    async def push_task(self, jid):
+        """把 queue 里的 jid 任务推给当前 worker"""
+        async with self.worker_lock:
+            if not self.worker_writer:
+                return False
+            job = self.queue.get(jid)
+            if not job:
+                return False
+            await FrameProto.send(self.worker_writer, {
+                "type": "TASK",
+                "job_id": jid,
+                "data": job,
+            })
+            log.info(f"  📤 推送任务 {jid} 给 worker")
+            return True
 
 
 STATE = BridgeState()
@@ -524,16 +543,8 @@ class PHPHandler(BaseHTTPRequestHandler):
             }
             jid = asyncio.run_coroutine_threadsafe(STATE.enqueue(job), event_loop).result()
 
-            async def push_to_worker():
-                async with STATE.worker_lock:
-                    if STATE.worker_writer:
-                        await FrameProto.send(STATE.worker_writer, {
-                            "type": "TASK",
-                            "job_id": jid,
-                            "data": job,
-                        })
-                return True
-            asyncio.run_coroutine_threadsafe(push_to_worker(), event_loop)
+            # 立即推送 + watchdog 保险 (queued 超过 60s 自动重推)
+            asyncio.run_coroutine_threadsafe(STATE.push_task(jid), event_loop)
 
             self._send(202, {
                 "job_id": jid,
@@ -566,15 +577,8 @@ class PHPHandler(BaseHTTPRequestHandler):
             job = {"task_type": "export_pdf", "export_input": export_input}
             jid = asyncio.run_coroutine_threadsafe(STATE.enqueue(job), event_loop).result()
 
-            async def push_to_worker():
-                async with STATE.worker_lock:
-                    if STATE.worker_writer:
-                        await FrameProto.send(STATE.worker_writer, {
-                            "type": "TASK",
-                            "job_id": jid,
-                            "data": job,
-                        })
-            asyncio.run_coroutine_threadsafe(push_to_worker(), event_loop)
+            # 立即推送 + watchdog 保险
+            asyncio.run_coroutine_threadsafe(STATE.push_task(jid), event_loop)
 
             self._send(202, {"job_id": jid, "status": "queued", "message": "PDF 生成任务已提交"})
             return
@@ -587,6 +591,47 @@ async def cleanup_loop():
     while True:
         await asyncio.sleep(60)
         await STATE.cleanup_old()
+
+
+async def watchdog_loop():
+    """看门狗: worker 在线但 queued jobs 超过 60s 没派发 → 重新推"""
+    RESEND_GRACE = 60   # queued 超过 60s 就重推
+    SCAN_INTERVAL = 30  # 每 30s 扫一次
+    _resent = {}  # jid → 上次重推时间
+    MAX_RESEND = 3  # 最多重推 3 次
+
+    log.info(f"🐕 watchdog 启动 (每 {SCAN_INTERVAL}s 扫, queued>{RESEND_GRACE}s 重推)")
+
+    # 首次立即扫 —— 重启后遗留的 queued jobs 可能已经等很久了
+    while True:
+        try:
+            async with STATE.lock:
+                queued = [
+                    (jid, job) for jid, job in STATE.queue.items()
+                    if job["status"] == "queued"
+                ]
+            if queued:
+                log.info(f"🐕 扫描到 {len(queued)} 个 queued jobs")
+            else:
+                _resent.clear()
+
+            if queued and _worker_online():
+                now = time.time()
+                for jid, job in queued:
+                    enqueued_at = job.get("enqueued_at", 0)
+                    waited = now - enqueued_at
+                    last_resent = _resent.get(jid, 0)
+                    resent_count = _resent.get(f"{jid}_count", 0)
+
+                    if waited > RESEND_GRACE and now - last_resent > 30 and resent_count < MAX_RESEND:
+                        await STATE.push_task(jid)
+                        _resent[jid] = now
+                        _resent[f"{jid}_count"] = resent_count + 1
+                        log.warning(f"🐕 watchdog: {jid} 排队 {int(waited)}s, 第 {resent_count+1} 次重推")
+        except Exception as e:
+            log.error(f"watchdog 异常: {e}")
+
+        await asyncio.sleep(SCAN_INTERVAL)
 
 
 async def main():
@@ -607,6 +652,9 @@ async def main():
 
     # 清理定时
     asyncio.create_task(cleanup_loop())
+
+    # 看门狗: queued jobs 自动重推
+    asyncio.create_task(watchdog_loop())
 
     async with tcp_server:
         await tcp_server.serve_forever()
