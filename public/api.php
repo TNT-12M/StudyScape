@@ -2206,6 +2206,20 @@ function ocrRefreshBatch(array $batch): array {
     $batch['progress'] = (string)($bdata['progress'] ?? '');
     $batch['queue_position'] = (int)($bdata['queue_position'] ?? 0);
 
+    // ★ 关键: 同步 bridge status → DB status, 否则前端永远显示 "排队中"
+    // bridge 的 processing 对应前端 status-processing 分支 (细粒度阶段显示)
+    if ($bStatus === 'processing') {
+        if ($curStatus === 'queued') {
+            dbQuery($db, "UPDATE ocr_import_batches SET status='processing', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='queued'", [(int)$batch['id']]);
+        }
+        $batch['status'] = 'processing';
+    } elseif ($bStatus === 'queued') {
+        // bridge 仍在排队, 但 DB 里如果已经是 processing 就别回退 (race condition)
+        if ($curStatus !== 'processing') {
+            $batch['status'] = 'queued';
+        }
+    }
+
     if ($bStatus === 'done' && isset($bdata['result']) && is_array($bdata['result'])) {
         // ✅ 成功! 把 JSON 塞进 DB
         $json = json_encode($bdata['result'], JSON_UNESCAPED_UNICODE);
