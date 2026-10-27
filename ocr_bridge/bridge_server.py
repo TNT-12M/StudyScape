@@ -254,6 +254,13 @@ class BridgeState:
             job = self.queue.get(jid)
             if not job:
                 return False
+            # ★ 状态迁移: queued → processing (同 dequeue 的逻辑)
+            # 之前漏了这步, 导致 api.php 一直拿到 status=queued, 前端永远显示"排队中"
+            if job.get("status") == "queued":
+                job["status"] = "processing"
+                job["started_at"] = time.time()
+                job["stage"] = "mineru_starting"
+                self._persist(jid, job)
             await FrameProto.send(self.worker_writer, {
                 "type": "TASK",
                 "job_id": jid,
