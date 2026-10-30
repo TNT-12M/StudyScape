@@ -8,6 +8,17 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
+// ====== PSR-4 Autoloader for Gregwar/Captcha ======
+// MIT License (Gregwar/Captcha), 手动 vendor 引入避免 composer 依赖
+spl_autoload_register(function ($class) {
+    $prefix = 'Gregwar\\Captcha\\';
+    $baseDir = __DIR__ . '/vendor/Gregwar/Captcha/src/Gregwar/Captcha/';
+    if (strncmp($prefix, $class, strlen($prefix)) !== 0) return;
+    $relative = substr($class, strlen($prefix));
+    $file = $baseDir . str_replace('\\', '/', $relative) . '.php';
+    if (is_file($file)) require $file;
+});
+
 // ====== 漏桶算法：安全场景检测引擎（类定义放最前面，确保可用） ======
 
 /**
@@ -2044,15 +2055,18 @@ if (!isset($_SESSION['csrf_token'])) {
 }
 
 // 生成图形验证码（5 位混合大写字母+数字，排除易混淆字符 0/O/1/I）
-function createCaptcha(): string {
-    static $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    $code = '';
-    for ($i = 0; $i < 5; $i++) {
-        $code .= $chars[random_int(0, strlen($chars) - 1)];
+// 底层使用 Gregwar/Captcha（MIT），带扭曲/波浪形变/噪点/干扰线，抗 OCR
+function createCaptcha(): \Gregwar\Captcha\CaptchaBuilder {
+    // 指定字符集（排除 0/O/1/I 易混淆字符）+ 固定 5 位
+    static $phraseBuilder = null;
+    if ($phraseBuilder === null) {
+        $phraseBuilder = new \Gregwar\Captcha\PhraseBuilder(5, 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789');
     }
-    $_SESSION['captcha_code'] = $code;
+    $builder = new \Gregwar\Captcha\CaptchaBuilder(null, $phraseBuilder);
+    // 输出 session 存实际验证码短语 (校验用, 统一大写)
+    $_SESSION['captcha_code'] = $builder->getPhrase();
     $_SESSION['captcha_expires'] = time() + 300; // 5 分钟过期
-    return $code;
+    return $builder;
 }
 
 // ===================== API路由 =====================
@@ -2328,17 +2342,33 @@ if ($action === 'record_visit') {
 }
 
 if ($action === 'captcha') {
-    $code = createCaptcha();
-    header("Content-type: image/png");
-    $im = imagecreate(120, 40);
-    $bg = imagecolorallocate($im, 240, 240, 240);
-    $txtcolor = imagecolorallocate($im, 40, 40, 40);
-    $linecolor = imagecolorallocate($im, 180, 180, 180);
-    imageline($im, 0, rand(0, 40), 120, rand(0, 40), $linecolor);
-    imageline($im, 0, rand(0, 40), 120, rand(0, 40), $linecolor);
-    imagestring($im, 5, 30, 8, $code, $txtcolor);
-    imagepng($im);
-    imagedestroy($im);
+    try {
+        $builder = createCaptcha();
+        // 用较强的抗 OCR 配置: buildAgainstOCR 自带扭曲 + 干扰线 + 噪点
+        $builder->buildAgainstOCR(150, 50);
+        // 降低颜色对比度, 让 OCR 更难识别; 背景 200/200/200, 文字偏深灰
+        $builder->setBackgroundColor(220, 220, 220);
+        $builder->setTextColor(50, 50, 50);
+        $builder->setLineColor(160, 160, 160);
+        $builder->output();
+    } catch (\Throwable $e) {
+        // Gregwar 依赖 GD 扩展 + TTF 字体, 失败时回退到旧版简单验证码
+        header("Content-type: image/png");
+        $code = $_SESSION['captcha_code'] ?? 'ERROR';
+        $im = imagecreate(150, 50);
+        $bg = imagecolorallocate($im, 220, 220, 220);
+        $txtcolor = imagecolorallocate($im, 50, 50, 50);
+        $linecolor = imagecolorallocate($im, 160, 160, 160);
+        for ($i = 0; $i < 3; $i++) {
+            imageline($im, 0, random_int(0, 50), 150, random_int(0, 50), $linecolor);
+        }
+        for ($i = 0; $i < 30; $i++) {
+            imagesetpixel($im, random_int(0, 150), random_int(0, 50), $linecolor);
+        }
+        imagestring($im, 5, 40, 14, $code, $txtcolor);
+        imagepng($im);
+        imagedestroy($im);
+    }
     exit;
 }
 
