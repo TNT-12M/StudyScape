@@ -43,7 +43,7 @@ function triggerSecurityScan(bool $force = false): array {
 
     // 日志文件路径（宝塔默认路径，可通过 .env 配置）
     $logPath = '/www/wwwlogs/120.79.161.207.log';
-    $envFile = dirname(__DIR__) . '/security.env';
+    $envFile = dirname(dirname(__DIR__)) . '/security.env';
     if (file_exists($envFile)) {
         $envLines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         foreach ($envLines as $line) {
@@ -63,8 +63,8 @@ function triggerSecurityScan(bool $force = false): array {
         return ['success' => false, 'message' => '日志文件不存在: ' . $logPath, 'scan_id' => $scanId, 'skipped' => false];
     }
 
-    $dbPath = dirname(__DIR__) . '/exam.db';
-    $scriptPath = dirname(__DIR__) . '/security/log_monitor.py';
+    $dbPath = dirname(dirname(__DIR__)) . '/exam.db';
+    $scriptPath = dirname(dirname(__DIR__)) . '/security/log_monitor.py';
     if (!file_exists($scriptPath)) {
         dbQuery($db, "UPDATE security_scan_log SET status='failed', finished_at=?, result_info=? WHERE id=?", [
             date('Y-m-d H:i:s'),
@@ -269,7 +269,7 @@ function phpSecurityScan(string $logPath, int $scanId): array {
 
     // 加载白名单
     $whitelist = [];
-    $envFile = dirname(__DIR__) . '/security.env';
+    $envFile = dirname(dirname(__DIR__)) . '/security.env';
     if (file_exists($envFile)) {
         $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         foreach ($lines as $line) {
@@ -689,10 +689,10 @@ function _triggerGeoLookup() {
     global $db;
     if (!$db) return;
 
-    $dbPath = realpath(__DIR__ . '/../exam.db');
+    $dbPath = realpath(__DIR__ . '/../../../exam.db');
     if (!$dbPath) return;
 
-    $scriptPath = realpath(__DIR__ . '/../security/geo_lookup.py');
+    $scriptPath = realpath(__DIR__ . '/../../../security/geo_lookup.py');
     if (!$scriptPath) return;
 
     // 检查是否还有未补全的 IP，没有就不启动了

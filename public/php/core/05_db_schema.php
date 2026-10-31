@@ -1,7 +1,7 @@
 <?php
 
 // ===================== SQLite 初始化 =====================
-$dbFile = __DIR__ . '/../exam.db';
+$dbFile = __DIR__ . '/../../../exam.db';
 try {
     $db = new SQLite3($dbFile);
     $db->enableExceptions(true);

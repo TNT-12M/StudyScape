@@ -56,7 +56,7 @@ for f in public/api.php public/php/core/*.php public/php/modules/*.php; do head 
 
 ## 数据库约定
 
-- 位置：`__DIR__ . '/../exam.db'`（SQLite3，相对薄入口 api.php）
+- 位置：`__DIR__ . '/../../../exam.db'`（SQLite3，core/ 下模块用 3 层 ../ 达项目根；modules/ 同理）
 - 打开时机：`05_db_schema.php` 首次 `new SQLite3()` 并执行 CREATE TABLE IF NOT EXISTS
 - 全局变量：`global $db` 在所有函数内直取，无依赖注入
 - 事务：写操作用 `BEGIN IMMEDIATE`，rollback 包 `try/catch` 嵌套防异常吞掉

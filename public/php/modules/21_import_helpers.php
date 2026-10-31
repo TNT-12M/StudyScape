@@ -353,6 +353,37 @@ function examB_buildResult($db, int $aid, int $uid, bool $isExam): array {
 // =====================================================
 
 /**
+ * 从整份 PaperCutter-VL 数据推断学段（junior/senior）
+ * 优先级：显式字段 → 来源文本 → 题干文本 → 默认 junior
+ */
+function pcvl_detectLevel(array $data): string {
+    // 1️⃣ 显式字段优先
+    foreach ($data as $q) {
+        if (!is_array($q)) continue;
+        foreach (['education_level', 'educationLevel', 'level', '学段', 'grade'] as $key) {
+            if (!empty($q[$key]) && is_string($q[$key])) {
+                $v = strtolower(trim($q[$key]));
+                if (str_contains($v, 'senior') || str_contains($v, '高中')) return 'senior';
+                if (str_contains($v, 'junior') || str_contains($v, '初中')) return 'junior';
+            }
+        }
+    }
+    // 2️⃣ 来源文本推断（例: "2025年安徽省初中学业水平考试 道德与法治"）
+    $sourceBlob = '';
+    $contentBlob = '';
+    foreach ($data as $q) {
+        if (!is_array($q)) continue;
+        $sourceBlob .= ' ' . ($q['source'] ?? '') . ' ' . ($q['source_province'] ?? '') . ' ' . ($q['source_year'] ?? '');
+        $contentBlob .= ' ' . ($q['question_content'] ?? '');
+    }
+    $allBlob = $sourceBlob . $contentBlob;
+    if (preg_match('/(高[一二三]|高中|senior\s*(?:high|middle)?|高考|学业水平等级性考试)/iu', $allBlob)) return 'senior';
+    if (preg_match('/(初[一二三]|初中|junior\s*(?:high|middle)?|学业水平考试)/iu', $allBlob)) return 'junior';
+    // 3️⃣ 默认初中
+    return 'junior';
+}
+
+/**
  * 判断是否为 PaperCutter-VL 输出格式
  * 特征：顶层数组每条均为对象，含 question_content / question_options / question_type 等字段
  */

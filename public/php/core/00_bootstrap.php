@@ -12,7 +12,7 @@ ini_set('display_errors', 0);
 // MIT License (Gregwar/Captcha), 手动 vendor 引入避免 composer 依赖
 spl_autoload_register(function ($class) {
     $prefix = 'Gregwar\\Captcha\\';
-    $baseDir = __DIR__ . '/vendor/Gregwar/Captcha/src/Gregwar/Captcha/';
+    $baseDir = __DIR__ . '/../../vendor/Gregwar/Captcha/src/Gregwar/Captcha/';
     if (strncmp($prefix, $class, strlen($prefix)) !== 0) return;
     $relative = substr($class, strlen($prefix));
     $file = $baseDir . str_replace('\\', '/', $relative) . '.php';

@@ -68,7 +68,7 @@ function formatUserTimestamps(array $user): array {
 
 // ===== P0-A6: 管理员操作审计日志 =====
 function log_admin_action(string $action, $target_uid = null): void {
-    $logDir = __DIR__ . '/../data/logs';
+    $logDir = __DIR__ . '/../../../data/logs';
     if (!is_dir($logDir)) @mkdir($logDir, 0755, true);
     $line = json_encode([
         'time'       => gmdate('Y-m-d H:i:s'),
@@ -97,7 +97,7 @@ define('EMAIL_CODE_IP_DIVERSITY_WINDOW', 3600); // 去重窗口 1 小时
 function loginThrottleIpFile(): string {
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     $safeIp = preg_replace('/[^a-fA-F0-9.:_-]/', '_', $ip);
-    $logDir = __DIR__ . '/../data/logs';
+    $logDir = __DIR__ . '/../../../data/logs';
     if (!is_dir($logDir)) @mkdir($logDir, 0755, true);
     return $logDir . '/login_throttle_' . $safeIp . '.json';
 }

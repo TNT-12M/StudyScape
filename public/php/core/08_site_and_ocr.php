@@ -185,7 +185,7 @@ function ocrRefreshBatch(array $batch): array {
 
 function startOcrWorker(array $batch): void {
     global $db;
-    $root = realpath(__DIR__ . '/..');
+    $root = realpath(__DIR__ . '/../..');
     $dir = $root . DIRECTORY_SEPARATOR . 'data' . DIRECTORY_SEPARATOR . 'ocr_batches';
     $input = $dir . DIRECTORY_SEPARATOR . basename((string)$batch['stored_name']);
 

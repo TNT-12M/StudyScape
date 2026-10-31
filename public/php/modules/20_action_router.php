@@ -911,9 +911,9 @@ if ($action) {
                     'php_os' => PHP_OS_FAMILY ?? 'unknown',
                     'python3_path' => '',
                     'python3_version' => '',
-                    'script_exists' => file_exists(dirname(__DIR__) . '/security/log_monitor.py'),
+                    'script_exists' => file_exists(dirname(dirname(dirname(__DIR__))) . '/security/log_monitor.py'),
                     'log_exists' => file_exists('/www/wwwlogs/120.79.161.207.log'),
-                    'db_exists' => file_exists(dirname(__DIR__) . '/exam.db'),
+                    'db_exists' => file_exists(dirname(dirname(dirname(__DIR__))) . '/exam.db'),
                     'functions' => [
                         'popen' => function_exists('popen'),
                         'pclose' => function_exists('pclose'),
@@ -946,7 +946,7 @@ if ($action) {
             case 'security_scan_quick':
                 requireAdmin();
                 $logPath = '/www/wwwlogs/120.79.161.207.log';
-                $envFile = dirname(__DIR__) . '/security.env';
+                $envFile = dirname(dirname(dirname(__DIR__))) . '/security.env';
                 if (file_exists($envFile)) {
                     $envLines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
                     foreach ($envLines as $line) {
@@ -980,7 +980,7 @@ if ($action) {
             case 'security_scan_check':
                 requireAdmin();
                 $logPath = '/www/wwwlogs/120.79.161.207.log';
-                $envFile = dirname(__DIR__) . '/security.env';
+                $envFile = dirname(dirname(dirname(__DIR__))) . '/security.env';
                 if (file_exists($envFile)) {
                     $envLines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
                     foreach ($envLines as $line) {
@@ -990,8 +990,8 @@ if ($action) {
                         }
                     }
                 }
-                $dbPath = dirname(__DIR__) . '/exam.db';
-                $scriptPath = dirname(__DIR__) . '/security/log_monitor.py';
+                $dbPath = dirname(dirname(dirname(__DIR__))) . '/exam.db';
+                $scriptPath = dirname(dirname(dirname(__DIR__))) . '/security/log_monitor.py';
                 $pythonBin = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' ? 'python' : 'python3';
 
                 $checks = [
@@ -1099,7 +1099,7 @@ if ($action) {
                 if ((int)$file['size'] > 50 * 1024 * 1024) jsonOut(false, '文件不能超过 50MB');
                 $level = validateEducationLevel($_POST['education_level'] ?? 'junior');
                 $subject = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
-                $dir = __DIR__ . '/../data/ocr_batches';
+                $dir = __DIR__ . '/../../../data/ocr_batches';
                 if (!is_dir($dir)) @mkdir($dir, 0750, true);
                 $stored = 'ocr_' . bin2hex(random_bytes(16)) . '.' . $ext;
                 $path = $dir . DIRECTORY_SEPARATOR . $stored;
@@ -1180,7 +1180,7 @@ if ($action) {
                 }
                 if (!$questions) jsonOut(false, 'JSON 中没有有效题目');
 
-                $dir = __DIR__ . '/../data/ocr_batches';
+                $dir = __DIR__ . '/../../../data/ocr_batches';
                 if (!is_dir($dir)) @mkdir($dir, 0750, true);
                 $stored = 'ocr_import_' . bin2hex(random_bytes(16)) . '.json';
                 file_put_contents($dir . DIRECTORY_SEPARATOR . $stored, json_encode(['questions' => $questions], JSON_UNESCAPED_UNICODE));
@@ -1237,7 +1237,7 @@ if ($action) {
                 $id = (int)($_POST['batch_id'] ?? 0);
                 $batch = dbFetchOne($db, 'SELECT stored_name FROM ocr_import_batches WHERE id=?', [$id]);
                 if (!$batch) jsonOut(false, 'OCR 批次不存在');
-                @unlink(__DIR__ . '/../data/ocr_batches/' . basename((string)$batch['stored_name']));
+                @unlink(__DIR__ . '/../../../data/ocr_batches/' . basename((string)$batch['stored_name']));
                 dbQuery($db, 'DELETE FROM ocr_import_batches WHERE id=?', [$id]);
                 jsonOut(true, 'OCR 批次已删除');
                 break;
@@ -1342,7 +1342,7 @@ if ($action) {
                 if (!$jobId) jsonOut(false, 'Bridge 返回异常');
 
                 // ② 轮询状态 (最多 60s)
-                $pdfCacheDir = __DIR__ . '/../ocr_bridge/_pdf_cache';
+                $pdfCacheDir = __DIR__ . '/../../../ocr_bridge/_pdf_cache';
                 $pdfPath = $pdfCacheDir . "/{$jobId}.pdf";
 
                 for ($i = 0; $i < 30; $i++) {
@@ -2833,7 +2833,7 @@ if ($action) {
                 $educationLevel = validateEducationLevel($rawEducationLevel);
 
                 // 安全存储文件名（api.php 位于项目根，materials 同级）
-                $matDir = __DIR__ . '/../materials';
+                $matDir = __DIR__ . '/../../../materials';
                 if (!is_dir($matDir)) @mkdir($matDir, 0755, true);
                 $stored = uniqid('mat_', true) . '.' . $ext;
                 $stored = preg_replace('/[^A-Za-z0-9._-]/', '', $stored); // 安全化
@@ -2879,7 +2879,7 @@ if ($action) {
                 if ($id <= 0) jsonOut(false, "参数错误");
                 $mat = dbFetchOne($db, "SELECT * FROM materials WHERE id=?", [$id]);
                 if (!$mat) jsonOut(false, "资料不存在");
-                $absPath = __DIR__ . '/../' . trim(str_replace('/', DIRECTORY_SEPARATOR, $mat['file_path']), '\\/');
+                $absPath = __DIR__ . '/../../../' . trim(str_replace('/', DIRECTORY_SEPARATOR, $mat['file_path']), '\\/');
                 try {
                     $db->exec('BEGIN');
                     dbQuery($db, "DELETE FROM materials WHERE id=?", [$id]);
@@ -3141,9 +3141,9 @@ if ($action) {
                 // ★ token 不一次性消费 — 留 5 分钟宽限让 iOS Safari 重试/预检
                 // unset($_SESSION['download_tokens'][$token]);  // 之前注释掉, 改为过期自动清理
                 $rel = trim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string)$info['file_path']), DIRECTORY_SEPARATOR);
-                $abs = __DIR__ . '/../' . $rel;
+                $abs = __DIR__ . '/../../../' . $rel;
                 // 目录穿越防御
-                $baseDir = realpath(__DIR__ . '/..') . DIRECTORY_SEPARATOR;
+                $baseDir = realpath(__DIR__ . '/../../..') . DIRECTORY_SEPARATOR;
                 $realAbs = realpath($abs);
                 if ($realAbs === false || strpos($realAbs, $baseDir) !== 0 || !is_file($realAbs)) {
                     http_response_code(404);

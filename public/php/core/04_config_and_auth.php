@@ -50,7 +50,7 @@ function loadPasswordKey(): string {
 function smtpConfigPath(): string {
     $configured = getenv('SMTP_ENV_FILE');
     if ($configured !== false && trim($configured) !== '') return trim($configured);
-    return dirname(__DIR__) . '/smtp.env';
+    return dirname(dirname(__DIR__)) . '/smtp.env';
 }
 
 function loadSmtpConfig(): ?array {
