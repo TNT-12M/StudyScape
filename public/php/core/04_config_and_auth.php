@@ -1,3 +1,4 @@
+<?php
 function generateAdminFingerprint(): string {
     $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
     $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';

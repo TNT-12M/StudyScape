@@ -1,3 +1,4 @@
+<?php
 
 function recordSiteVisit(): void {
     global $db;
@@ -58,3 +59,5 @@ if ($action === 'captcha') {
         imagepng($im);
         imagedestroy($im);
     }
+    exit;
+}

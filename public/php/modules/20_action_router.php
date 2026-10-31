@@ -1,3 +1,7 @@
+<?php
+// ===================== API处理 =====================
+if ($action) {
+    try {
         switch ($action) {
             // ==================== 找回密码: 邮箱 → 用户名自动匹配 ====================
             case 'lookup_reset_email':
@@ -3174,3 +3178,8 @@
             default:
                 jsonOut(false, "未知操作");
         }
+    } catch (Exception $e) {
+        jsonOut(false, "服务器异常：" . $e->getMessage());
+    }
+    exit;
+}

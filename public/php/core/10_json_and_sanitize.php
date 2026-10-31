@@ -1,5 +1,4 @@
-    exit;
-}
+<?php
 
 // 输出json辅助
 function jsonOut($success, $msg = '', $data = null) {

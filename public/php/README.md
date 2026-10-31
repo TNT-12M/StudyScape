@@ -1,53 +1,74 @@
-# StudyScape 后端 PHP 核心
+# StudyScape API 模块化架构
 
-本目录是 StudyScape 项目的**核心后端逻辑**，全部 PHP API 的基础设施、安全、DB、OCR、业务路由等模块都在这里。
+`public/api.php` 薄入口 + `public/php/core/` + `public/php/modules/`。
+原始 6616 行单体已按职责域拆分为 17 个独立文件，每个文件 `php -l` 可单独解析。
 
 ## 目录结构
 
 ```
-php/
-├── README.md                         ← 本文件
-├── core/                             ← 核心基础设施（被 api.php 按顺序 require）
-│   ├── 00_bootstrap_header.php       ← PSR-4 autoloader + error_reporting 配置
-│   ├── 01_security_rates.php         ← 4 个安全漏桶类（LeakyBucket / UniqBucket / CounterBucket / RatioBucket）
-│   ├── 02_session.php                ← Session 安全加固（httponly / samesite / secure）
-│   ├── 03_security_scan.php          ← PHP 安全扫描函数群（triggerSecurityScan / phpSecurityScan / _insert*）
-│   ├── 04_config_and_auth.php        ← 密码 key / SMTP 配置 / 加密解密 / 邮箱验证码函数群（30+ 函数）
-│   ├── 05_db_schema.php              ← SQLite 连接 + CREATE TABLE schema + 升级迁移
-│   ├── 05_db_utils.php               ← DB 工具函数 + MinerU 辅助
-│   ├── 06_captcha.php                ← Gregwar/Captcha 集成（createCaptcha）
-│   ├── 07_site_and_ocr.php           ← 站点统计 + OCR bridge（ocrBridgeCall / ocrRefreshBatch / startOcrWorker）
-│   ├── 08_inline_actions.php          ← record_visit + captcha 两个 inline action 处理
-│   ├── 09_json_and_sanitize.php      ← jsonOut / sanitizeInput / sanitizeHtmlContent
-│   ├── 10_auth.php                   ← 权限检查函数群（isLoggedIn / requireAdmin / requireRoot / requireContentPermission）
-│   ├── 11_user_and_db.php            ← 用户资料 + 登录限流 + dbQuery / dbFetchAll / dbFetchOne
-│   └── 12_csrf.php                   ← $csrfBypass 白名单 + CSRF token 校验
-└── modules/                          ← 业务模块
-    ├── 00_fallback.php               ← 直接访问 api.php 时的 fallback 提示
-    ├── 20_switch_cases.php           ← switch ($action) 全部 case 路由（~100+ action handler）
-    └── 21_import_helpers.php         ← 批量导入辅助函数（importExtractQuestions / pcvlConvertPaperCutterVL 等）
+public/
+├── api.php                      ← 薄入口（~40 行）：display_errors=0 + require 顺序
+├── php/
+│   ├── core/                    ← 核心基础设施（按加载序，数字前缀即顺序）
+│   │   ├── 00_bootstrap.php        错误报告 + PSR-4 autoloader (Gregwar/Captcha, MIT)
+│   │   ├── 01_security_rates.php    4 类漏桶速率检测器（标准/突发/令牌桶/滑动窗口）
+│   │   ├── 02_session.php           session 安全加固（HttpOnly/Secure/SameSite）
+│   │   ├── 03_security_scan.php     安全扫描：密码泄漏/钓鱼/注入/速率阈值 + 伪 cron 调度
+│   │   ├── 04_config_and_auth.php   密码加密 (libsodium) + SMTP + 邮箱验证码
+│   │   ├── 05_db_schema.php         SQLite 初始化 + 10 张 CREATE TABLE
+│   │   ├── 06_db_utils.php          dbQuery/ensureTable + MinerU 辅助函数
+│   │   ├── 07_captcha.php           Gregwar CaptchaBuilder + CSRF token 生成
+│   │   ├── 08_site_and_ocr.php      站点统计 + OCR Bridge (TCP 120.79.161.207:1200)
+│   │   ├── 09_inline_actions.php    record_visit + captcha 内联 action（完整 try/catch）
+│   │   ├── 10_json_and_sanitize.php jsonOut + sanitizeHtmlContent + 各类 validate*
+│   │   ├── 11_auth.php              isLoggedIn / requireAdmin / requireTeacher / requireStudent
+│   │   ├── 12_user_and_db.php       用户辅助 + 登录速率限制 + dbQuery 封装
+│   │   └── 13_csrf.php              $csrfBypass 白名单 + CSRF 校验
+│   └── modules/                 ← 业务 action 路由
+│       ├── 20_action_router.php     完整 if($action) { try { switch { ... } catch {} exit; }
+│       ├── 00_fallback.php          独立 fallback：未匹配 action → jsonOut(false) + exit
+│       └── 21_import_helpers.php    importExtractQuestions + pcvl* + examB* 导入流水线
+└── vendor/Gregwar/Captcha/      ← 第三方库（MIT，手动 vendor 引入，避开 composer）
 ```
 
-## 入口
+## 架构原则
 
-所有请求统一通过 [api.php](../api.php) → 薄入口，仅做：
+1. **依赖序严格**：core/ 数字前缀即加载顺序，薄入口按序 `require_once`，循环依赖不允许
+2. **每个文件独立可解析**：`php -l` 必须零错误，`try/catch`、`if`、`switch` 块不得跨文件
+3. **display_errors = 0**：生产环境入口和 bootstrap 均设为 0，错误详情不暴露给访客
+4. **$action 路由集中**：所有 `switch case` 在 `modules/20_action_router.php` 内闭合，fallback 独立
+5. **Session 在 02_session 启动**，DB 在 05_db_schema 初始化，之后所有 `global $db` 直取
+6. **CSRF 白名单** `00_bypass` 在 13_csrf.php 定义，captcha/login 等 POST 走白名单不校验
+7. **Nginx 安全层**：生产 Nginx 需对 `/php/` 下所有请求返回 404（片段不可直访）
 
-```php
-error_reporting(E_ALL);
-// 按依赖顺序 require 所有 core + modules
-require_once __DIR__ . '/php/core/00_bootstrap_header.php';
-require_once __DIR__ . '/php/core/01_security_rates.php';
-// ... 16 个模块 ...
-require_once __DIR__ . '/php/modules/20_switch_cases.php';
+## 验证清单（提交前必须跑）
+
+```bash
+# 1. 全量 PHP 语法检查
+for f in public/api.php public/php/core/*.php public/php/modules/*.php; do php -l "$f" || exit 1; done
+
+# 2. 确认无 display_errors=1
+grep -rn "display_errors.*1" public/ || echo "OK: no display_errors=1"
+
+# 3. 确认所有文件都以 <?php 开头
+for f in public/api.php public/php/core/*.php public/php/modules/*.php; do head -1 "$f" | grep -q '<?php' || { echo "MISSING <?php: $f"; exit 1; }; done
 ```
 
-## 调用约定
+## 数据库约定
 
-- 所有模块文件**不能**包含 `<?php` / `?>` 开闭合标签（薄入口已提供）
-- `global $db` 在 core/04_db_schema.php 创建，后续所有模块通过 `global $db` 引用
-- `$_SESSION` 在 core/02_session.php 初始化，后续直接使用
-- 模块按数字前缀 `00-12 / 20-21` 排序即加载顺序，新增模块请追加到合适位置
+- 位置：`__DIR__ . '/../exam.db'`（SQLite3，相对薄入口 api.php）
+- 打开时机：`05_db_schema.php` 首次 `new SQLite3()` 并执行 CREATE TABLE IF NOT EXISTS
+- 全局变量：`global $db` 在所有函数内直取，无依赖注入
+- 事务：写操作用 `BEGIN IMMEDIATE`，rollback 包 `try/catch` 嵌套防异常吞掉
 
-## 原始单体备份
+## 安全层
 
-拆分前的 6616 行单体备份：[api.php.bak_split](../api.php.bak_split)（纯归档，不参与生产路径）
+| 层 | 位置 | 作用 |
+|---|---|---|
+| 速率检测 | 01_security_rates + 12_user_and_db | 登录/验证码/OCR 导入/站点访问各独立桶 |
+| 安全扫描 | 03_security_scan | 每次请求触发伪 cron（60s 间隔） |
+| CSRF | 07_captcha + 13_csrf | token 注入所有 JSON 响应，白名单豁免 |
+| Session 加固 | 02_session | 全 HTTPS + HttpOnly + SameSite=Lax |
+| 密码加密 | 04_config_and_auth | libsodium crypto_secretbox，密钥外置 |
+| 输入过滤 | 10_json_and_sanitize | sanitizeHtmlContent 白标签 + on* 属性剥离 |
+| Nginx 封禁 | 生产 nginx.conf | `location ^~ /php/ { return 404; }` |

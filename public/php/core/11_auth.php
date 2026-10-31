@@ -1,3 +1,4 @@
+<?php
 
 function profileGender(string $value): string {
     $value = trim($value);

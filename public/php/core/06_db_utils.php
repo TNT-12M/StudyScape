@@ -1,3 +1,4 @@
+<?php
 function tableHasColumn(SQLite3 $db, string $table, string $column): bool {
     $result = $db->query("PRAGMA table_info(" . preg_replace('/[^A-Za-z0-9_]/', '', $table) . ")");
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {

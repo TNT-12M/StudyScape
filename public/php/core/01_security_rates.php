@@ -1,3 +1,4 @@
+<?php
 
 // ====== 漏桶算法：安全场景检测引擎（类定义放最前面，确保可用） ======
 
@@ -161,14 +162,3 @@ if (!in_array($requestMethod, $allowedMethods, true)) {
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
-
-// ===== P0-A3: Session 安全加固 =====
-$secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
-session_set_cookie_params([
-    'lifetime' => 0,
-    'path'     => '/',
-    'httponly' => true,
-    'samesite' => 'Lax',
-    'secure'   => $secure,
-]);
-session_start();

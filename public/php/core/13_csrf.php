@@ -1,3 +1,4 @@
+<?php
 
 // ==================== CSRF验证（P0-A1：白名单收窄） ====================
 // 登录前拿不到 token 的接口（login/register/captcha/check_session）+ 读接口（题库浏览/考试列表/刷题列表/资料列表）+ 首装专用 create_admin（内部再加首装保护）
@@ -51,7 +52,3 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 }
-
-// ===================== API处理 =====================
-if ($action) {
-    try {

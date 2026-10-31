@@ -1,3 +1,4 @@
+<?php
 
 function chinaTodayUtcBounds(): array {
     $china = new DateTimeZone('Asia/Shanghai');

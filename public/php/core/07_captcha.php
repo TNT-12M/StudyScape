@@ -1,3 +1,4 @@
+<?php
 
 // CSRF token
 if (!isset($_SESSION['csrf_token'])) {
