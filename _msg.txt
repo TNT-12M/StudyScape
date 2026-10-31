@@ -1,26 +1,5 @@
-﻿fix(api): 修复多文件拆分的 3 类运行时缺陷（require 顺序 + 路径层级 + 缺失函数）
+﻿feat(api): 下载场景 404/403 改用好看的错误页，不再裸 die 纯文本
 
-上一拆分提交 8842bbb 造成 120.79.161.207 服务器本地运行时 fatal：
-队友部署后逐一修复并验证通过，本次同步到上游仓库。
-
-=== 根因 ===
-单文件 PHP 是 parse-first-execute-later，允许函数前向引用。
-require_once 多文件是逐个 parse+execute：顶层代码必须在依赖的函数定义之后。
-
-=== 三类修复 ===
-
-1. require 顺序重构（api.php 薄入口 3 处致命依赖）
-   - 12_user_and_db (dbQuery/dbFetchAll/dbFetchOne) 移到 06_db_utils 之前（06 顶层迁移调用）
-   - 10_json_and_sanitize (jsonOut) 移到 09_inline_actions 之前（09 顶层 if(captcha) 调用）
-   - 21_import_helpers (importExtractQuestions/pcvl*) 移到 20_action_router 之前（switch 顶层调用）
-
-2. 相对路径全部修正（26 处）
-   core/ 模块 __DIR__ 从 public/ 变 public/php/core/ → 项目根需 3 层 ../
-   modules/ 模块 __DIR__ 从 public/ 变 public/php/modules/ → 项目根需 3 层 ../
-   vendor 仍在 public/vendor/：00_bootstrap 改 ../../vendor/
-
-3. 补上 pcvl_detectLevel() — 旧单体就遗漏
-   PaperCutter-VL 缺学段时致命错误；现已在 21_import_helpers.php 补上
-
-=== 验证 ===
-php -l 19 文件全部通过；无残留浅路径
+新增 public/error.php（深色主题静态错误页，风格对齐前端 404.vue），
+material_download 的 4 处 die 全部改为 include error.php。
+数据库初始化 die(json_encode) 保持不变（服务级错误，API 客户端能处理）。

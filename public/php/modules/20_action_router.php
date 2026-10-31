@@ -3126,17 +3126,29 @@ if ($action) {
                 $token = (string)($_GET['token'] ?? $_POST['token'] ?? '');
                 if ($token === '' || !isset($_SESSION['download_tokens']) || !isset($_SESSION['download_tokens'][$token])) {
                     http_response_code(403);
-                    die("下载链接无效或已过期，请返回资料中心重新获取");
+                    $http_status = 403;
+                    $title = '下载链接已失效';
+                    $message = '您的下载链接无效或已过期，请返回资料中心重新获取。';
+                    include __DIR__ . '/../../error.php';
+                    exit;
                 }
                 $info = $_SESSION['download_tokens'][$token];
                 if (!is_array($info) || ($info['expires'] ?? 0) < time()) {
                     unset($_SESSION['download_tokens'][$token]);
                     http_response_code(410);
-                    die("下载链接已过期，请返回资料中心重新获取");
+                    $http_status = 410;
+                    $title = '下载链接已过期';
+                    $message = '您的下载链接已过期，请返回资料中心重新获取。';
+                    include __DIR__ . '/../../error.php';
+                    exit;
                 }
                 if (!isLoggedIn() || getUid() !== (int)($info['uid'] ?? 0)) {
                     http_response_code(403);
-                    die("下载链接与当前登录用户不匹配");
+                    $http_status = 403;
+                    $title = '下载链接不属于您';
+                    $message = '当前登录用户与下载链接不匹配，请重新登录后在资料中心获取。';
+                    include __DIR__ . '/../../error.php';
+                    exit;
                 }
                 // ★ token 不一次性消费 — 留 5 分钟宽限让 iOS Safari 重试/预检
                 // unset($_SESSION['download_tokens'][$token]);  // 之前注释掉, 改为过期自动清理
@@ -3147,7 +3159,11 @@ if ($action) {
                 $realAbs = realpath($abs);
                 if ($realAbs === false || strpos($realAbs, $baseDir) !== 0 || !is_file($realAbs)) {
                     http_response_code(404);
-                    die("文件不存在");
+                    $http_status = 404;
+                    $title = '文件不存在';
+                    $message = '该资料文件已被删除或路径异常。';
+                    include __DIR__ . '/../../error.php';
+                    exit;
                 }
                 $mid = (int)($info['material_id'] ?? 0);
                 if ($mid > 0) {
