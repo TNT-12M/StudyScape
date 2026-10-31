@@ -89,3 +89,6 @@ ocr_bridge/_tmp_jobs/
 data/ocr_batches/
 
 .ssh_temp/
+
+# ===== 单体拆分备份（开发期归档，不入库）=====
+public/api.php.bak_split
