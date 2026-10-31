@@ -532,11 +532,90 @@ SECTION_START_PATTERNS = [
 ]
 SECTION_RE = re.compile('|'.join(SECTION_START_PATTERNS))
 
-# 答案/参考答案行
+# 答案/解析行 —— 开头匹配（独立 answer block）
 ANSWER_PATTERN = re.compile(
-    r'(参考答案|答案|解析|解答|分析|【答案】|【解析】|（\d+）答案)'
+    r'^\s*(参考答案|答案|解析|解答|分析|【答案】|【解析】|（\d+）答案)'
     r'[:：]?\s*(.+)$'
 )
+
+# ★ 关键: 同一 block 内"题干 + 答案/解析"粘在一起的后处理分割标记
+# MinerU 把题干和解析切在同一个 text block 里时:
+#   "...过程中 CuCl 被氧化(2分)【解析】(1)由反应物..."
+#   "...正确答案是 B。解析：根据公式..."
+SPLIT_MARKERS = [
+    r'【解析】',
+    r'【答案】',
+    r'【解答】',
+]
+# 注: 句末 "解析：/答案：" 的后处理用内联正则，不预编译（Python 不允许 variable-width lookbehind 预编译）
+
+
+def _split_stem_resolve_answer(content: str) -> tuple[str, str, str]:
+    """
+    从一段可能粘在一起的文本里，把 题干 / 答案 / 解析 分开。
+
+    返回 (stem, answer, resolve)：
+      stem    — 题干部分（去掉末尾的答案/解析）
+      answer  — 从文本中提取到的答案（如果有）
+      resolve — 从文本中提取到的解析（如果有）
+
+    规则:
+      - 找第一个分割标记 (【解析】/【答案】/解析：/答案：) 的位置
+      - 标记之前 → stem
+      - 标记之后 → 再判断是答案还是解析
+      - 如果有 【答案】...【解析】... 两段 → 分别提取
+    """
+    if not content or len(content) < 10:
+        return content, "", ""
+
+    stem = content
+    answer = ""
+    resolve = ""
+
+    # 先找 【答案】 和 【解析】 —— 这两个是独立的
+    answer_match = re.search(r'【答案】\s*(.+?)(?=【|$)', content, re.DOTALL)
+    resolve_match = re.search(r'【解析】\s*(.+?)(?=【|$)', content, re.DOTALL)
+
+    if answer_match:
+        answer = answer_match.group(1).strip()
+    if resolve_match:
+        resolve = resolve_match.group(1).strip()
+
+    # 找第一个分割点（用于截断 stem）
+    first_split = None
+    for pat in [r'【答案】', r'【解析】', r'【解答】']:
+        m = re.search(pat, content)
+        if m and (first_split is None or m.start() < first_split):
+            first_split = m.start()
+
+    # 如果没有显式【答案】【解析】标记，尝试句末分割
+    if first_split is None:
+        # 不用 lookbehind (Python 不允许 variable-width)，
+        # 改为正向匹配 "解析："/"答案："/"解答：" 并检查前面是否是句末
+        for kw in ["解析", "答案", "解答"]:
+            pat = re.compile(rf'{kw}[:：]')
+            for m in pat.finditer(content):
+                # 检查 m.start()-1 位置是否是句末标点或空白（最多 3 字符回看）
+                before = content[max(0, m.start()-3):m.start()]
+                if re.search(r'[。！？）)]\s*$', before) or re.search(r'^[\s]*[。！？）)]', before):
+                    first_split = m.start()
+                    resolve = content[m.end():].strip()
+                    break
+            if first_split is not None:
+                break
+
+    if first_split is not None:
+        stem = content[:first_split].rstrip()
+        # 如果已经有 resolve/answer 就不覆盖（上面【解析】/【答案】的更精确）
+        if not resolve and not answer:
+            rest = content[first_split:].strip()
+            # 判断 rest 是答案还是解析
+            if re.match(r'答案[:：]?', rest) or rest.startswith('【答案】'):
+                answer = re.sub(r'^【?答案】?[:：]?\s*', '', rest).strip()
+            else:
+                resolve = re.sub(r'^【?(解析|解答|分析)】?[:：]?\s*', '', rest).strip()
+
+    return stem, answer, resolve
 
 # ============================================================
 # 关键: 从内联题干文本里抠出选项 A. B. C. D.
@@ -980,14 +1059,23 @@ def build_contract_b_questions(questions: list[dict], images_dir: str | None = N
         question_content = "\n".join(content_parts).strip()
         # 合并后去掉页码残留
         question_content = re.sub(r'第\s*\d+\s*页.*共\s*\d+\s*页', '', question_content)
-        
-        # ★★★ 关键步骤: 从合并后的题干里抠内联选项 ★★★
+
+        # ★★★ 关键修复 1: 从合并后的题干里抠内联选项 ★★★
         stem_clean, inline_opts = extract_inline_options(question_content)
         if inline_opts:
             question_content = stem_clean
             options = list(inline_opts)
         else:
             options = []
+
+        # ★★★ 关键修复 2: 从题干里剥离粘在一起的 【答案】/【解析】 ★★★
+        stem_only, ans_from_stem, resolve_from_stem = _split_stem_resolve_answer(question_content)
+        if ans_from_stem and not answer_text:
+            answer_text = ans_from_stem
+        if resolve_from_stem and not resolve_text:
+            resolve_text = resolve_from_stem
+        # 无论有没有提取出 answer/resolve，题干都只保留 stem 部分
+        question_content = stem_only
         
         # ★ 合并独立 option blocks（MinerU 把选项切成独立 block 时）
         option_blocks = [b for b in q["blocks"] if b.get("_class") == "option"]
