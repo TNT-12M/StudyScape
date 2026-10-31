@@ -1,5 +1,0 @@
-﻿feat(api): 下载场景 404/403 改用好看的错误页，不再裸 die 纯文本
-
-新增 public/error.php（深色主题静态错误页，风格对齐前端 404.vue），
-material_download 的 4 处 die 全部改为 include error.php。
-数据库初始化 die(json_encode) 保持不变（服务级错误，API 客户端能处理）。

@@ -222,6 +222,146 @@ def mineru_parse_pdf(pdf_path: str, poll_interval: int = POLL_INTERVAL) -> dict:
 
 
 # ============================================================
+# 模块 1.5: 学科 + 学段自动识别
+# ============================================================
+
+# 学科映射（按出现频率/区分度排序 —— "政治" 在 "道德与法治" 之后匹配）
+SUBJECT_PATTERNS = [
+    ("道德与法治", "道德与法治"),
+    ("思想政治", "政治"),
+    ("信息技术", "信息技术"),
+    ("通用技术", "通用技术"),
+    ("语文", "语文"),
+    ("数学", "数学"),
+    ("英语", "英语"),
+    ("物理", "物理"),
+    ("化学", "化学"),
+    ("生物", "生物"),
+    ("政治", "政治"),
+    ("历史", "历史"),
+    ("地理", "地理"),
+    ("音乐", "音乐"),
+    ("美术", "美术"),
+    ("体育", "体育"),
+    ("科学", "科学"),
+    ("综合实践", "综合实践"),
+]
+
+# 学段判定 —— 高中优先 (高考/等级性考试)，再初中
+LEVEL_PATTERNS_SENIOR = [
+    r'高考',
+    r'普通高等学校招生',
+    r'等级性考试',
+    r'学业水平等级',
+    r'高[一二三]',
+    r'高中',
+    r'senior',
+]
+LEVEL_PATTERNS_JUNIOR = [
+    r'初中学业水平考试',
+    r'中考',
+    r'初[一二三]',
+    r'初中',
+    r'学业水平考试(?!\s*等级)',  # 不匹配后面跟了"等级"的
+    r'junior',
+]
+
+
+def detect_subject_and_level(blocks: list[dict], paper_name: str = "") -> tuple[str, str]:
+    """
+    从 MinerU PageJSON blocks 里自动识别科目和学段。
+
+    可在 classify_block 之前或之后调用:
+      - 之前: blocks 有 type (doc_title/paragraph_title)，没有 _class
+      - 之后: blocks 同时有 type 和 _class (page_header/section_header)
+    两种情况都处理。
+    """
+    # --- Step 1: 收集候选文本 ---
+    candidates = []
+
+    for b in blocks:
+        btype = b.get("type", "")
+        cls = b.get("_class", "")
+        content = b.get("content", "")
+
+        if not content or len(content) < 3:
+            continue
+
+        # page_header 最优先（试卷总标题）— 两种来源都覆盖
+        is_header = (
+            btype == "doc_title"
+            or cls == "page_header"
+            or (btype == "paragraph_title" and not cls)  # 还没 classify 但明显是标题
+        )
+        if is_header:
+            candidates.append(("header", content))
+            continue
+
+        # section_header 次优先
+        if cls == "section_header" and len(content) < 100:
+            candidates.append(("section", content))
+        elif btype == "paragraph_title" and not cls and len(content) < 100:
+            # pre-classify 的 paragraph_title 可能是 section header
+            candidates.append(("section", content))
+
+    # 额外: 前 30 个 block content 都扫一遍（题干里可能有学科名）
+    for b in blocks[:30]:
+        content = b.get("content", "")
+        if content and len(content) > 5 and len(content) < 500:
+            candidates.append(("body", content))
+
+    # 文件名也加入（很多文件名直接带学科）
+    if paper_name:
+        candidates.append(("filename", paper_name))
+
+    blob = "\n".join(c for _, c in candidates)
+
+    # --- Step 2: 学科 ---
+    subject_scores = {}
+    for keyword, canonical in SUBJECT_PATTERNS:
+        # 允许跨块重复命中 (同一学科在标题和题干各出现一次 → 分数更高)
+        count = blob.count(keyword)
+        if count > 0:
+            # header 命中权重 x3, section x2, 其他 x1
+            score = 0
+            for src, content in candidates:
+                if keyword in content:
+                    weight = {"header": 3, "section": 2, "filename": 2}.get(src, 1)
+                    score += weight
+            subject_scores[canonical] = subject_scores.get(canonical, 0) + score
+
+    subject = ""
+    if subject_scores:
+        # 取分数最高的
+        subject = max(subject_scores, key=subject_scores.get)
+        # 如果最高分 <= 2 且有多个学科同分，判定不可靠 → 留空
+        top_score = subject_scores[subject]
+        top_count = sum(1 for s in subject_scores.values() if s == top_score)
+        if top_score <= 2 and top_count > 1:
+            subject = ""
+
+    # --- Step 3: 学段 ---
+    level = ""
+    # 高中优先匹配
+    for pat in LEVEL_PATTERNS_SENIOR:
+        if re.search(pat, blob, re.IGNORECASE):
+            level = "senior"
+            break
+    if not level:
+        for pat in LEVEL_PATTERNS_JUNIOR:
+            if re.search(pat, blob, re.IGNORECASE):
+                level = "junior"
+                break
+
+    # --- Step 4: 打印日志 ---
+    print(f"[Detect] 学科: {subject or '(未识别)'}  学段: {level or '(未识别)'}")
+    if subject_scores:
+        print(f"[Detect] 学科分数: {dict(sorted(subject_scores.items(), key=lambda x: -x[1]))}")
+
+    return subject, level
+
+
+# ============================================================
 # 模块 2: Blocks → 扁平化跨页列表
 # ============================================================
 
@@ -1101,6 +1241,17 @@ def main():
     
     # --- Step 2: Flatten ---
     blocks = flatten_blocks(page_json)
+    
+    # --- Step 2.5: ★ 自动识别学科 + 学段 (在规则引擎切题之前) ---
+    auto_subject, auto_level = detect_subject_and_level(blocks, paper_name=paper_name)
+    # 用户显式传了非 "综合" 的 subject → 尊重用户；否则用自动识别结果
+    if args.subject == "综合" and auto_subject:
+        args.subject = auto_subject
+    # 用户显式传了 education_level → 尊重用户；否则用自动识别结果
+    if not args.education_level and auto_level:
+        args.education_level = auto_level
+    
+    print(f"\n📋 最终参数: 科目={args.subject or '(未识别)'}  学段={args.education_level or '(未识别)'}")
     
     # --- Step 3: Group questions ---
     questions_raw = group_questions(blocks)
