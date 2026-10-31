@@ -2346,10 +2346,12 @@ if ($action === 'captcha') {
         $builder = createCaptcha();
         // 用较强的抗 OCR 配置: buildAgainstOCR 自带扭曲 + 干扰线 + 噪点
         $builder->buildAgainstOCR(150, 50);
-        // 降低颜色对比度, 让 OCR 更难识别; 背景 200/200/200, 文字偏深灰
+        // 降低颜色对比度, 让 OCR 更难识别; 背景 220, 文字偏深灰
         $builder->setBackgroundColor(220, 220, 220);
         $builder->setTextColor(50, 50, 50);
         $builder->setLineColor(160, 160, 160);
+        // ★ Gregwar output() 不发 Content-Type, 必须显式发; 默认 jpeg (见 CaptchaBuilder::$imageType)
+        header('Content-Type: image/' . $builder->getImageType());
         $builder->output();
     } catch (\Throwable $e) {
         // Gregwar 依赖 GD 扩展 + TTF 字体, 失败时回退到旧版简单验证码
