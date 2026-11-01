@@ -247,6 +247,121 @@ function examB_getAttemptRow($db, int $aid): ?array {
  * 返回本次作答允许出现的题目及其最高自评分值。
  * 这张白名单同时用于提交答案和自评，避免客户端伪造题号或分数。
  */
+/**
+ * 自动判题：对比 student_answer vs correct_answer
+ *
+ * 返回 [auto_correct, auto_score, 'graded'|'skipped'|'invalid']：
+ *   auto_correct: 1=对, 0=错, null=无法判
+ *   auto_score:   该题自动判分 (points 或 0)
+ *   status:       graded=已判, skipped=主观题跳过, invalid=缺答案/缺作答
+ *
+ * 可自动判的题型:
+ *   single (单选) — student_answer='A' vs correct_answer='A'
+ *   multiple (多选) — 排序后 JSON 数组对比
+ *   judge (判断) — 'T'/'F' vs correct_answer
+ *   fill (填空) — 字符串规范化后对比
+ *
+ * 不可自动判: short (简答), fill 无标准答案时
+ */
+function examB_autoGrade(string $qtype, string $studentAnswer, ?string $correctAnswer, float $points): array {
+    // 1. 没学生答案 → 未作答，自动判 0 分
+    if ($studentAnswer === '' || $studentAnswer === null || $studentAnswer === '[]') {
+        return [0, 0.0, 'graded'];
+    }
+    // 2. 题库没有 correct_answer → 无法自动判
+    if ($correctAnswer === null || $correctAnswer === '') {
+        return [null, null, 'skipped'];
+    }
+
+    // 3. 按题型判
+    switch ($qtype) {
+        case 'single':
+        case 'judge':
+            // 单选 A/B/C/D 或 T/F — 大小写不敏感 + trim
+            $sa = strtoupper(trim($studentAnswer));
+            $ca = strtoupper(trim($correctAnswer));
+            // correct_answer 可能是 'A' 或带括号 '(A)'
+            $ca = preg_replace('/[^A-ZTF]/', '', $ca);
+            $ok = ($sa === $ca && $sa !== '');
+            return [$ok ? 1 : 0, $ok ? $points : 0.0, 'graded'];
+
+        case 'multiple':
+        case 'multi':
+            // 多选 — JSON 数组字符串，对比排序后的字母集合
+            $saArr = json_decode($studentAnswer, true);
+            $caArr = json_decode($correctAnswer, true);
+            if (!is_array($saArr) || !is_array($caArr)) {
+                // 不是 JSON 数组，退化到字符串对比
+                $saArr = array_filter(array_map('trim', explode(',', strtoupper($studentAnswer))));
+                $caArr = array_filter(array_map('trim', explode(',', strtoupper($correctAnswer))));
+            }
+            sort($saArr);
+            sort($caArr);
+            $ok = ($saArr === $caArr && count($saArr) > 0);
+            return [$ok ? 1 : 0, $ok ? $points : 0.0, 'graded'];
+
+        case 'fill':
+        case 'multi_fill':
+            // 填空 — 规范化后字符串对比（trim + 统一空白 + 大小写）
+            $normalize = function ($s) {
+                $s = mb_strtolower(trim((string)$s));
+                $s = preg_replace('/\s+/', '', $s); // 删所有空白
+                return $s;
+            };
+            $sa = $normalize($studentAnswer);
+            $ca = $normalize($correctAnswer);
+            // 多选题可能也是 JSON 数组
+            $saArr = json_decode($studentAnswer, true);
+            $caArr = json_decode($correctAnswer, true);
+            if (is_array($saArr) && is_array($caArr)) {
+                $saArr = array_map($normalize, $saArr);
+                $caArr = array_map($normalize, $caArr);
+                sort($saArr); sort($caArr);
+                $ok = ($saArr === $caArr && count($saArr) > 0);
+            } else {
+                $ok = ($sa !== '' && $sa === $ca);
+            }
+            return [$ok ? 1 : 0, $ok ? $points : 0.0, 'graded'];
+
+        case 'short':
+        default:
+            // 简答题 — 不自动判（除非答案非常简单）
+            return [null, null, 'skipped'];
+    }
+}
+
+/**
+ * 对某次 attempt 所有答案跑自动判题，写入 auto_correct/auto_score
+ * 返回自动判的统计信息。
+ */
+function examB_runAutoGrade($db, int $aid): array {
+    $ansRows = dbFetchAll($db, "SELECT ea.id, ea.question_id, ea.student_answer, q.question_type, q.correct_answer, COALESCE(q.points, 1.0) AS points FROM exam_answers ea JOIN questions q ON q.id=ea.question_id WHERE ea.attempt_id=?", [$aid]);
+    $nowDT = gmdate('Y-m-d H:i:s');
+    $totalGraded = 0;
+    $totalCorrect = 0;
+    $totalScore = 0.0;
+    foreach ($ansRows as $row) {
+        $qid = (int)$row['question_id'];
+        $sa = (string)($row['student_answer'] ?? '');
+        $qtype = $row['question_type'];
+        $ca = $row['correct_answer'];
+        $points = (float)$row['points'];
+        [$autoCorrect, $autoScore, $status] = examB_autoGrade($qtype, $sa, $ca, $points);
+        dbQuery($db, "UPDATE exam_answers SET auto_correct=?, auto_score=?, judged_at=? WHERE id=?",
+            [$autoCorrect !== null ? (int)$autoCorrect : null,
+             $autoScore !== null ? (float)$autoScore : null,
+             $nowDT, (int)$row['id']]);
+        if ($autoCorrect !== null) {
+            $totalGraded++;
+            if ($autoCorrect === 1) {
+                $totalCorrect++;
+                $totalScore += $autoScore;
+            }
+        }
+    }
+    return ['graded' => $totalGraded, 'correct' => $totalCorrect, 'score' => $totalScore];
+}
+
 function examB_attemptQuestionPoints($db, array $attempt): array {
     if (!empty($attempt['paper_id'])) {
         $rows = dbFetchAll($db, "SELECT question_id, points FROM paper_questions WHERE paper_id=?", [(int)$attempt['paper_id']]);
@@ -297,20 +412,25 @@ function examB_buildResult($db, int $aid, int $uid, bool $isExam): array {
         }
     }
 
-    // 读取作答 + 自评
-    $ansRows = dbFetchAll($db, "SELECT question_id, student_answer, self_correct, self_score, judged_at FROM exam_answers WHERE attempt_id=?", [$aid]);
+    // 读取作答 + 自评 + 自动判
+    $ansRows = dbFetchAll($db, "SELECT question_id, student_answer, self_correct, self_score, auto_correct, auto_score, judged_at FROM exam_answers WHERE attempt_id=?", [$aid]);
     $ansMap = [];
     foreach ($ansRows as $a) {
         $qid = (int)$a['question_id'];
-        $a['self_correct'] = $a['self_correct'] !== null ? (int)$a['self_correct'] : null;
-        $a['self_score']   = $a['self_score']   !== null ? (float)$a['self_score'] : null;
+        $a['self_correct']   = $a['self_correct']   !== null ? (int)$a['self_correct']   : null;
+        $a['self_score']     = $a['self_score']     !== null ? (float)$a['self_score']   : null;
+        $a['auto_correct']   = $a['auto_correct']   !== null ? (int)$a['auto_correct']   : null;
+        $a['auto_score']     = $a['auto_score']     !== null ? (float)$a['auto_score']   : null;
         $ansMap[$qid] = $a;
     }
 
     $maxPossible = 0.0;
     $answeredCount = 0;
-    $graded = 0; // 已自评题数（self_correct 非空）
-    $correctCount = 0;
+    $graded = 0;   // 已自评题数（self_correct 非空）
+    $correctCount = 0;  // 自评正确数
+    $autoGraded = 0;    // 已自动判题数
+    $autoCorrect = 0;   // 自动判正确数
+    $autoScoreTotal = 0.0; // 自动判总分
     foreach ($questionsOrdered as &$q) {
         $qid = (int)$q['id'];
         $a = $ansMap[$qid] ?? null;
@@ -323,6 +443,8 @@ function examB_buildResult($db, int $aid, int $uid, bool $isExam): array {
         $q['student_answer'] = $sa;
         $q['self_correct']   = $a['self_correct'] ?? null;
         $q['self_score']     = $a['self_score'] ?? null;
+        $q['auto_correct']   = $a['auto_correct'] ?? null;
+        $q['auto_score']     = $a['auto_score'] ?? null;
         $q['judged_at']      = $a['judged_at'] ?? null;
         $q['max_points']     = (float)($q['paper_points'] ?? $q['points'] ?? 1.0);
         $maxPossible += $q['max_points'];
@@ -330,6 +452,13 @@ function examB_buildResult($db, int $aid, int $uid, bool $isExam): array {
         if ($q['self_correct'] !== null) {
             $graded++;
             if ($q['self_correct'] === 1) $correctCount++;
+        }
+        if ($q['auto_correct'] !== null) {
+            $autoGraded++;
+            if ($q['auto_correct'] === 1) {
+                $autoCorrect++;
+                $autoScoreTotal += $q['auto_score'] ?? 0.0;
+            }
         }
     }
 
@@ -344,6 +473,10 @@ function examB_buildResult($db, int $aid, int $uid, bool $isExam): array {
             'correct_count'     => $correctCount,
             'max_possible'      => $maxPossible,
             'self_score_total'  => $attempt['self_score_total'],
+            // ★ 自动判统计
+            'auto_graded_count' => $autoGraded,
+            'auto_correct_count'=> $autoCorrect,
+            'auto_score_total'  => round($autoScoreTotal, 1),
         ],
     ];
 }

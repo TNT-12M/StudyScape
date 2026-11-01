@@ -2426,11 +2426,15 @@ if ($action) {
                     @$db->exec('ROLLBACK');
                     jsonOut(false, "提交失败：" . $e->getMessage());
                 }
+
+                // ★ 自动判题（事务外跑，不影响提交结果）
+                try {
+                    examB_runAutoGrade($db, $aid);
+                } catch (Exception $e) { /* 自动判失败不阻断 */ }
+
                 $msg = $overdue ? "已超时，系统强制提交（以提交时间为准）" : "提交成功";
                 jsonOut(true, $msg, ['attempt_id' => $aid, 'overdue' => $overdue]);
                 break;
-
-            // ---------- 提交后：结果页（含正确答案 + 已有自评） ----------
             case 'attempt_result':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
                 $uid = getUid();
@@ -2439,6 +2443,13 @@ if ($action) {
                 $att = dbFetchOne($db, "SELECT * FROM exam_attempts WHERE id=? AND user_id=?", [$aid, $uid]);
                 if (!$att) jsonOut(false, "无权限或作答不存在");
                 if ($att['status'] !== 'submitted') jsonOut(false, "尚未提交，请先完成作答");
+
+                // ★ 回填：如果还没自动判，现在跑一次（兼容旧 attempt）
+                $autoCount = (int)dbFetchOne($db, "SELECT COUNT(*) FROM exam_answers WHERE attempt_id=? AND auto_correct IS NOT NULL", [$aid])['COUNT(*)'];
+                if ($autoCount === 0) {
+                    try { examB_runAutoGrade($db, $aid); } catch (Exception $e) {}
+                }
+
                 jsonOut(true, "", examB_buildResult($db, $aid, $uid, true));
                 break;
 
@@ -2659,6 +2670,12 @@ if ($action) {
                     @$db->exec('ROLLBACK');
                     jsonOut(false, "提交失败：" . $e->getMessage());
                 }
+
+                // ★ 自动判题
+                try {
+                    examB_runAutoGrade($db, $aid);
+                } catch (Exception $e) {}
+
                 $msg = $overdue ? "已超时，系统强制提交" : "提交成功";
                 jsonOut(true, $msg, ['attempt_id' => $aid, 'overdue' => $overdue]);
                 break;

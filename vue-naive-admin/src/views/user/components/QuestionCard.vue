@@ -48,6 +48,21 @@
       <n-input v-else type="textarea" :value="typeof answer === 'string' ? answer : ''" :rows="4" placeholder="请输入答案" @update:value="update" />
     </div>
     <template v-else>
+      <!-- 自动判题徽章（如果有 auto_correct） -->
+      <n-alert
+        v-if="question.auto_correct !== null && question.auto_correct !== undefined"
+        :type="question.auto_correct === 1 ? 'success' : 'error'"
+        :show-icon="true"
+        class="auto-grade-badge"
+      >
+        <template #header>
+          <n-space align="center" size="small">
+            <span>{{ question.auto_correct === 1 ? '✅ 自动判正确' : '❌ 自动判错误' }}</span>
+            <span class="muted" v-if="question.auto_score !== null">（得 {{ question.auto_score }} / {{ maxPoints }} 分）</span>
+          </n-space>
+        </template>
+      </n-alert>
+
       <n-alert v-if="!answerIsFilled(question, { [question.id]: question.student_answer })" type="warning" :show-icon="false" class="review-row">
         未作答
       </n-alert>
@@ -161,6 +176,9 @@ function updateBlank(index, value) {
   margin-top: 14px;
   padding-top: 14px;
   border-top: 1px solid var(--n-divider-color);
+}
+.auto-grade-badge {
+  margin-bottom: 12px;
 }
 .muted {
   color: var(--n-text-color-3);

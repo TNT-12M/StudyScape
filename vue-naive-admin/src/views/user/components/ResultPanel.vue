@@ -11,9 +11,12 @@
           <n-button type="primary" :loading="saving" @click="saveGrades">保存自评</n-button>
         </n-space>
       </div>
-      <n-grid :cols="5" :x-gap="12" :y-gap="12" responsive="screen" item-responsive class="summary-grid">
-        <n-gi v-for="item in summaryItems" :key="item.label" span="5 s:1">
-          <div class="summary-item"><div class="muted">{{ item.label }}</div><strong>{{ item.value }}</strong></div>
+      <n-grid :cols="7" :x-gap="12" :y-gap="12" responsive="screen" item-responsive class="summary-grid">
+        <n-gi v-for="item in summaryItems" :key="item.label" span="7 l:1">
+          <div class="summary-item">
+            <div class="muted">{{ item.label }}<span v-if="item.hint" class="summary-hint">（{{ item.hint }}）</span></div>
+            <strong>{{ item.value }}</strong>
+          </div>
         </n-gi>
       </n-grid>
     </n-card>
@@ -47,6 +50,10 @@ const grades = ref({})
 const summaryItems = computed(() => [
   { label: '总题数', value: props.summary.total_count || 0 },
   { label: '已作答', value: props.summary.answered_count || 0 },
+  // ★ 自动判题统计（优先展示，客观题直接出结果）
+  { label: '自动判对', value: props.summary.auto_correct_count ?? '—', hint: `已自动判 ${props.summary.auto_graded_count || 0} 题` },
+  { label: '自动总分', value: props.summary.auto_score_total ?? '—' },
+  // 自评统计（人工补充/修正主观题）
   { label: '已自评', value: props.summary.graded_count || 0 },
   { label: '自评正确', value: props.summary.correct_count || 0 },
   { label: '自评总分', value: props.summary.self_score_total ?? '—' },
@@ -70,4 +77,5 @@ function saveGrades() {
 .summary-grid { margin-top: 20px; }
 .summary-item { padding: 12px; background: var(--n-color-modal); border: 1px solid var(--n-border-color); border-radius: 6px; }
 .summary-item strong { display: block; margin-top: 6px; font-size: 22px; color: var(--n-primary-color); }
+.summary-hint { font-size: 11px; color: var(--n-text-color-3); }
 </style>
