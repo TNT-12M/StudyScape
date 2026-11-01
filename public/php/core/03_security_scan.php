@@ -546,9 +546,9 @@ function phpSecurityScan(string $logPath, int $scanId): array {
                 $item['status_404'], $item['risk_level'], $item['last_seen'],
                 $now, $scenarioJson, $ip
             ]);
-            // 只有 high 级别才发通知，medium 只记录不打扰管理员
+            // ★ 只有 high 级别且 total_count >= 4000 才发站内通知，medium 不打扰
             $wasHigh = ($row['risk_level'] === 'high');
-            $isHighNow = ($item['risk_level'] === 'high');
+            $isHighNow = ($item['risk_level'] === 'high' && $item['total_count'] >= 4000);
             if ($isHighNow && (!$wasHigh || !$row['notified'])) {
                 dbQuery($db, "UPDATE security_ips SET notified=1 WHERE ip=?", [$ip]);
                 $newCount++;
@@ -557,27 +557,37 @@ function phpSecurityScan(string $logPath, int $scanId): array {
                     'ip' => $ip,
                     'risk_level' => $item['risk_level'],
                     'api_count' => $item['api_count'],
+                    'total_count' => $item['total_count'],
                     'scenarios' => $scenarioNames,
                 ];
             }
+            // ★ 极高危 >= 6000 → 额外发邮件
+            if ($item['total_count'] >= 6000) {
+                _sendCriticalAlertEmail($ip, $item['total_count'], $scenarioNames);
+            }
         } else {
-            $isHigh = ($item['risk_level'] === 'high');
+            // ★ 新 IP: total_count >= 4000 才进通知列表
+            $shouldNotify = ($item['risk_level'] === 'high' && $item['total_count'] >= 4000);
             dbQuery($db, "INSERT INTO security_ips(ip, api_count, scan_count, total_count, status_404, risk_level, location, last_seen, first_detected, updated_at, notified, scenarios) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", [
                 $ip, $item['api_count'], $item['scan_count'], $item['total_count'],
                 $item['status_404'], $item['risk_level'], '', $item['last_seen'], $now, $now,
-                $isHigh ? 1 : 0, // 只有 high 才标记已通知
+                $shouldNotify ? 1 : 0,
                 $scenarioJson
             ]);
-            // 只有 high 级别才发通知
-            if ($isHigh) {
+            if ($shouldNotify) {
                 $newCount++;
                 $newHighCount++;
                 $newIpsInfo[] = [
                     'ip' => $ip,
                     'risk_level' => $item['risk_level'],
                     'api_count' => $item['api_count'],
+                    'total_count' => $item['total_count'],
                     'scenarios' => $scenarioNames,
                 ];
+            }
+            // ★ 极高危 >= 6000 → 发邮件
+            if ($item['total_count'] >= 6000) {
+                _sendCriticalAlertEmail($ip, $item['total_count'], $scenarioNames);
             }
         }
     }
@@ -678,6 +688,199 @@ function _insertSecuritySummaryNotification($db, $totalNew, $highCount, $ipsInfo
         'security',
         $now
     ]);
+}
+
+// ==================== 🔴 极高危邮件告警 + 封禁 + 日志查询 ====================
+
+/**
+ * 给管理员 lian120208@qq.com 发极高危告警邮件
+ * 阈值: total_count >= 6000
+ * 用静态 $lastSent 避免同一个 IP 在同一次扫描循环里发多封邮件
+ */
+function _sendCriticalAlertEmail(string $ip, int $totalCount, array $scenarioNames): void {
+    static $lastSent = [];
+    if (isset($lastSent[$ip])) return; // 同一次扫描循环里不重复
+    $lastSent[$ip] = true;
+
+    if (!function_exists('smtpSendMail')) return; // SMTP 未配置就跳过
+
+    $to = 'lian120208@qq.com';
+    $subject = sprintf('🚨 StudyScape 极高危告警: %s 请求 %d 次', $ip, $totalCount);
+    $body  = "服务器: StudyScape (120.79.161.207)\n";
+    $body .= "时间: " . date('Y-m-d H:i:s') . " UTC\n";
+    $body .= "异常 IP: $ip\n";
+    $body .= "请求次数: $totalCount\n";
+    $body .= "触发场景: " . implode('、', $scenarioNames ?: ['未识别']) . "\n\n";
+    $body .= "建议立即登录后台安全监控页面封禁此 IP:\n";
+    $body .= "https://120.79.161.207/admin/#/admin/security\n\n";
+    $body .= "如果这是正常流量请忽略本邮件。\n";
+
+    try {
+        smtpSendMail($to, $subject, $body);
+    } catch (Exception $e) {
+        // 邮件失败静默，不中断扫描
+    }
+}
+
+/**
+ * 找 Nginx access 日志文件路径
+ * 返回第一个存在的 access log 路径，或 null
+ */
+function _findNginxAccessLog(): ?string {
+    $candidates = [
+        '/var/log/nginx/access.log',
+        '/var/log/nginx/access.log.1',
+        '/var/www/logs/access.log',
+        '/home/lian/StudyScape/logs/access.log',
+        realpath(__DIR__ . '/../../../logs/access.log'),
+    ];
+    foreach ($candidates as $p) {
+        if ($p && is_file($p) && filesize($p) > 0) return $p;
+    }
+    return null;
+}
+
+/**
+ * 找 Nginx 站点配置文件路径（用于封禁时追加 deny 规则）
+ */
+function _findNginxSiteConfig(): ?string {
+    $candidates = [
+        '/etc/nginx/sites-enabled/studyscape.conf',
+        '/etc/nginx/sites-enabled/default',
+        '/etc/nginx/conf.d/studyscape.conf',
+        '/etc/nginx/conf.d/security.conf',
+    ];
+    foreach ($candidates as $p) {
+        if ($p && is_file($p)) return $p;
+    }
+    return null;
+}
+
+/**
+ * 读取 Nginx access log 中某个 IP 的所有请求行
+ * @param string $ip 要查的 IP
+ * @param int $limit 最多返回多少行（防内存炸）
+ * @return array{total:int, lines:array}
+ */
+function securityGetIpLogs(string $ip, int $limit = 500): array {
+    $logPath = _findNginxAccessLog();
+    if (!$logPath) return ['total' => 0, 'lines' => [], 'log_file' => ''];
+
+    // 匹配 IP: Nginx combined 格式开头就是 IP
+    $escaped = preg_quote($ip, '/');
+    $pattern = '/^' . $escaped . '\s/';
+
+    $handle = @fopen($logPath, 'r');
+    if (!$handle) return ['total' => 0, 'lines' => [], 'log_file' => $logPath];
+
+    // 先 count 总数
+    $total = 0;
+    while (($line = fgets($handle)) !== false) {
+        if (preg_match($pattern, $line)) $total++;
+    }
+    rewind($handle);
+
+    // 再取最近 $limit 行
+    $matched = [];
+    while (($line = fgets($handle)) !== false) {
+        if (preg_match($pattern, $line)) {
+            $matched[] = rtrim($line);
+        }
+        if (count($matched) > $limit * 5) break; // 多读一些，后面取尾部
+    }
+    fclose($handle);
+
+    // 取最后 $limit 行（最近的日志）
+    $lines = array_slice($matched, -$limit);
+    return ['total' => $total, 'lines' => $lines, 'log_file' => $logPath];
+}
+
+/**
+ * 封禁 IP — 追加到 Nginx 配置 + reload
+ * @return array{ok:bool, message:string}
+ */
+function securityBanIp(string $ip): array {
+    // 1. 验证 IP 格式
+    if (!filter_var($ip, FILTER_VALIDATE_IP)) return ['ok' => false, 'message' => '无效 IP 格式'];
+
+    // 2. 找封禁清单文件（优先独立文件，避免污染站点配置）
+    $banFile = '/etc/nginx/conf.d/banned_ips.conf';
+    $configDir = dirname($banFile);
+    if (!is_dir($configDir)) {
+        // 备用: 放到 sites-enabled 同目录
+        $siteConf = _findNginxSiteConfig();
+        if ($siteConf) {
+            $banFile = dirname($siteConf) . '/banned_ips.conf';
+        }
+    }
+
+    // 3. 检查是否已封
+    if (is_file($banFile)) {
+        $existing = @file_get_contents($banFile);
+        if ($existing !== false && stripos($existing, $ip) !== false) {
+            return ['ok' => true, 'message' => "IP $ip 已在封禁清单中"];
+        }
+    }
+
+    // 4. 追加 deny 规则
+    $rule = "deny $ip;\n";
+    $result = @file_put_contents($banFile, $rule, FILE_APPEND | LOCK_EX);
+    if ($result === false) {
+        return ['ok' => false, 'message' => "写入 $banFile 失败（权限问题？PHP 进程需要写权限）"];
+    }
+
+    // 5. 确保主配置 include 这个文件
+    $includeNeeded = false;
+    $mainConfig = _findNginxSiteConfig();
+    if ($mainConfig) {
+        $mainContent = @file_get_contents($mainConfig);
+        if ($mainContent !== false && stripos($mainContent, 'banned_ips.conf') === false) {
+            // 在 server { 块的右花括号前 include
+            if (preg_match('/server\s*\{/', $mainContent)) {
+                // 找最后一个 } 追加 include
+                $newContent = preg_replace_callback('/\}\s*$/', function ($m) use ($banFile) {
+                    return "    include " . escapeshellarg($banFile) . ";\n}\n";
+                }, $mainContent, 1);
+                @file_put_contents($mainConfig, $newContent);
+                $includeNeeded = true;
+            }
+        }
+    }
+
+    // 6. nginx -t + reload
+    exec('nginx -t 2>&1', $testOut, $testCode);
+    if ($testCode !== 0) {
+        // 回滚
+        @file_put_contents($banFile, @file_get_contents($banFile) . "\n# AUTO-REMOVE: nginx test failed for $ip\n");
+        return ['ok' => false, 'message' => 'nginx -t 失败: ' . implode("\n", $testOut)];
+    }
+    exec('systemctl reload nginx 2>&1 || nginx -s reload 2>&1', $reloadOut, $reloadCode);
+
+    return ['ok' => true, 'message' => "IP $ip 已封禁（写 $banFile，nginx reload 成功）"];
+}
+
+/**
+ * 解除封禁
+ */
+function securityUnbanIp(string $ip): array {
+    $banFile = '/etc/nginx/conf.d/banned_ips.conf';
+    if (!is_file($banFile)) return ['ok' => true, 'message' => '封禁清单不存在'];
+
+    $content = @file_get_contents($banFile);
+    if ($content === false) return ['ok' => false, 'message' => '读取封禁清单失败'];
+
+    $lines = explode("\n", $content);
+    $filtered = [];
+    $found = false;
+    foreach ($lines as $line) {
+        if (stripos($line, $ip) !== false) { $found = true; continue; }
+        $filtered[] = $line;
+    }
+    if (!$found) return ['ok' => true, 'message' => "IP $ip 不在封禁清单中"];
+
+    @file_put_contents($banFile, implode("\n", $filtered));
+    exec('nginx -t 2>&1 && (systemctl reload nginx 2>&1 || nginx -s reload 2>&1)', $out, $code);
+    return ['ok' => ($code === 0), 'message' => $code === 0 ? "IP $ip 已解封" : 'nginx reload 失败: ' . implode("\n", $out)];
 }
 
 /**

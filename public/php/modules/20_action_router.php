@@ -1043,6 +1043,18 @@ if ($action) {
                 // 关联用户（通过 last_login_ip 匹配）
                 $ips = array_column($rows, 'ip');
                 $userMap = [];
+
+                // 检测哪些 IP 已在 Nginx 封禁列表中
+                $bannedIps = [];
+                $banConf = '/etc/nginx/conf.d/banned_ips.conf';
+                if (is_readable($banConf)) {
+                    $content = @file_get_contents($banConf);
+                    if ($content !== false) {
+                        if (preg_match_all('/deny\s+([0-9a-fA-F.:]+)\s*;/', $content, $m)) {
+                            $bannedIps = array_flip($m[1]);
+                        }
+                    }
+                }
                 if ($ips) {
                     $placeholders = implode(',', array_fill(0, count($ips), '?'));
                     $userRows = dbFetchAll($db, "SELECT id, username, nickname, email, last_login_ip FROM users WHERE last_login_ip IN ($placeholders)", $ips);
@@ -1078,6 +1090,7 @@ if ($action) {
                         'first_detected' => $r['first_detected'] ?? '',
                         'scenarios' => $scenarios,
                         'users' => $userMap[$r['ip']] ?? [],
+                        'banned' => isset($bannedIps[$r['ip']]),
                     ];
                 }
 
@@ -1087,6 +1100,34 @@ if ($action) {
                     'page' => $page,
                     'page_size' => $pageSize,
                 ]);
+                break;
+
+            // ==================== 安全: 封禁 IP ====================
+            case 'security_ip_ban':
+                requireAdmin();
+                $ip = trim((string)($_POST['ip'] ?? ''));
+                if ($ip === '') jsonOut(false, '请提供 IP');
+                $result = securityBanIp($ip);
+                jsonOut($result['ok'], $result['message']);
+                break;
+
+            // ==================== 安全: 解封 IP ====================
+            case 'security_ip_unban':
+                requireAdmin();
+                $ip = trim((string)($_POST['ip'] ?? ''));
+                if ($ip === '') jsonOut(false, '请提供 IP');
+                $result = securityUnbanIp($ip);
+                jsonOut($result['ok'], $result['message']);
+                break;
+
+            // ==================== 安全: 查看某个 IP 的请求日志 ====================
+            case 'security_ip_logs':
+                requireAdmin();
+                $ip = trim((string)($_POST['ip'] ?? ''));
+                if ($ip === '') jsonOut(false, '请提供 IP');
+                $limit = min(2000, max(10, (int)($_POST['limit'] ?? 500)));
+                $result = securityGetIpLogs($ip, $limit);
+                jsonOut(true, '', $result);
                 break;
 
             // ==================== OCR 批次审核 ====================

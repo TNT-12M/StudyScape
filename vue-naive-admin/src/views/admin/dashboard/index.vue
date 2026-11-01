@@ -135,6 +135,44 @@
           />
         </n-space>
       </n-card>
+
+      <!-- IP 请求日志抽屉 -->
+      <n-drawer
+        v-model:show="logDrawerVisible"
+        :width="720"
+        placement="right"
+        closable
+        class="log-drawer"
+      >
+        <template #header>
+          <div style="display:flex; flex-direction:column; gap:4px;">
+            <span style="font-weight:600;">IP {{ logDrawerIp }} — 请求日志</span>
+            <span style="font-size:12px; color:var(--n-text-color-3);">
+              日志文件：{{ logDrawerFile || '未检测到' }} | 共匹配 {{ logDrawerTotal.toLocaleString() }} 条，当前显示最后 {{ logLines.length }} 条
+            </span>
+          </div>
+        </template>
+        <div v-if="logDrawerTotal > logLines.length" style="margin-bottom:12px;">
+          <n-button size="small" @click="loadMoreLogs" :loading="logLoading">
+            加载更多（已显示 {{ logLines.length }} / {{ logDrawerTotal }}）
+          </n-button>
+        </div>
+        <div v-if="logLoading" style="padding:40px; text-align:center;">
+          <n-spin />
+        </div>
+        <div v-else-if="!logLines.length" style="padding:40px; text-align:center; color:var(--n-text-color-3);">
+          未找到该 IP 的请求日志记录
+        </div>
+        <n-scrollbar v-else style="max-height: calc(100vh - 180px);">
+          <pre class="log-pre">{{ logLines.join('\n') }}</pre>
+        </n-scrollbar>
+        <template #footer>
+          <n-space>
+            <n-button size="small" @click="copyLogs">复制全部</n-button>
+            <n-button size="small" type="primary" @click="downloadLogs">下载为 .log 文件</n-button>
+          </n-space>
+        </template>
+      </n-drawer>
     </n-space>
   </AppPage>
 </template>
@@ -427,6 +465,17 @@ const secScanningFull = ref(false)
 const secChecking = ref(false)
 const checkResult = ref(null)
 const checkVisible = ref(false)
+const banLoadingMap = reactive({})
+
+// IP 日志抽屉
+const logDrawerVisible = ref(false)
+const logDrawerIp = ref('')
+const logDrawerTotal = ref(0)
+const logDrawerFile = ref('')
+const logLines = ref([])
+const logLoading = ref(false)
+const logLimit = ref(500)
+
 const secPage = ref(1)
 const secPageSize = ref(10)
 const secTotal = ref(0)
@@ -472,6 +521,41 @@ const secColumns = [
     ))
   }},
   { title: '最近活跃', key: 'last_seen', width: 150, render: row => formatTimeAgo(row.last_seen) },
+  {
+    title: '操作',
+    key: 'actions',
+    width: 220,
+    fixed: 'right',
+    render: row => {
+      const children = []
+      if (row.banned) {
+        children.push(h('n-tag', { type: 'error', size: 'small', round: true, style: 'margin-right:6px;' }, { default: () => '已封禁' }))
+        children.push(h('n-button', {
+          size: 'small',
+          type: 'success',
+          quaternary: true,
+          loading: banLoadingMap.value[row.ip],
+          onClick: () => handleUnban(row),
+        }, { default: () => '解封' }))
+      } else {
+        children.push(h('n-button', {
+          size: 'small',
+          type: 'error',
+          quaternary: true,
+          loading: banLoadingMap.value[row.ip],
+          style: 'margin-right:6px;',
+          onClick: () => handleBan(row),
+        }, { default: () => '一键封禁' }))
+      }
+      children.push(h('n-button', {
+        size: 'small',
+        type: 'primary',
+        quaternary: true,
+        onClick: () => handleViewLogs(row),
+      }, { default: () => '查看日志' }))
+      return h('div', { style: 'display:flex; align-items:center;' }, children)
+    },
+  },
 ]
 
 const secPaginationProps = computed(() => ({
@@ -622,6 +706,128 @@ async function runCheck() {
   finally {
     secChecking.value = false
   }
+}
+
+function handleBan(row) {
+  $dialog.warning({
+    title: '确认封禁 IP',
+    content: `确定要封禁 IP ${row.ip} 吗？封禁后该 IP 的所有请求都会被 Nginx 直接拒绝。`,
+    positiveText: '确认封禁',
+    negativeText: '取消',
+    loading: false,
+    onPositiveClick: async () => {
+      banLoadingMap[row.ip] = true
+      try {
+        const res = await phpAdminApi.securityIpBan(row.ip)
+        if (res.success) {
+          $message.success(res.message || `IP ${row.ip} 已成功封禁`)
+          // 刷新列表以更新 banned 状态
+          await loadSecIpList()
+        } else {
+          $message.error(res.message || '封禁失败')
+        }
+      } catch (e) {
+        $message.error(e.message || '封禁请求失败')
+      } finally {
+        banLoadingMap[row.ip] = false
+      }
+    },
+  })
+}
+
+function handleUnban(row) {
+  $dialog.info({
+    title: '确认解封 IP',
+    content: `确定要解封 IP ${row.ip} 吗？`,
+    positiveText: '确认解封',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      banLoadingMap[row.ip] = true
+      try {
+        const res = await phpAdminApi.securityIpUnban(row.ip)
+        if (res.success) {
+          $message.success(res.message || `IP ${row.ip} 已解封`)
+          await loadSecIpList()
+        } else {
+          $message.error(res.message || '解封失败')
+        }
+      } catch (e) {
+        $message.error(e.message || '解封请求失败')
+      } finally {
+        banLoadingMap[row.ip] = false
+      }
+    },
+  })
+}
+
+async function handleViewLogs(row) {
+  logDrawerIp.value = row.ip
+  logDrawerTotal.value = 0
+  logDrawerFile.value = ''
+  logLines.value = []
+  logDrawerVisible.value = true
+  await fetchIpLogs()
+}
+
+async function fetchIpLogs() {
+  logLoading.value = true
+  try {
+    const res = await phpAdminApi.securityIpLogs(logDrawerIp.value, logLimit.value)
+    if (res.success) {
+      const data = res.data || {}
+      logDrawerTotal.value = data.total || 0
+      logDrawerFile.value = data.log_file || ''
+      logLines.value = data.lines || []
+    } else {
+      $message.error(res.message || '加载日志失败')
+    }
+  } catch (e) {
+    $message.error(e.message || '日志请求失败')
+  } finally {
+    logLoading.value = false
+  }
+}
+
+async function loadMoreLogs() {
+  logLimit.value = Math.min(5000, logLimit.value + 500)
+  await fetchIpLogs()
+}
+
+function copyLogs() {
+  const text = logLines.value.join('\n')
+  if (!text) {
+    $message.warning('没有可复制的日志')
+    return
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    $message.success(`已复制 ${logLines.value.length} 行日志到剪贴板`)
+  }).catch(() => {
+    // 降级方案：用 textarea
+    const ta = document.createElement('textarea')
+    ta.value = text
+    document.body.appendChild(ta)
+    ta.select()
+    try { document.execCommand('copy'); $message.success('已复制到剪贴板') } catch { $message.error('复制失败') }
+    document.body.removeChild(ta)
+  })
+}
+
+function downloadLogs() {
+  const text = logLines.value.join('\n')
+  if (!text) {
+    $message.warning('没有可下载的日志')
+    return
+  }
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `nginx_access_${logDrawerIp.value}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.log`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  $message.success('日志文件已下载')
 }
 
 function formatSize(bytes) {
@@ -815,5 +1021,20 @@ if (session.isRoot) {
   .sec-summary { grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .sec-stat { padding: 12px 8px; }
   .sec-stat-value { font-size: 22px; }
+}
+
+/* IP 日志抽屉 */
+.log-pre {
+  margin: 0;
+  padding: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #e6edf3;
+  background: #0d1117;
+  border-radius: 6px;
+  white-space: pre;
+  word-break: break-all;
+  tab-size: 2;
 }
 </style>
