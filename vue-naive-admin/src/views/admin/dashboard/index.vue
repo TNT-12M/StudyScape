@@ -131,7 +131,7 @@
             :loading="secLoading"
             :bordered="false"
             size="small"
-            scroll-x="1100"
+            scroll-x="1500"
           />
         </n-space>
       </n-card>
@@ -481,7 +481,7 @@ const secPageSize = ref(10)
 const secTotal = ref(0)
 
 const secColumns = [
-  { title: 'IP 地址', key: 'ip', width: 150, fixed: 'left' },
+  { title: 'IP 地址', key: 'ip', width: 150 },
   { title: '风险等级', key: 'risk_level', width: 100, render: row => {
     if (row.risk_level === 'high') return h('n-tag', { type: 'error', size: 'small', round: true }, { default: () => '高度可疑' })
     return h('n-tag', { type: 'warning', size: 'small', round: true }, { default: () => '异常' })
@@ -534,7 +534,7 @@ const secColumns = [
           size: 'small',
           type: 'success',
           quaternary: true,
-          loading: banLoadingMap.value[row.ip],
+          loading: banLoadingMap[row.ip],
           onClick: () => handleUnban(row),
         }, { default: () => '解封' }))
       } else {
@@ -542,7 +542,7 @@ const secColumns = [
           size: 'small',
           type: 'error',
           quaternary: true,
-          loading: banLoadingMap.value[row.ip],
+          loading: banLoadingMap[row.ip],
           style: 'margin-right:6px;',
           onClick: () => handleBan(row),
         }, { default: () => '一键封禁' }))
