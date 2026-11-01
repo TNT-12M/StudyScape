@@ -2973,14 +2973,21 @@ if ($action) {
             case 'material_category_add':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
                 requireContentPermission('material_manage');
-                $name = trim((string)($_POST['name'] ?? ''));
+                $name = trim(preg_replace('/\s+/u', ' ', (string)($_POST['name'] ?? '')));
                 $educationLevel = validateEducationLevel($_POST['education_level'] ?? 'junior');
                 $sortOrder = (int)($_POST['sort_order'] ?? 0);
                 if ($name === '') jsonOut(false, "分类名称不能为空");
-                // 同一学段内名称不能重复
+                // 同一学段内名称不能重复（DB UNIQUE 索引兜底，这里提前给出友好提示）
                 $exist = dbFetchOne($db, "SELECT id FROM material_categories WHERE name=? AND education_level=?", [$name, $educationLevel]);
                 if ($exist) jsonOut(false, "该学段下已有同名分类");
-                dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", [$name, $educationLevel, $sortOrder]);
+                try {
+                    dbQuery($db, "INSERT INTO material_categories(name, education_level, sort_order) VALUES(?,?,?)", [$name, $educationLevel, $sortOrder]);
+                } catch (Exception $e) {
+                    if (stripos($e->getMessage(), 'UNIQUE constraint') !== false) {
+                        jsonOut(false, "该学段下已有同名分类");
+                    }
+                    throw $e;
+                }
                 jsonOut(true, "分类已创建", ['id' => (int)$db->lastInsertRowID()]);
                 break;
 
@@ -2989,7 +2996,7 @@ if ($action) {
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
                 requireContentPermission('material_manage');
                 $id = (int)($_POST['id'] ?? 0);
-                $name = trim((string)($_POST['name'] ?? ''));
+                $name = trim(preg_replace('/\s+/u', ' ', (string)($_POST['name'] ?? '')));
                 $sortOrder = (int)($_POST['sort_order'] ?? 0);
                 if ($id <= 0) jsonOut(false, "参数错误");
                 if ($name === '') jsonOut(false, "分类名称不能为空");
@@ -2998,7 +3005,14 @@ if ($action) {
                 // 检查重名
                 $exist = dbFetchOne($db, "SELECT id FROM material_categories WHERE name=? AND education_level=? AND id<>?", [$name, $cat['education_level'], $id]);
                 if ($exist) jsonOut(false, "该学段下已有同名分类");
-                dbQuery($db, "UPDATE material_categories SET name=?, sort_order=? WHERE id=?", [$name, $sortOrder, $id]);
+                try {
+                    dbQuery($db, "UPDATE material_categories SET name=?, sort_order=? WHERE id=?", [$name, $sortOrder, $id]);
+                } catch (Exception $e) {
+                    if (stripos($e->getMessage(), 'UNIQUE constraint') !== false) {
+                        jsonOut(false, "该学段下已有同名分类");
+                    }
+                    throw $e;
+                }
                 jsonOut(true, "分类已更新");
                 break;
 

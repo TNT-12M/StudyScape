@@ -81,13 +81,24 @@ onMounted(() => {
   loadMaterials()
 })
 
+function dedupeCategories(list) {
+  const seen = new Set()
+  const out = []
+  for (const c of list) {
+    if (!c || seen.has(c.id)) continue
+    seen.add(c.id)
+    out.push({ ...c, name: (c.name || '').trim() })
+  }
+  return out
+}
+
 async function loadMaterials() {
   loading.value = true
   error.value = ''
   try {
     const result = await phpMaterialsApi.list(filters)
     const data = result.data || {}
-    categories.value = data.categories || []
+    categories.value = dedupeCategories(data.categories || [])
     subjects.value = data.subjects || []
     materials.value = (data.materials || []).map(m => {
       const cat = categories.value.find(c => c.id === m.category_id)

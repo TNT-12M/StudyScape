@@ -403,10 +403,22 @@ async function loadMaterials() {
       return { ...m, category_name: cat?.name || '' }
     })
     subjects.value = data.subjects || []
-    if (!categories.value.length) categories.value = data.categories || []
+    if (!categories.value.length) categories.value = dedupeCategories(data.categories || [])
     if (typeof data.total === 'number') pagination.itemCount = data.total
   } catch (error) { message.error(error.message) }
   finally { loading.value = false }
+}
+
+function dedupeCategories(list) {
+  // 按 id 去重，同时 trim name（兜底：历史数据可能有空格或重复）
+  const seen = new Set()
+  const out = []
+  for (const c of list) {
+    if (!c || seen.has(c.id)) continue
+    seen.add(c.id)
+    out.push({ ...c, name: (c.name || '').trim() })
+  }
+  return out
 }
 
 async function loadCategories() {
@@ -414,7 +426,7 @@ async function loadCategories() {
     // 始终加载全部分类，确保资料列表中所有学段的分类名都能正确显示
     // 各下拉选项和分类管理表格按各自需求在前端过滤
     const result = await phpMaterialsApi.categoryList({ education_level: '' })
-    categories.value = result.data?.categories || []
+    categories.value = dedupeCategories(result.data?.categories || [])
     // 更新资料列表的分类名
     materials.value = materials.value.map(m => {
       const cat = categories.value.find(c => c.id === m.category_id)

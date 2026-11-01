@@ -65,6 +65,21 @@ try {
         sort_order INTEGER NOT NULL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )");
+
+    // 前置清理：规范化 name（trim + 同一学段内去掉伪重复）
+    try {
+        // 把带空格的 name trim 掉
+        $db->exec("UPDATE material_categories SET name = TRIM(name) WHERE name != TRIM(name)");
+        // 同一学段 + trim 后同名的，保留 ID 最小的那条，删除其余
+        $dupClean = $db->query("DELETE FROM material_categories WHERE id NOT IN (
+            SELECT MIN(id) FROM material_categories GROUP BY education_level, TRIM(name)
+        )");
+    } catch (Throwable $e) { /* 静默 */ }
+
+    // UNIQUE 约束：同一学段内分类名不允许重复（防复发）
+    try {
+        $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_material_cat_unique ON material_categories(education_level, name)");
+    } catch (Throwable $e) { /* 已有脏数据时跳过，后续手动清理后重试 */ }
     if (!tableHasColumn($db, 'materials', 'category_id')) {
         $db->exec("ALTER TABLE materials ADD COLUMN category_id INTEGER DEFAULT NULL");
     }
