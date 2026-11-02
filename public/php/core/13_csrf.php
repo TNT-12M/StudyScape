@@ -37,6 +37,7 @@ $csrfBypass = [
     // 安全监控读接口
     'security_scan_status',
     'security_ip_list',
+    'security_ip_logs',     // 管理员查看单个 IP 的访问日志（读操作，权限在 action 内部校验）
     'security_scan_check',
     // 已移除的历史危险 action 直接返回“功能已移除”，不要求旧客户端提供 CSRF。
     'admin_danger_challenge',

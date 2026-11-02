@@ -727,15 +727,52 @@ function _sendCriticalAlertEmail(string $ip, int $totalCount, array $scenarioNam
  * 返回第一个存在的 access log 路径，或 null
  */
 function _findNginxAccessLog(): ?string {
+    // 1. 先看 security.env 里有没有手动指定
+    $envFile = dirname(dirname(dirname(__DIR__))) . '/security.env';
+    if (is_readable($envFile)) {
+        $lines = @file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines) {
+            foreach ($lines as $line) {
+                $line = trim($line);
+                if ($line === '' || str_starts_with($line, '#')) continue;
+                if (str_starts_with($line, 'NGINX_LOG_PATH=')) {
+                    $envPath = trim(substr($line, 15));
+                    if ($envPath !== '' && is_file($envPath) && filesize($envPath) > 0) return $envPath;
+                }
+            }
+        }
+    }
+    // 2. 常见候选路径（宝塔/面板默认 + 原生 + scan 函数用过的）
+    $domain = '120.79.161.207';
     $candidates = [
+        // 宝塔面板默认
+        "/www/wwwlogs/{$domain}.log",
+        "/www/wwwlogs/{$domain}.log.1",
+        // 原生 Nginx
         '/var/log/nginx/access.log',
         '/var/log/nginx/access.log.1',
+        '/var/log/nginx/access.log.gz',
+        // Debian/Ubuntu sites-enabled
+        "/var/log/nginx/sites-enabled/{$domain}.log",
+        // CentOS 手动
         '/var/www/logs/access.log',
         '/home/lian/StudyScape/logs/access.log',
+        // 站点相对路径（public 同级的 logs 目录）
         realpath(__DIR__ . '/../../../logs/access.log'),
     ];
     foreach ($candidates as $p) {
         if ($p && is_file($p) && filesize($p) > 0) return $p;
+    }
+    // 3. 扫宝塔目录列出所有 .log 文件取最大的
+    $baoTa = '/www/wwwlogs';
+    if (is_dir($baoTa)) {
+        $largest = null; $largestSize = 0;
+        foreach (glob($baoTa . '/*.log') as $p) {
+            if (is_file($p) && filesize($p) > $largestSize) {
+                $largest = $p; $largestSize = filesize($p);
+            }
+        }
+        if ($largest) return $largest;
     }
     return null;
 }
@@ -766,9 +803,10 @@ function securityGetIpLogs(string $ip, int $limit = 500): array {
     $logPath = _findNginxAccessLog();
     if (!$logPath) return ['total' => 0, 'lines' => [], 'log_file' => ''];
 
-    // 匹配 IP: Nginx combined 格式开头就是 IP
+    // 匹配 IP：兼容多种 Nginx 格式（combined / 宝塔 / 带域名前置等）
+    // 优先匹配 "行首或空格后的 IPv4"，也兼容 "$http_x_forwarded_for" 格式
     $escaped = preg_quote($ip, '/');
-    $pattern = '/^' . $escaped . '\s/';
+    $pattern = '/(?:^|[\s,\(\[=:\/])' . $escaped . '(?:[\s,\)\]\(]|$)/';
 
     $handle = @fopen($logPath, 'r');
     if (!$handle) return ['total' => 0, 'lines' => [], 'log_file' => $logPath];
