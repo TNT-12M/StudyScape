@@ -2,7 +2,10 @@
   <n-card class="question-card" :bordered="true">
     <template #header>
       <div class="question-header">
-        <span>第 {{ index + 1 }} 题</span>
+        <span class="qnum-label">第 {{ index + 1 }} 题</span>
+        <span v-if="question.display_id || question.id" class="qid-label" :title="'点击复制反馈编号，方便举报问题题目'" @click="copyDisplayId(question)">
+          {{ question.display_id || ('Q' + question.id) }}
+        </span>
         <n-space size="small">
           <n-tag size="small" type="info">
             {{ questionTypeLabel(question.question_type) }}
@@ -111,6 +114,20 @@ function letter(index) {
 function update(value) {
   emit('update:answer', value)
 }
+function copyDisplayId(q) {
+  const id = q.display_id || ('Q' + q.id)
+  navigator.clipboard.writeText(id).then(() => {
+    const el = document.createElement('div')
+    el.textContent = `编号 ${id} 已复制`
+    Object.assign(el.style, { position: 'fixed', top: '20px', left: '50%', transform: 'translateX(-50%)', background: 'rgba(0,0,0,0.75)', color: '#fff', padding: '8px 16px', borderRadius: '6px', fontSize: '13px', zIndex: '9999', pointerEvents: 'none' })
+    document.body.appendChild(el)
+    setTimeout(() => el.remove(), 1500)
+  }).catch(() => {
+    const ta = document.createElement('textarea'); ta.value = id; document.body.appendChild(ta); ta.select()
+    try { document.execCommand('copy') } catch {}
+    document.body.removeChild(ta)
+  })
+}
 function updateBlank(index, value) {
   const values = normalizeAnswer(props.question, props.answer)
   values[index] = value
@@ -127,6 +144,26 @@ function updateBlank(index, value) {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+.qnum-label {
+  font-weight: 600;
+  font-size: 15px;
+}
+.qid-label {
+  font-family: 'JetBrains Mono', Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.04);
+  color: rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s;
+  margin-left: 4px;
+}
+.qid-label:hover {
+  background: rgba(24, 160, 88, 0.12);
+  color: #18a058;
 }
 .question-content {
   line-height: 1.8;

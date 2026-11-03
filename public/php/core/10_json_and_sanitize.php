@@ -57,6 +57,80 @@ function sanitizeHtmlContent($v) {
 }
 
 /**
+ * 去掉题干 content 开头的 OCR 题号前缀。
+ * 支持格式: "1." "1．" "1、" "1)" "(1)" "[1]" "1：" "第1题" "第 1 问" "一、" 等
+ * 会多轮尝试，防止嵌套如 "(1) 1. xxx"
+ *
+ * @param string $content 原始题干
+ * @return string 清洗后的题干
+ */
+function normalizeQuestionContent(string $content): string {
+    if ($content === '' || $content === null) return $content;
+    // 只清洗开头：题干中间出现 "1." 是正常内容不要动
+    // 顺序很重要：先处理 "第X题" 这种长的，再处理 "1." 这种短的
+    $patterns = [
+        // 1. "第 N 题 / 第 N 问" （全角/半角空格都匹配）
+        '/^\s*第\s*\d+\s*[题问]\s*/u',
+        // 2. "[N]" / "(N)" / "（N）" / "【N】"
+        '/^\s*[\(\[（【]\s*\d+\s*[\)\]）】]\s*/u',
+        // 3. "N." / "N．" / "N、" / "N)" / "N：" / "N:" / "N）" / "N、"
+        '/^\s*\d+\s*[\.．、\):：）]\s*/u',
+        // 4. 中文数字 "一、" "二．" 等（少见但兼容）
+        '/^\s*[一二三四五六七八九十百]+[\.．、\):：）]\s*/u',
+    ];
+    // 最多尝试 3 轮，防止 "(1) 1. xxx" 这种嵌套
+    $prev = null;
+    $cur = $content;
+    $rounds = 0;
+    while ($prev !== $cur && $rounds < 3) {
+        $prev = $cur;
+        foreach ($patterns as $p) {
+            $cur = preg_replace($p, '', $cur, 1);
+        }
+        $rounds++;
+    }
+    return trim($cur);
+}
+
+/**
+ * 给题目行数组的 content 字段做清洗（用于 SELECT 结果批量处理）
+ * @param array $rows 题目行数组，每行至少有 "content" key
+ * @return array 同一数组，content 被就地修改
+ */
+function normalizeQuestionRows(array $rows): array {
+    foreach ($rows as &$row) {
+        if (isset($row['content']) && is_string($row['content'])) {
+            $row['content'] = normalizeQuestionContent($row['content']);
+        }
+    }
+    unset($row);
+    return $rows;
+}
+
+/**
+ * 给单个题目数组加 display_id 字段，返回浅拷贝（不就地修改原数组）
+ * display_id 格式: "Q{id}" （例如 id=123 → "Q123"）
+ * @param array $q 题目数组
+ * @return array 带 display_id + 清洗后 content 的新数组
+ */
+function decorateQuestion(array $q): array {
+    $q['content'] = normalizeQuestionContent($q['content'] ?? '');
+    if (!isset($q['display_id']) || $q['display_id'] === '') {
+        $q['display_id'] = 'Q' . (int)($q['id'] ?? 0);
+    }
+    return $q;
+}
+
+/**
+ * 批量 decorateQuestion
+ */
+function decorateQuestions(array $rows): array {
+    $out = [];
+    foreach ($rows as $q) $out[] = decorateQuestion($q);
+    return $out;
+}
+
+/**
  * 校验用户名：2-20 字符，仅允许中英文、数字、下划线、emoji
  */
 function validateUsername(string $username): string {

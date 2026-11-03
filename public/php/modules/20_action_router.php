@@ -1333,13 +1333,16 @@ if ($action) {
                 $normalized = [];
                 importExtractQuestions($importData, $batch['subject'] ?: '综合', $normalized, $batch['education_level'] ?: '');
                 $inserted = 0; $skipped = 0;
-                foreach ($normalized as $q) {
+                foreach ($normalized as &$q) {
+                    // 从源头清洗 OCR 题号前缀
+                    $q['content'] = normalizeQuestionContent($q['content'] ?? '');
                     $exists = dbFetchOne($db, 'SELECT id FROM questions WHERE content=? AND subject=? AND education_level=? LIMIT 1', [$q['content'], $q['subject'], $q['education_level']]);
                     if ($exists) { $skipped++; continue; }
                     $opts = !empty($q['options']) ? json_encode($q['options'], JSON_UNESCAPED_UNICODE) : null;
                     dbQuery($db, 'INSERT INTO questions(subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html, match_key, source_qid) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', [$q['subject'], $q['question_type'], $q['category'] ?? $q['question_type'], $q['education_level'], $q['content'], $opts, $q['correct_answer'] ?? '', $q['explanation'] ?? '', $q['difficulty'] ?? 3, $q['points'] ?? 1, !empty($q['is_html']) ? 1 : 0, '', $q['_pcvl_qid'] ?? '']);
                     $inserted++;
                 }
+                unset($q);
                 dbQuery($db, 'UPDATE ocr_import_batches SET status=\'committed\', result_json=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?', [json_encode(['questions' => $questions], JSON_UNESCAPED_UNICODE), $id]);
                 jsonOut(true, '审核题目已入库', ['inserted' => $inserted, 'skipped' => $skipped, 'total' => count($kept)]);
                 break;
@@ -1629,6 +1632,7 @@ if ($action) {
                     if (!isAdmin()) {
                         unset($r['correct_answer'], $r['explanation']);
                     }
+                    $r = decorateQuestion($r);
                     return $r;
                 }, $rows);
 
@@ -1693,6 +1697,7 @@ if ($action) {
                 $row['difficulty'] = (int)$row['difficulty'];
                 $row['points']     = (float)$row['points'];
                 $row['is_html']    = !empty($row['is_html']) ? 1 : 0;
+                $row = decorateQuestion($row);
                 if (!isAdmin()) {
                     unset($row['correct_answer'], $row['explanation']);
                 }
@@ -1746,6 +1751,7 @@ if ($action) {
                     $options = null;
                 }
 
+                $content = normalizeQuestionContent($content);
                 $optionsJson = $options ? json_encode($options, JSON_UNESCAPED_UNICODE) : null;
                 $isHtml = preg_match('/<[a-z][\s\S]*>/i', $content) ? 1 : 0;
                 dbQuery($db, "INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2078,6 +2084,7 @@ if ($action) {
                         $isHtml = !empty($q['is_html']) ? 1 : 0;
                         $sourceQid = (string)($q['_pcvl_qid'] ?? '');
                         $qMk = $q['match_key'] ?? '';
+                        $q['content'] = normalizeQuestionContent($q['content'] ?? '');
                         dbQuery($db, "INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html, match_key, source_qid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             [$q['subject'], $q['question_type'], $q['category'], $q['education_level'], $q['content'], $optionsJson, $q['correct_answer'], $q['explanation'] ?? null, $q['difficulty'], $q['points'], $isHtml, $qMk, $sourceQid]);
                         $stats['inserted']++;
@@ -2155,6 +2162,7 @@ if ($action) {
                         $q['options']    = $q['options'] ? json_decode($q['options'], true) : null;
                         $q['difficulty'] = (int)$q['difficulty'];
                         $q['points']     = (float)$q['points'];
+                        $q = decorateQuestion($q);
                         // 非 root 端不返回正确答案与解析。
                         if (!isRoot()) unset($q['correct_answer'], $q['explanation']);
                         $questionsById[(int)$q['id']] = $q;
@@ -2634,6 +2642,7 @@ if ($action) {
                     $q['options']    = $q['options'] ? json_decode($q['options'], true) : null;
                     $q['difficulty'] = (int)$q['difficulty'];
                     $q['points']     = (float)$q['points'];
+                    $q = decorateQuestion($q);
                     unset($q['correct_answer'], $q['explanation']);
                     $qById[(int)$q['id']] = $q;
                 }
