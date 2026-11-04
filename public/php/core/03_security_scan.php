@@ -269,6 +269,8 @@ function phpSecurityScan(string $logPath, int $scanId): array {
 
     // 加载白名单
     $whitelist = [];
+    $ignorePaths = [];  // 路径前缀忽略列表（如 /lrs/api.php）
+    $ignoreUAs = [];    // UA 关键字忽略列表（如 OpenCode、Electron）
     $envFile = dirname(dirname(dirname(__DIR__))) . '/security.env';
     if (file_exists($envFile)) {
         $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -279,6 +281,20 @@ function phpSecurityScan(string $logPath, int $scanId): array {
                 foreach ($ips as $ip) {
                     $ip = trim($ip);
                     if ($ip) $whitelist[$ip] = true;
+                }
+            }
+            if (str_starts_with($line, 'SECURITY_IGNORE_PATHS=')) {
+                $paths = explode(',', substr($line, 22));
+                foreach ($paths as $p) {
+                    $p = trim($p);
+                    if ($p !== '') $ignorePaths[] = $p;
+                }
+            }
+            if (str_starts_with($line, 'SECURITY_IGNORE_UAS=')) {
+                $uas = explode(',', substr($line, 20));
+                foreach ($uas as $u) {
+                    $u = trim($u);
+                    if ($u !== '') $ignoreUAs[] = $u;
                 }
             }
         }
@@ -371,6 +387,15 @@ function phpSecurityScan(string $logPath, int $scanId): array {
         $sp3Pos = strrpos($path, ' ');
         if ($sp3Pos !== false) {
             $path = substr($path, 0, $sp3Pos);
+        }
+
+        // ====== 路径前缀忽略（心跳、LRS 等正常高频业务路径）======
+        if ($ignorePaths) {
+            foreach ($ignorePaths as $prefix) {
+                if (str_starts_with($path, $prefix)) {
+                    continue 2;  // 跳过本循环 + 外层 while
+                }
+            }
         }
 
         // 提取状态码（第二个引号后）
