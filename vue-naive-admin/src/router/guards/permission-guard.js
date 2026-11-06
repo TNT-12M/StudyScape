@@ -1,4 +1,4 @@
-import { useSessionStore } from '@/store'
+﻿import { useSessionStore } from '@/store'
 
 const PUBLIC_PATHS = ['/login', '/403']
 
@@ -11,12 +11,12 @@ export function createPermissionGuard(router) {
 
     // 根路径：已登录直达对应控制台，未登录进入品牌落地页
     if (to.path === '/') {
-      return session.isAuthenticated ? (session.isAdmin ? '/admin' : '/app') : '/welcome'
+      return session.isAuthenticated ? (session.isAdmin ? '/StudyScape' : '/app') : '/welcome'
     }
 
     if (PUBLIC_PATHS.includes(to.path) || to.meta.public) {
       if (to.path === '/login' && session.isAuthenticated)
-        return session.isAdmin ? '/admin' : '/app'
+        return session.isAdmin ? '/StudyScape' : '/app'
       return true
     }
 

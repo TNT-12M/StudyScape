@@ -1,4 +1,4 @@
-export const basicRoutes = [
+﻿export const basicRoutes = [
   {
     name: 'Welcome',
     path: '/welcome',
@@ -36,7 +36,7 @@ export const basicRoutes = [
   },
   {
     name: 'Admin',
-    path: '/admin',
+    path: '/StudyScape',
     component: () => import('@/layouts/admin/index.vue'),
     meta: { title: '管理后台', requiresAuth: true, requiresAdmin: true, layout: 'empty' },
     children: [

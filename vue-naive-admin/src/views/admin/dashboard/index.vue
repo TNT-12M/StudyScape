@@ -205,12 +205,12 @@ const statistics = ref({})
 
 const shortcuts = computed(() => {
   const items = []
-  if (session.isRoot) items.push({ label: '用户管理', path: '/admin/users', icon: '👥', color: '#3C2ECA' })
-  items.push({ label: '题库管理', path: '/admin/questions', icon: '📚', color: '#FF7A45' })
-  if (session.isRoot) items.push({ label: '考试管理', path: '/admin/papers', icon: '📝', color: '#6C5CE7' })
-  items.push({ label: '资料管理', path: '/admin/materials', icon: '📁', color: '#27D2BF' })
-  items.push({ label: 'OCR 审核', path: '/admin/ocr', icon: '🔍', color: '#F6A623' })
-  if (session.isRoot) items.push({ label: '反馈处理', path: '/admin/feedback', icon: '💬', color: '#E8463A' })
+  if (session.isRoot) items.push({ label: '用户管理', path: '/StudyScape/users', icon: '👥', color: '#3C2ECA' })
+  items.push({ label: '题库管理', path: '/StudyScape/questions', icon: '📚', color: '#FF7A45' })
+  if (session.isRoot) items.push({ label: '考试管理', path: '/StudyScape/papers', icon: '📝', color: '#6C5CE7' })
+  items.push({ label: '资料管理', path: '/StudyScape/materials', icon: '📁', color: '#27D2BF' })
+  items.push({ label: 'OCR 审核', path: '/StudyScape/ocr', icon: '🔍', color: '#F6A623' })
+  if (session.isRoot) items.push({ label: '反馈处理', path: '/StudyScape/feedback', icon: '💬', color: '#E8463A' })
   return items
 })
 

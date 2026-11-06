@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="admin-shell">
     <!-- 移动端遮罩 -->
     <div v-if="mobileSidebarOpen" class="sidebar-mask" @click="mobileSidebarOpen = false" />
@@ -9,31 +9,31 @@
         <span class="logo-text">学境・管理</span>
       </div>
       <nav class="admin-menu">
-        <RouterLink to="/admin" @click="closeOnMobile">
+        <RouterLink to="/StudyScape" @click="closeOnMobile">
           <span class="menu-icon">📊</span><span class="menu-text">平台概览</span>
         </RouterLink>
-        <RouterLink v-if="session.isRoot" to="/admin/users" @click="closeOnMobile">
+        <RouterLink v-if="session.isRoot" to="/StudyScape/users" @click="closeOnMobile">
           <span class="menu-icon">👥</span><span class="menu-text">用户授权</span>
         </RouterLink>
-        <RouterLink v-if="session.isContentAdmin" to="/admin/questions" @click="closeOnMobile">
+        <RouterLink v-if="session.isContentAdmin" to="/StudyScape/questions" @click="closeOnMobile">
           <span class="menu-icon">📚</span><span class="menu-text">题库管理</span>
         </RouterLink>
-        <RouterLink v-if="session.isRoot" to="/admin/papers" @click="closeOnMobile">
+        <RouterLink v-if="session.isRoot" to="/StudyScape/papers" @click="closeOnMobile">
           <span class="menu-icon">📝</span><span class="menu-text">考试管理</span>
         </RouterLink>
-        <RouterLink v-if="session.isContentAdmin" to="/admin/materials" @click="closeOnMobile">
+        <RouterLink v-if="session.isContentAdmin" to="/StudyScape/materials" @click="closeOnMobile">
           <span class="menu-icon">📁</span><span class="menu-text">资料管理</span>
         </RouterLink>
-        <RouterLink v-if="session.isContentAdmin" to="/admin/material-requests" @click="closeOnMobile">
+        <RouterLink v-if="session.isContentAdmin" to="/StudyScape/material-requests" @click="closeOnMobile">
           <span class="menu-icon">📝</span><span class="menu-text">资料需求</span>
         </RouterLink>
-        <RouterLink v-if="session.isRoot" to="/admin/feedback" @click="closeOnMobile">
+        <RouterLink v-if="session.isRoot" to="/StudyScape/feedback" @click="closeOnMobile">
           <span class="menu-icon">💬</span><span class="menu-text">反馈处理</span>
         </RouterLink>
-        <RouterLink v-if="session.isRoot" to="/admin/announcements" @click="closeOnMobile">
+        <RouterLink v-if="session.isRoot" to="/StudyScape/announcements" @click="closeOnMobile">
           <span class="menu-icon">📢</span><span class="menu-text">公告管理</span>
         </RouterLink>
-        <RouterLink v-if="session.isContentAdmin" to="/admin/ocr" @click="closeOnMobile">
+        <RouterLink v-if="session.isContentAdmin" to="/StudyScape/ocr" @click="closeOnMobile">
           <span class="menu-icon">🔍</span><span class="menu-text">智能 OCR 审核</span>
         </RouterLink>
       </nav>
@@ -96,7 +96,7 @@
               </n-button>
             </n-space>
           </n-popover>
-          <SessionProfileLink to="/admin/profile" />
+          <SessionProfileLink to="/StudyScape/profile" />
           <span class="role-tag hide-mobile">{{ session.isRoot ? 'root' : '内容管理员' }}</span>
           <n-button quaternary size="small" @click="logout">
             退出

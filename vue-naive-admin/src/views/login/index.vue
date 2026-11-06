@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="login-page">
     <a class="back-home" @click="router.push('/welcome')">
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 18l-6-6 6-6" /></svg>
@@ -136,7 +136,7 @@ async function login() {
     const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
       ? route.query.redirect
       : null
-    const target = redirect || (user.is_admin ? '/admin' : '/app')
+    const target = redirect || (user.is_admin ? '/StudyScape' : '/app')
     // 确保 DOM 更新后再跳转，避免路由守卫读取到旧状态
     await nextTick()
     // 多级兜底：replace → push → setTimeout 硬跳转，确保一定能跳过去
@@ -170,7 +170,7 @@ async function login() {
 
 function isOnTarget(target) {
   const path = router.currentRoute.value.path
-  return path === target || path.startsWith(`${target}/`) || (target === '/admin' && path === '/admin')
+  return path === target || path.startsWith(`${target}/`) || (target === '/StudyScape' && path === '/StudyScape')
 }
 
 function goForgot() {

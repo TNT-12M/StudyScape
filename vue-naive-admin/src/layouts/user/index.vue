@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="user-shell">
     <aside class="user-sidebar">
       <div class="user-brand">
@@ -27,11 +27,11 @@
         <RouterLink to="/app/feedback" active-class="is-active">
           <span class="nav-icon">💬</span><span class="nav-text">开发者反馈</span>
         </RouterLink>
-        <RouterLink v-if="session.isAdmin" to="/admin" class="nav-admin-link" active-class="is-active">
+        <RouterLink v-if="session.isAdmin" to="/StudyScape" class="nav-admin-link" active-class="is-active">
           <span class="nav-icon">⚙️</span><span class="nav-text">管理后台</span>
         </RouterLink>
       </nav>
-      <RouterLink v-if="session.isAdmin" class="back-admin hide-mobile" to="/admin">
+      <RouterLink v-if="session.isAdmin" class="back-admin hide-mobile" to="/StudyScape">
         <span class="nav-icon">⚙️</span><span class="nav-text">进入管理后台</span>
       </RouterLink>
     </aside>

@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="welcome">
     <!-- ===== 顶部导航 ===== -->
     <header class="nav" :class="{ scrolled }">
@@ -367,7 +367,7 @@ function goRegister() {
   router.push({ path: '/login', query: { mode: 'register' } })
 }
 function goConsole() {
-  router.push(session.isAdmin ? '/admin' : '/app')
+  router.push(session.isAdmin ? '/StudyScape' : '/app')
 }
 function scrollTop() {
   menuOpen.value = false
