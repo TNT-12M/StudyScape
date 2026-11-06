@@ -859,11 +859,13 @@ function _tryNginxReload(): array {
     $nginxBin = '/www/server/nginx/sbin/nginx';
     if (!is_file($nginxBin)) $nginxBin = 'nginx';
 
-    // 1. nginx -t
+    // 1. nginx -t (www 用户跑时 permission denied 不算真错，只认 syntax error)
     $testOut = []; $testCode = 0;
     exec($nginxBin . ' -t 2>&1', $testOut, $testCode);
-    if ($testCode !== 0) {
-        return ['ok' => false, 'need_cron' => false, 'detail' => implode("\n", $testOut)];
+    $testStr = implode("\n", $testOut);
+    // 真语法错误 → 必须失败；单纯权限 denied (www 无 root) → 容忍
+    if ($testCode !== 0 && preg_match('/emerg.*syntax|unknown directive|invalid number of arguments|unexpected end of file/', $testStr)) {
+        return ['ok' => false, 'need_cron' => false, 'detail' => $testStr];
     }
 
     // 2. reload (www 可能没权限)
@@ -874,6 +876,7 @@ function _tryNginxReload(): array {
     }
 
     // 3. 尝试 systemctl / service
+    $reloadOut2 = []; $reloadCode2 = 0;
     exec('systemctl reload nginx 2>&1 || service nginx reload 2>&1', $reloadOut2, $reloadCode2);
     if ($reloadCode2 === 0) {
         return ['ok' => true, 'need_cron' => false];
@@ -955,7 +958,7 @@ function securityBanIp(string $ip): array {
         return ['ok' => false, 'message' => "写入 $banFile 失败（权限问题？PHP 进程 www 需要目录写权限）"];
     }
 
-    // 5. nginx -t + reload（用统一 helper）
+    // 5. nginx -t + reload（用统一 helper，www 权限问题会容忍）
     $reload = _tryNginxReload();
     if ($reload['ok']) {
         return ['ok' => true, 'message' => "IP $ip 已封禁（$banFile），Nginx 已 reload"];
@@ -964,9 +967,9 @@ function securityBanIp(string $ip): array {
         // www 没权重载，但文件写成功了——标记已封禁，等 root cron 来 reload
         return ['ok' => true, 'message' => "IP $ip 已写入封禁清单 $banFile ，等待 root cron 自动 reload Nginx"];
     }
-    // nginx -t 真的失败了 → 回滚
-    @file_put_contents($banFile, @file_get_contents($banFile) . "\n# AUTO-REMOVE: nginx test failed for $ip\n");
-    return ['ok' => false, 'message' => 'nginx -t 失败: ' . ($reload['detail'] ?? 'unknown')];
+    // 真语法错误 → 回滚
+    @file_put_contents($banFile, rtrim(@file_get_contents($banFile)) . "\n# AUTO-REMOVE: nginx config syntax error, rolled back deny $ip\n");
+    return ['ok' => false, 'message' => 'nginx 配置真有语法错误，已回滚写入。详情: ' . ($reload['detail'] ?? 'unknown')];
 }
 
 /**
