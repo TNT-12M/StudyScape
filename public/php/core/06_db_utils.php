@@ -480,6 +480,41 @@ try {
     error_log('OCR batch table init failed: ' . $e->getMessage());
 }
 
+// ===== 质量质检: questions 加 quality + quality_flags =====
+try {
+    try { $db->exec("ALTER TABLE questions ADD COLUMN quality TEXT NOT NULL DEFAULT 'good'"); } catch (Throwable $ignored) {}
+    try { $db->exec("ALTER TABLE questions ADD COLUMN quality_flags TEXT NOT NULL DEFAULT ''"); } catch (Throwable $ignored) {}
+    try { $db->exec("ALTER TABLE questions ADD COLUMN quality_scanned_at DATETIME"); } catch (Throwable $ignored) {}
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_quality ON questions(quality)");
+} catch (Exception $e) {
+    error_log('Questions quality migration failed: ' . $e->getMessage());
+}
+
+// ===== trash_questions: 坏题隔离区（可恢复）=====
+try {
+    $db->exec("CREATE TABLE IF NOT EXISTS trash_questions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        original_id INTEGER,
+        reason TEXT NOT NULL DEFAULT '',
+        quality_flags TEXT NOT NULL DEFAULT '',
+        subject TEXT NOT NULL DEFAULT '',
+        question_type TEXT NOT NULL DEFAULT '',
+        content TEXT,
+        options TEXT,
+        correct_answer TEXT,
+        explanation TEXT,
+        difficulty INTEGER DEFAULT 2,
+        points REAL DEFAULT 1.0,
+        education_level TEXT DEFAULT 'junior',
+        original_created_at DATETIME,
+        trashed_by INTEGER,
+        trashed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        notes TEXT
+    )");
+} catch (Exception $e) {
+    error_log('trash_questions table init failed: ' . $e->getMessage());
+}
+
 // 生成匹配码：从文件名中提取核心标识
 function generateMatchKey(string $fileName, string $extraHint = ''): string {
     $name = pathinfo($fileName, PATHINFO_FILENAME);

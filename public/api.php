@@ -33,6 +33,7 @@ require_once __DIR__ . '/php/core/08_site_and_ocr.php';     // site stats + OCR 
 require_once __DIR__ . '/php/core/09_inline_actions.php';    // TOP: record_visit/captcha (needs jsonOut ✅)
 require_once __DIR__ . '/php/core/11_auth.php';              // isLoggedIn / requireAdmin (lazy)
 require_once __DIR__ . '/php/core/13_csrf.php';              // CSRF bypass + 校验 (lazy)
+require_once __DIR__ . '/php/core/14_quality_check.php';    // 题库质量质检 (qualityScanQuestion, bulkScan, trash, restore)
 
 // ===== 业务模块 =====
 require_once __DIR__ . '/php/modules/21_import_helpers.php'; // importExtractQuestions, pcvl*, examB*

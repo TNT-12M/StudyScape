@@ -1130,6 +1130,40 @@ if ($action) {
                 jsonOut(true, '', $result);
                 break;
 
+            // ==================== 题库质量质检 ====================
+            case 'quality_scan_all':
+                requireAdmin();
+                $stats = qualityBulkScan($db);
+                jsonOut(true, '质检完成', ['stats' => $stats]);
+                break;
+
+            case 'quality_trash':
+                requireAdmin();
+                $qid = (int)($_POST['question_id'] ?? 0);
+                $reason = trim((string)($_POST['reason'] ?? ''));
+                if ($qid <= 0) jsonOut(false, '无效题目 ID');
+                $ok = qualityTrashQuestion($db, $qid, (int)($_SESSION['user_id'] ?? 0), $reason);
+                if ($ok) jsonOut(true, '已移入回收站'); else jsonOut(false, '移入失败');
+                break;
+
+            case 'quality_restore':
+                requireAdmin();
+                $tid = (int)($_POST['trash_id'] ?? 0);
+                if ($tid <= 0) jsonOut(false, '无效回收站 ID');
+                $ok = qualityRestoreQuestion($db, $tid, (int)($_SESSION['user_id'] ?? 0));
+                if ($ok) jsonOut(true, '已恢复'); else jsonOut(false, '恢复失败');
+                break;
+
+            case 'quality_trash_list':
+                requireAdmin();
+                $page = max(1, (int)($_POST['page'] ?? 1));
+                $pageSize = min(100, max(10, (int)($_POST['page_size'] ?? 20)));
+                $offset = ($page - 1) * $pageSize;
+                $rows = dbFetchAll("SELECT * FROM trash_questions ORDER BY id DESC LIMIT $pageSize OFFSET $offset");
+                $total = dbFetchOne("SELECT COUNT(*) FROM trash_questions")[0];
+                jsonOut(true, '', ['items' => $rows, 'total' => (int)$total, 'page' => $page, 'page_size' => $pageSize]);
+                break;
+
             // ==================== OCR 批次审核 ====================
             case 'ocr_batch_create':
                 $uid = requireContentPermission('question_import');
@@ -1621,11 +1655,12 @@ if ($action) {
 
                 $total = (int)dbFetchOne($db, "SELECT COUNT(*) AS c FROM questions $whereSql", $params)['c'];
                 $offset = ($page - 1) * $page_size;
-                $rows = dbFetchAll($db, "SELECT id, subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, created_at, is_html FROM questions $whereSql ORDER BY id DESC LIMIT ? OFFSET ?", array_merge($params, [$page_size, $offset]));
+                $rows = dbFetchAll($db, "SELECT id, subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, created_at, is_html, quality, quality_flags, quality_scanned_at FROM questions $whereSql ORDER BY id DESC LIMIT ? OFFSET ?", array_merge($params, [$page_size, $offset]));
 
                 // 反序列化 options
                 $items = array_map(function($r){
                     $r['options']     = $r['options'] ? json_decode($r['options'], true) : null;
+                    $r['quality_flags'] = $r['quality_flags'] ? json_decode($r['quality_flags'], true) : [];
                     $r['difficulty']  = (int)$r['difficulty'];
                     $r['points']      = (float)$r['points'];
                     $r['is_html']     = !empty($r['is_html']) ? 1 : 0;
