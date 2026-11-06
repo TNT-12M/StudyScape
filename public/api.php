@@ -25,8 +25,8 @@ require_once __DIR__ . '/php/core/02_session.php';           // session_start()
 require_once __DIR__ . '/php/core/04_config_and_auth.php';   // loadPasswordKey, encryptPassword, smtpConfigPath
 require_once __DIR__ . '/php/core/05_db_schema.php';         // TOP: new SQLite3 + CREATE TABLE (needs loadPasswordKey ✅)
 require_once __DIR__ . '/php/core/12_user_and_db.php';       // dbQuery/dbFetchAll/dbFetchOne + 用户辅助
-require_once __DIR__ . '/php/core/06_db_utils.php';          // TOP: schema migrations (needs dbQuery ✅, $db ✅)
-require_once __DIR__ . '/php/core/03_security_scan.php';     // triggerSecurityScan (lazy, uses $db)
+require_once __DIR__ . '/php/core/03_security_scan.php';     // triggerSecurityScan (定义函数, 06 顶层会调)
+require_once __DIR__ . '/php/core/06_db_utils.php';          // TOP: schema migrations + @triggerSecurityScan(false) (需要 03 先加载 ✅)
 require_once __DIR__ . '/php/core/07_captcha.php';           // createCaptcha
 require_once __DIR__ . '/php/core/10_json_and_sanitize.php'; // jsonOut, sanitizeInput, validate*
 require_once __DIR__ . '/php/core/08_site_and_ocr.php';     // site stats + OCR bridge (lazy, uses dbQuery)
