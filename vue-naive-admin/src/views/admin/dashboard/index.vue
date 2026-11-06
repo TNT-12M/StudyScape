@@ -136,43 +136,47 @@
         </n-space>
       </n-card>
 
-      <!-- IP 请求日志抽屉 -->
-      <n-drawer
+      <!-- IP 请求日志全屏弹窗 -->
+      <n-modal
         v-model:show="logDrawerVisible"
-        :width="720"
-        placement="right"
-        closable
-        class="log-drawer"
+        preset="card"
+        title=""
+        :bordered="false"
+        :mask-closable="true"
+        :closable="true"
+        :close-on-escape="true"
+        style="width: 95vw; max-width: 1800px;"
+        body-content-style="padding: 0; max-height: 88vh; display: flex; flex-direction: column;"
       >
-        <template #header>
-          <div style="display:flex; flex-direction:column; gap:4px;">
-            <span style="font-weight:600;">IP {{ logDrawerIp }} — 请求日志</span>
-            <span style="font-size:12px; color:var(--n-text-color-3);">
+        <div style="padding: 16px 20px; border-bottom: 1px solid var(--n-border-color); display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+          <div>
+            <div style="font-weight:600; font-size:15px;">IP {{ logDrawerIp }} — 请求日志</div>
+            <div style="font-size:12px; color:var(--n-text-color-3); margin-top:4px;">
               日志文件：{{ logDrawerFile || '未检测到' }} | 共匹配 {{ logDrawerTotal.toLocaleString() }} 条，当前显示最后 {{ logLines.length }} 条
-            </span>
+              <span style="margin-left:12px; opacity:.7;">按 Esc 或点右上角 ✕ 关闭</span>
+            </div>
           </div>
-        </template>
-        <div v-if="logDrawerTotal > logLines.length" style="margin-bottom:12px;">
+          <n-space>
+            <n-button size="small" @click="copyLogs" :disabled="!logLines.length">📋 一键复制全部</n-button>
+            <n-button size="small" type="primary" ghost @click="downloadLogs" :disabled="!logLines.length">⬇️ 下载 .log 文件</n-button>
+            <n-button size="small" @click="logDrawerVisible=false">❌ 关闭</n-button>
+          </n-space>
+        </div>
+        <div v-if="logDrawerTotal > logLines.length" style="padding:12px 20px; border-bottom:1px solid var(--n-border-color);">
           <n-button size="small" @click="loadMoreLogs" :loading="logLoading">
             加载更多（已显示 {{ logLines.length }} / {{ logDrawerTotal }}）
           </n-button>
         </div>
-        <div v-if="logLoading" style="padding:40px; text-align:center;">
+        <div v-if="logLoading" style="padding:60px; text-align:center;">
           <n-spin />
         </div>
-        <div v-else-if="!logLines.length" style="padding:40px; text-align:center; color:var(--n-text-color-3);">
+        <div v-else-if="!logLines.length" style="padding:60px; text-align:center; color:var(--n-text-color-3);">
           未找到该 IP 的请求日志记录
         </div>
-        <n-scrollbar v-else style="max-height: calc(100vh - 180px);">
+        <n-scrollbar v-else style="flex:1; min-height:400px;">
           <pre class="log-pre">{{ logLines.join('\n') }}</pre>
         </n-scrollbar>
-        <template #footer>
-          <n-space>
-            <n-button size="small" @click="copyLogs">复制全部</n-button>
-            <n-button size="small" type="primary" @click="downloadLogs">下载为 .log 文件</n-button>
-          </n-space>
-        </template>
-      </n-drawer>
+      </n-modal>
     </n-space>
   </AppPage>
 </template>
