@@ -1,1 +1,0 @@
-function e(e){switch(typeof e){case`string`:return e||void 0;case`number`:return String(e);default:return}}export{e as t};

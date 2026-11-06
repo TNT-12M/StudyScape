@@ -1,1 +1,0 @@
-function e(e){return t=>{e.value=t?t.$el:null}}export{e as t};

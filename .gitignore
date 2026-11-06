@@ -74,6 +74,9 @@ node_modules/
 vue-naive-admin/node_modules/
 vue-naive-admin/dist/
 
+# ===== 前端构建产物（服务器上构建，不入库）=====
+public/admin/
+
 # pnpm 本地包存储（跨盘硬链接失败时自动生成）
 .pnpm-store/
 
