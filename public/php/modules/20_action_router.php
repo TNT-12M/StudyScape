@@ -1044,9 +1044,9 @@ if ($action) {
                 $ips = array_column($rows, 'ip');
                 $userMap = [];
 
-                // 检测哪些 IP 已在 Nginx 封禁列表中
+                // 检测哪些 IP 已在 Nginx 封禁列表中（用统一 helper 自动探测路径）
                 $bannedIps = [];
-                $banConf = '/etc/nginx/conf.d/banned_ips.conf';
+                $banConf = _getBanFilePath();
                 if (is_readable($banConf)) {
                     $content = @file_get_contents($banConf);
                     if ($content !== false) {

@@ -804,18 +804,85 @@ function _findNginxAccessLog(): ?string {
 
 /**
  * 找 Nginx 站点配置文件路径（用于封禁时追加 deny 规则）
+ * 兼容 Debian/Ubuntu (sites-enabled, conf.d) + 宝塔 BT Panel (/www/server/panel/vhost/nginx/)
  */
 function _findNginxSiteConfig(): ?string {
     $candidates = [
+        // Debian/Ubuntu
         '/etc/nginx/sites-enabled/studyscape.conf',
         '/etc/nginx/sites-enabled/default',
+        '/etc/nginx/sites-enabled/120.79.161.207.conf',
         '/etc/nginx/conf.d/studyscape.conf',
         '/etc/nginx/conf.d/security.conf',
+        // 宝塔 BT Panel (RHEL/CentOS)
+        '/www/server/panel/vhost/nginx/120.79.161.207.conf',
+        '/www/server/panel/vhost/nginx/studyscape.conf',
     ];
     foreach ($candidates as $p) {
         if ($p && is_file($p)) return $p;
     }
+    // 宝塔通配兜底
+    if (is_dir('/www/server/panel/vhost/nginx')) {
+        $glob = glob('/www/server/panel/vhost/nginx/*.conf');
+        if ($glob) return $glob[0];
+    }
     return null;
+}
+
+/**
+ * 找可写的封禁清单文件路径
+ * 优先级: 环境变量 > 宝塔 conf.d > Debian conf.d > 站点同级目录
+ */
+function _getBanFilePath(): string {
+    // 环境变量覆盖（security.env 里可以写 BAN_FILE_PATH=/xxx/xxx.conf）
+    $envFile = realpath(__DIR__ . '/../../security.env');
+    if ($envFile && is_file($envFile)) {
+        $env = parse_ini_file($envFile, false, INI_SCANNER_RAW);
+        if (!empty($env['BAN_FILE_PATH'])) return $env['BAN_FILE_PATH'];
+    }
+    // 宝塔 BT Panel: /www/server/nginx/conf/ 通常 www 可写
+    if (is_dir('/www/server/nginx/conf')) return '/www/server/nginx/conf/banned_ips.conf';
+    // Debian/Ubuntu
+    if (is_dir('/etc/nginx/conf.d')) return '/etc/nginx/conf.d/banned_ips.conf';
+    // 站点同级兜底
+    $siteConf = _findNginxSiteConfig();
+    if ($siteConf) return dirname($siteConf) . '/banned_ips.conf';
+    // 最终兜底
+    return '/tmp/banned_ips.conf';
+}
+
+/**
+ * 尝试 reload Nginx（www 权限不够时会失败，此时返回 need_cron=true）
+ */
+function _tryNginxReload(): array {
+    // 宝塔用 /www/server/nginx/sbin/nginx，Debian 用系统 nginx
+    $nginxBin = '/www/server/nginx/sbin/nginx';
+    if (!is_file($nginxBin)) $nginxBin = 'nginx';
+
+    // 1. nginx -t
+    $testOut = []; $testCode = 0;
+    exec($nginxBin . ' -t 2>&1', $testOut, $testCode);
+    if ($testCode !== 0) {
+        return ['ok' => false, 'need_cron' => false, 'detail' => implode("\n", $testOut)];
+    }
+
+    // 2. reload (www 可能没权限)
+    $reloadOut = []; $reloadCode = 0;
+    exec($nginxBin . ' -s reload 2>&1', $reloadOut, $reloadCode);
+    if ($reloadCode === 0) {
+        return ['ok' => true, 'need_cron' => false];
+    }
+
+    // 3. 尝试 systemctl / service
+    exec('systemctl reload nginx 2>&1 || service nginx reload 2>&1', $reloadOut2, $reloadCode2);
+    if ($reloadCode2 === 0) {
+        return ['ok' => true, 'need_cron' => false];
+    }
+
+    // 4. www 没权限 reload，写标记文件让 root cron 来做
+    $marker = '/tmp/nginx_reload_needed';
+    @file_put_contents($marker, date('Y-m-d H:i:s'));
+    return ['ok' => false, 'need_cron' => true, 'detail' => 'www 用户无权重载 Nginx，已写标记 ' . $marker . ' 等待 root cron'];
 }
 
 /**
@@ -866,15 +933,11 @@ function securityBanIp(string $ip): array {
     // 1. 验证 IP 格式
     if (!filter_var($ip, FILTER_VALIDATE_IP)) return ['ok' => false, 'message' => '无效 IP 格式'];
 
-    // 2. 找封禁清单文件（优先独立文件，避免污染站点配置）
-    $banFile = '/etc/nginx/conf.d/banned_ips.conf';
+    // 2. 找封禁清单文件（自动探测 BT Panel / Debian）
+    $banFile = _getBanFilePath();
     $configDir = dirname($banFile);
     if (!is_dir($configDir)) {
-        // 备用: 放到 sites-enabled 同目录
-        $siteConf = _findNginxSiteConfig();
-        if ($siteConf) {
-            $banFile = dirname($siteConf) . '/banned_ips.conf';
-        }
+        @mkdir($configDir, 0755, true);
     }
 
     // 3. 检查是否已封
@@ -889,44 +952,28 @@ function securityBanIp(string $ip): array {
     $rule = "deny $ip;\n";
     $result = @file_put_contents($banFile, $rule, FILE_APPEND | LOCK_EX);
     if ($result === false) {
-        return ['ok' => false, 'message' => "写入 $banFile 失败（权限问题？PHP 进程需要写权限）"];
+        return ['ok' => false, 'message' => "写入 $banFile 失败（权限问题？PHP 进程 www 需要目录写权限）"];
     }
 
-    // 5. 确保主配置 include 这个文件
-    $includeNeeded = false;
-    $mainConfig = _findNginxSiteConfig();
-    if ($mainConfig) {
-        $mainContent = @file_get_contents($mainConfig);
-        if ($mainContent !== false && stripos($mainContent, 'banned_ips.conf') === false) {
-            // 在 server { 块的右花括号前 include
-            if (preg_match('/server\s*\{/', $mainContent)) {
-                // 找最后一个 } 追加 include
-                $newContent = preg_replace_callback('/\}\s*$/', function ($m) use ($banFile) {
-                    return "    include " . escapeshellarg($banFile) . ";\n}\n";
-                }, $mainContent, 1);
-                @file_put_contents($mainConfig, $newContent);
-                $includeNeeded = true;
-            }
-        }
+    // 5. nginx -t + reload（用统一 helper）
+    $reload = _tryNginxReload();
+    if ($reload['ok']) {
+        return ['ok' => true, 'message' => "IP $ip 已封禁（$banFile），Nginx 已 reload"];
     }
-
-    // 6. nginx -t + reload
-    exec('nginx -t 2>&1', $testOut, $testCode);
-    if ($testCode !== 0) {
-        // 回滚
-        @file_put_contents($banFile, @file_get_contents($banFile) . "\n# AUTO-REMOVE: nginx test failed for $ip\n");
-        return ['ok' => false, 'message' => 'nginx -t 失败: ' . implode("\n", $testOut)];
+    if (!empty($reload['need_cron'])) {
+        // www 没权重载，但文件写成功了——标记已封禁，等 root cron 来 reload
+        return ['ok' => true, 'message' => "IP $ip 已写入封禁清单 $banFile ，等待 root cron 自动 reload Nginx"];
     }
-    exec('systemctl reload nginx 2>&1 || nginx -s reload 2>&1', $reloadOut, $reloadCode);
-
-    return ['ok' => true, 'message' => "IP $ip 已封禁（写 $banFile，nginx reload 成功）"];
+    // nginx -t 真的失败了 → 回滚
+    @file_put_contents($banFile, @file_get_contents($banFile) . "\n# AUTO-REMOVE: nginx test failed for $ip\n");
+    return ['ok' => false, 'message' => 'nginx -t 失败: ' . ($reload['detail'] ?? 'unknown')];
 }
 
 /**
  * 解除封禁
  */
 function securityUnbanIp(string $ip): array {
-    $banFile = '/etc/nginx/conf.d/banned_ips.conf';
+    $banFile = _getBanFilePath();
     if (!is_file($banFile)) return ['ok' => true, 'message' => '封禁清单不存在'];
 
     $content = @file_get_contents($banFile);
@@ -942,8 +989,14 @@ function securityUnbanIp(string $ip): array {
     if (!$found) return ['ok' => true, 'message' => "IP $ip 不在封禁清单中"];
 
     @file_put_contents($banFile, implode("\n", $filtered));
-    exec('nginx -t 2>&1 && (systemctl reload nginx 2>&1 || nginx -s reload 2>&1)', $out, $code);
-    return ['ok' => ($code === 0), 'message' => $code === 0 ? "IP $ip 已解封" : 'nginx reload 失败: ' . implode("\n", $out)];
+    $reload = _tryNginxReload();
+    if ($reload['ok']) {
+        return ['ok' => true, 'message' => "IP $ip 已解封，Nginx 已 reload"];
+    }
+    if (!empty($reload['need_cron'])) {
+        return ['ok' => true, 'message' => "IP $ip 已从 $banFile 移除，等待 root cron 自动 reload Nginx"];
+    }
+    return ['ok' => true, 'message' => "IP $ip 已从 $banFile 移除（nginx -t 失败: " . ($reload['detail'] ?? 'unknown') . '）'];
 }
 
 /**
