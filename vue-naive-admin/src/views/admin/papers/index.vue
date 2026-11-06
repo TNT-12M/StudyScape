@@ -91,7 +91,7 @@
         </n-space>
         <div class="preview-body" v-html="previewQ.content || ''"></div>
         <div v-if="hasOptions" class="preview-options">
-          <div v-for="(opt, k) in previewOptions" :key="k" class="preview-option"><b>{{ k }}.</b> {{ opt }}</div>
+          <div v-for="(opt, oi) in previewOptionsList" :key="oi" class="preview-option"><b>{{ letter(oi) }}.</b> <span v-html="opt" /></div>
         </div>
         <n-divider v-if="previewQ.explanation">解析</n-divider>
         <div v-if="previewQ.explanation" class="preview-body" v-html="previewQ.explanation"></div>
@@ -131,13 +131,25 @@ const subjectOptions = ref([])
 const columns = [{ title: 'ID', key: 'id', width: 70 }, { title: '试卷名称', key: 'name' }, { title: '题数', key: 'question_count', width: 75 }, { title: '时长', key: 'duration_minutes', render: row => `${row.duration_minutes} 分钟`, width: 100 }, { title: '状态', key: 'is_published', render: row => h(NTag, { type: row.is_published ? 'success' : 'warning' }, { default: () => row.is_published ? '已发布' : '草稿' }), width: 90 }, { title: '更新时间', key: 'updated_at', width: 170 }, { title: '操作', key: 'actions', width: 320, render: row => h(NSpace, null, { default: () => [h(NButton, { size: 'small', onClick: () => openEdit(row.id) }, { default: () => '编辑' }), h(NButton, { size: 'small', type: row.is_published ? 'warning' : 'success', loading: publishingId.value === row.id, onClick: () => togglePublish(row) }, { default: () => row.is_published ? '下架' : '发布' }), h(NButton, { size: 'small', type: 'error', loading: deletingId.value === row.id, onClick: () => removePaper(row) }, { default: () => '删除' })] }) }]
 function shortText(value) { return String(value || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) }
 function isTruncated(value) { return String(value || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().length > 80 }
+function letter(i) { return String.fromCharCode(65 + i) }
 function levelLabel(v) { return v === 'junior' ? '初中' : v === 'senior' ? '高中' : v || '' }
 async function loadSubjects() { try { const r = await phpQuestionsApi.subjects({}); subjectOptions.value = (r.data?.subjects || []).map(s => ({ label: s, value: s })) } catch (e) {} }
 function previewQuestion(q) { previewQ.value = q; showPreview.value = true }
 function removeFromPreview() { if (previewQ.value) { toggleQuestion(previewQ.value, false); showPreview.value = false } }
 function addFromPreview() { if (previewQ.value) { toggleQuestion(previewQ.value, true); showPreview.value = false } }
 const hasOptions = computed(() => previewQ.value && previewQ.value.options && Object.keys(previewQ.value.options).length > 0)
-const previewOptions = computed(() => previewQ.value && previewQ.value.options ? previewQ.value.options : {})
+const previewOptionsList = computed(() => {
+  if (!previewQ.value || !previewQ.value.options) return []
+  const opts = previewQ.value.options
+  // 兼容数组索引和对象键两种格式
+  if (Array.isArray(opts)) return opts
+  const keys = Object.keys(opts).sort((a, b) => {
+    const na = parseInt(a, 10), nb = parseInt(b, 10)
+    if (!isNaN(na) && !isNaN(nb)) return na - nb
+    return a.localeCompare(b)
+  })
+  return keys.map(k => opts[k])
+})
 const previewIsSelected = computed(() => previewQ.value ? selectedMap.value.has(previewQ.value.id) : false)
 async function loadPapers() { loading.value = true; try { papers.value = (await phpPapersApi.list({})).data?.papers || [] } catch (error) { message.error(error.message) } finally { loading.value = false } }
 async function loadPool() { poolLoading.value = true; try { const result = await phpQuestionsApi.list({ ...poolFilters, page: 1, page_size: 100, scope: 'manage_all' }); pool.value = result.data?.items || [] } catch (error) { message.error(error.message) } finally { poolLoading.value = false } }
