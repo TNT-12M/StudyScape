@@ -43,7 +43,9 @@
       <n-card title="题目列表" segmented>
         <template #header-extra>
           <NSpace>
-            <NButton :disabled="!selectedIds.length" @click="bulkCategory">
+            <NButton type="primary" quaternary @click="scanAllQuestions">
+              🔍 一键质检所有题目
+            </NButton><NButton :disabled="!selectedIds.length" @click="bulkCategory">
               批量改分类
             </NButton><NButton :disabled="!selectedIds.length" @click="bulkSubject">
               批量改学科
@@ -54,7 +56,7 @@
             </NButton>
           </NSpace>
         </template>
-        <n-data-table v-model:checked-row-keys="selectedIds" :columns="columns" :data="questions" :row-key="row => Number(row.id)" :loading="loading" :pagination="pagination" :scroll-x="1400" remote :expanded-row-keys="expandedRowKeys" @update:expanded-row-keys="keys => expandedRowKeys = keys" @update:page="handlePageChange" @update:page-size="handlePageSizeChange">
+        <n-data-table v-model:checked-row-keys="selectedIds" :columns="columns" :data="questions" :row-key="row => Number(row.id)" :loading="loading" :pagination="pagination" :scroll-x="1550" remote :expanded-row-keys="expandedRowKeys" @update:expanded-row-keys="keys => expandedRowKeys = keys" @update:page="handlePageChange" @update:page-size="handlePageSizeChange">
           <template #expanded-row="{ row }">
             <div class="expanded-content">
               <div class="expanded-section">
@@ -199,7 +201,20 @@ const previewContent = computed(() => {
   return renderRichText(content)
 })
 const rules = { subject: { required: true, message: '请输入科目' }, education_level: { required: true, message: '请选择学段' }, content: { required: true, message: '请输入题干' }, correct_answer: { required: true, message: '请输入答案' } }
-const columns = [{ type: 'selection' }, { title: '展开', key: 'expand', width: 60, render: row => h(NButton, { size: 'small', quaternary: true, onClick: () => toggleExpand(row.id) }, { default: () => expandedRowKeys.value.includes(row.id) ? '收起' : '展开' }) }, { title: 'ID', key: 'id', width: 70 }, { title: '科目', key: 'subject', width: 100 }, { title: '学段', key: 'education_level', render: row => row.education_level === 'senior' ? '高中' : '初中', width: 80 }, { title: '题型', key: 'question_type', render: row => labelOf(row.question_type), width: 100 }, { title: '题干摘要', key: 'content', width: 560, render: row => h('span', { class: 'question-summary', title: plainSummary(row.content, 240) }, plainSummary(row.content, 120)) }, { title: '难度', key: 'difficulty', width: 75 }, { title: '分值', key: 'points', width: 70 }, { title: '操作', key: 'actions', width: 150, render: row => h(NSpace, null, { default: () => [h(NButton, { size: 'small', onClick: () => openEdit(row.id) }, { default: () => '查看/编辑' }), h(NButton, { size: 'small', type: 'error', onClick: () => removeQuestion(row.id) }, { default: () => '删除' })] }) }]
+const columns = [{ type: 'selection' }, { title: '展开', key: 'expand', width: 60, render: row => h(NButton, { size: 'small', quaternary: true, onClick: () => toggleExpand(row.id) }, { default: () => expandedRowKeys.value.includes(row.id) ? '收起' : '展开' }) }, { title: 'ID', key: 'id', width: 70 }, { title: '科目', key: 'subject', width: 100 }, { title: '学段', key: 'education_level', render: row => row.education_level === 'senior' ? '高中' : '初中', width: 80 }, { title: '题型', key: 'question_type', render: row => labelOf(row.question_type), width: 100 }, { title: '题干摘要', key: 'content', width: 500, render: row => h('span', { class: 'question-summary', title: plainSummary(row.content, 240) }, plainSummary(row.content, 120)) }, { title: '难度', key: 'difficulty', width: 75 }, { title: '分值', key: 'points', width: 70 }, { title: '质量', key: 'quality', width: 130, render: row => {
+  const q = row.quality || 'good'
+  const map = { good: { type: 'success', label: '✅ 正常' }, poor: { type: 'warning', label: '⚠️ 瑕疵' }, trash: { type: 'error', label: '❌ 坏题' } }
+  const cfg = map[q] || map.good
+  const flagLabels = {
+    options_not_4_actual_3: '选项仅3个', options_not_4_actual_1: '选项仅1个',
+    formula_missing: '疑似公式丢失', bracket_mismatch: '括号不配对',
+    answer_empty: '答案为空', content_too_short: '题干过短', image_missing: '如图但无配图',
+    content_empty: '题干为空', ocr_residual: 'OCR残留', option_too_short: '选项过短', option_broken: '选项残缺',
+  }
+  const flags = row.quality_flags || []
+  const tooltip = flags.map(f => flagLabels[f] || f).join('、')
+  return h(NTag, { size: 'small', type: cfg.type, round: false }, { default: () => cfg.label, title: tooltip })
+} }, { title: '操作', key: 'actions', width: 200, render: row => h(NSpace, null, { default: () => [h(NButton, { size: 'small', onClick: () => openEdit(row.id) }, { default: () => '查看/编辑' }), h(NButton, { size: 'small', type: 'error', onClick: () => trashQuestion(row.id) }, { default: () => '移入回收站' })] }) }]
 
 function defaultForm() {
   return { subject: '', education_level: 'junior', category: 'single', question_type: 'single', content: '', options: ['', '', '', ''], correct_answer: '', explanation: '', difficulty: 3, points: 1 }
@@ -387,8 +402,33 @@ function removeQuestion(id) {
           message.error(err.message || '删除失败')
           return false // 保留对话框
         })
-    },
+    },  })
+}
+function trashQuestion(id) {
+  const qid = Number(id)
+  dialog.warning({
+    title: '移入回收站',
+    content: `将 ID ${qid} 的题目移入回收站（可恢复）。是否继续？`,
+    positiveText: '移入',
+    negativeText: '取消',
+    positiveButtonProps: { type: 'warning' },
+    onPositiveClick: () => {
+      return phpQuestionsApi.qualityTrash({ question_id: qid, reason: 'admin_manual' })
+        .then(() => { message.success('已移入回收站'); Promise.all([loadQuestions(), loadStats()]) })
+        .catch(err => { message.error(err.message || '操作失败'); return false })
+    }
   })
+}
+async function scanAllQuestions() {
+  try {
+    message.loading({ content: '质检中...', key: 'qscan' })
+    const r = await phpQuestionsApi.qualityScanAll()
+    const s = r.data?.stats || {}
+    message.success({ content: `质检完成: 正常${s.good||0} / 瑕疵${s.poor||0} / 坏题${s.trash||0}`, key: 'qscan', duration: 5000 })
+    Promise.all([loadQuestions(), loadStats()])
+  } catch (e) {
+    message.error({ content: e.message || '质检失败', key: 'qscan' })
+  }
 }
 async function bulkCategory() {
   const category = await chooseValue('修改分类', categoryOptions)

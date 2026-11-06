@@ -42,6 +42,10 @@ export const phpQuestionsApi = {
   bulkSubject: data => phpAction('bulk_update_question_subject', data),
   bulkRemove: data => phpAction('bulk_delete_questions', data),
   importOcr: data => phpAction('import_questions_json', data),
+  qualityScanAll: () => phpAction('quality_scan_all'),
+  qualityTrash: data => phpAction('quality_trash', data),
+  qualityRestore: data => phpAction('quality_restore', data),
+  qualityTrashList: data => phpAction('quality_trash_list', data, { bypassCsrf: true }),
 }
 
 export const phpPapersApi = {
