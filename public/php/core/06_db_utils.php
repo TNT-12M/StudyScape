@@ -460,6 +460,8 @@ try {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         file_name TEXT NOT NULL,
         stored_name TEXT NOT NULL,
+        file_hash TEXT,
+        file_size INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'queued',
         subject TEXT NOT NULL DEFAULT '',
         education_level TEXT NOT NULL DEFAULT 'junior',
@@ -472,10 +474,13 @@ try {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         finished_at DATETIME
     )");
-    // ALTER TABLE 兼容: 老库补 bridge_job_id
+    // ALTER TABLE 兼容: 老库补 bridge_job_id / file_hash / file_size
     try { $db->exec('ALTER TABLE ocr_import_batches ADD COLUMN bridge_job_id TEXT'); } catch (Throwable $ignored) {}
+    try { $db->exec('ALTER TABLE ocr_import_batches ADD COLUMN file_hash TEXT'); } catch (Throwable $ignored) {}
+    try { $db->exec('ALTER TABLE ocr_import_batches ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0'); } catch (Throwable $ignored) {}
     $db->exec("CREATE INDEX IF NOT EXISTS idx_ocr_batches_owner ON ocr_import_batches(created_by, id DESC)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_ocr_batches_status ON ocr_import_batches(status, updated_at)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_ocr_batches_hash ON ocr_import_batches(file_hash)");
 } catch (Exception $e) {
     error_log('OCR batch table init failed: ' . $e->getMessage());
 }

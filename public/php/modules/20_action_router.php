@@ -1172,6 +1172,21 @@ if ($action) {
                 $ext = strtolower(pathinfo((string)$file['name'], PATHINFO_EXTENSION));
                 if (!in_array($ext, ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff'], true)) jsonOut(false, '仅支持 PDF 或图片文件');
                 if ((int)$file['size'] > 50 * 1024 * 1024) jsonOut(false, '文件不能超过 50MB');
+
+                // ===== 第 1 层防线: 磁盘余量熔断（< 500MB 停止接收）=====
+                $diskFree = @disk_free_space(__DIR__ . '/../../../');
+                if ($diskFree !== false && $diskFree < 500 * 1024 * 1024) {
+                    jsonOut(false, '服务器磁盘空间不足（剩余 ' . round($diskFree / 1024 / 1024) . ' MB），请清理后再上传');
+                }
+
+                // ===== 第 2 层防线: 排队队列熔断（> 200 条 queued 暂停接收）=====
+                $queuedCount = (int)dbFetchOne($db, "SELECT COUNT(*) FROM ocr_import_batches WHERE status IN ('queued','running')")[0];
+                if ($queuedCount > 200) {
+                    jsonOut(false, "OCR 队列积压严重（当前排队 $queuedCount 条），请等处理完再上传");
+                }
+
+                // ===== 第 3 层防线: 同用户 + 同文件 MD5 去重 =====
+                // 先存临时文件才能算 hash，所以先 move 再 hash
                 $level = validateEducationLevel($_POST['education_level'] ?? 'junior');
                 $subject = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 $dir = __DIR__ . '/../../../data/ocr_batches';
@@ -1179,8 +1194,35 @@ if ($action) {
                 $stored = 'ocr_' . bin2hex(random_bytes(16)) . '.' . $ext;
                 $path = $dir . DIRECTORY_SEPARATOR . $stored;
                 if (!move_uploaded_file($file['tmp_name'], $path)) jsonOut(false, 'OCR 文件保存失败');
+
+                // 算文件 hash（用 tmp_name 已经 move 了，所以算 $path）
+                $fileHash = @hash_file('sha256', $path) ?: '';
+                $fileSize = filesize($path) ?: (int)$file['size'];
+
+                if ($fileHash) {
+                    // 同用户 24h 内有相同 hash 且未完成 → 拒绝
+                    $dup = dbFetchOne($db, "SELECT id, status, file_name FROM ocr_import_batches WHERE created_by=? AND file_hash=? AND status NOT IN ('completed','failed') AND created_at > datetime('now','-24 hours') LIMIT 1", [$uid, $fileHash]);
+                    if ($dup) {
+                        @unlink($path); // 删掉刚存的重复文件
+                        jsonOut(false, "文件与您 ID={$dup['id']} 的「{$dup['file_name']}」重复（状态:{$dup['status']}），请等处理完或去重后再传");
+                    }
+                    // 同文件 24h 内其他人传过且已完成 → 直接复用那条记录的结果（不重复 OCR）
+                    $doneDup = dbFetchOne($db, "SELECT id, status, file_name FROM ocr_import_batches WHERE file_hash=? AND status='completed' AND created_at > datetime('now','-24 hours') LIMIT 1", [$fileHash]);
+                    if ($doneDup) {
+                        @unlink($path);
+                        jsonOut(false, "该文件 24 小时内已由其他用户上传并处理完成（批次 ID={$doneDup['id']}，文件名:{$doneDup['file_name']}），无需重复提交");
+                    }
+                }
+
+                // ===== 第 4 层防线: 前端防连点 token（同一用户 5s 内只能提交 1 次）=====
+                $recent = dbFetchOne($db, "SELECT id FROM ocr_import_batches WHERE created_by=? AND created_at > datetime('now','-5 seconds') LIMIT 1", [$uid]);
+                if ($recent) {
+                    @unlink($path);
+                    jsonOut(false, '您的提交过于频繁，请 5 秒后再试');
+                }
+
                 $resultName = $stored . '.json';
-                dbQuery($db, 'INSERT INTO ocr_import_batches(file_name, stored_name, subject, education_level, created_by, status) VALUES(?,?,?,?,?,\'queued\')', [(string)$file['name'], $stored, $subject, $level, $uid]);
+                dbQuery($db, 'INSERT INTO ocr_import_batches(file_name, stored_name, file_hash, file_size, subject, education_level, created_by, status) VALUES(?,?,?,?,?,?,?,\'queued\')', [(string)$file['name'], $stored, $fileHash, $fileSize, $subject, $level, $uid]);
                 $batchId = (int)$db->lastInsertRowID();
                 $batch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [$batchId]);
                 startOcrWorker($batch ?: ['id' => $batchId, 'stored_name' => $stored, 'subject' => $subject, 'education_level' => $level]);
