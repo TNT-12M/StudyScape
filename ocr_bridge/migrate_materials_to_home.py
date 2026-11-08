@@ -116,7 +116,7 @@ def main():
         if bres.get("ok"):
             # 三重校验
             home_sha = bres.get("sha256", "")
-            if home_sha and not hashlib.compare_digest(sha, home_sha):
+            if home_sha and home_sha != sha:
                 print(f"  ❌ SHA256 不匹配 local={sha[:16]} home={home_sha[:16]}"); fail += 1; continue
             # 删本地
             try:
