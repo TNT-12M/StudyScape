@@ -95,7 +95,8 @@ async def ws_handshake(reader, writer):
 
     req_text = req_buf.decode("utf-8", errors="replace")
     lines = req_text.split("\r\n")
-    if not lines or "Upgrade: websocket" not in req_text.lower():
+    req_lower = req_text.lower()
+    if not lines or "upgrade: websocket" not in req_lower:
         # 非 WS → 伪装 404
         writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
         await writer.drain()
