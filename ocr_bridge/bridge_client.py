@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-StudyScape Bridge Client — OCR Worker (家里云 ssh home 运行)
-========================================================
-主动连接公网服务器 120.79.161.207:1200
+StudyScape Bridge Client — OCR Worker (家里云运行)
+================================================
+WebSocket 主动连接公网服务器 207.57.127.180:1200
 Challenge-Response 认证 → 保持长连接 → 收任务 → 调 MinerU pipeline → 回传 JSON
+
+★ 自实现 WebSocket (零第三方依赖, 纯 asyncio)
+★ 认证帧协议沿用原版: WebSocket text frame 直接承载 JSON
 
 自动重连: 指数退避 (2s → 4s → 8s → 最大 60s)
 心跳: 每 10s PING 一次
@@ -26,19 +29,28 @@ import struct
 import subprocess
 import logging
 import traceback
+import hashlib as _hashlib
+import base64 as _b64
 
 # ======================= 配置 =======================
-SERVER_HOST = "120.79.161.207"
+SERVER_HOST = "207.57.127.180"
 SERVER_PORT = 1200
 KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_key.txt")
 PIPELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "exam_pipeline.py")
 PDF_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export_pdf.py")
-PIPELINE_TIMEOUT = 300   # 单任务最大 5 分钟
+PIPELINE_TIMEOUT = 300
 
-# MinerU parse-server 挂起配置
+WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+OPCODE_TEXT = 0x01
+OPCODE_BINARY = 0x02
+OPCODE_CLOSE = 0x08
+OPCODE_PING = 0x09
+OPCODE_PONG = 0x0A
+
+# MinerU 挂起配置
 MINERU_SERVICE = "mineru-flash"
-MINERU_COLD_START_WAIT = 15   # MinerU 冷启动等 15s
-IDLE_SUSPEND_SECONDS = 300    # 5 分钟无任务自动挂起 MinerU
+MINERU_COLD_START_WAIT = 15
+IDLE_SUSPEND_SECONDS = 300
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,11 +60,10 @@ logging.basicConfig(
 log = logging.getLogger("bridge-client")
 
 # ======================= MinerU 挂起/拉起 =======================
-_mineru_last_task = 0  # 最后一次处理任务的时间戳
+_mineru_last_task = 0
 
 
 def _mineru_active():
-    """sudo systemctl is-active mineru-flash"""
     try:
         result = subprocess.run(
             ["sudo", "systemctl", "is-active", MINERU_SERVICE],
@@ -64,14 +75,12 @@ def _mineru_active():
 
 
 def _mineru_start():
-    """sudo systemctl start mineru-flash + 等冷启动"""
     if _mineru_active():
         return True
     log.info(f"  ⚡ 拉起 {MINERU_SERVICE} (冷启动等待 {MINERU_COLD_START_WAIT}s)...")
     try:
         subprocess.run(["sudo", "systemctl", "start", MINERU_SERVICE], timeout=10)
         time.sleep(MINERU_COLD_START_WAIT)
-        # 再确认一次
         if _mineru_active():
             log.info(f"  ✅ {MINERU_SERVICE} 已启动")
             return True
@@ -84,7 +93,6 @@ def _mineru_start():
 
 
 def _mineru_stop():
-    """sudo systemctl stop mineru-flash"""
     if not _mineru_active():
         return
     log.info(f"  💤 挂起 {MINERU_SERVICE} (空闲 {IDLE_SUSPEND_SECONDS}s)...")
@@ -95,7 +103,6 @@ def _mineru_stop():
 
 
 def _check_idle_suspend():
-    """主循环里定期调用: 空闲超时就挂起 MinerU"""
     if _mineru_active() and time.time() - _mineru_last_task > IDLE_SUSPEND_SECONDS:
         _mineru_stop()
 
@@ -108,27 +115,142 @@ if not os.path.exists(KEY_FILE):
 with open(KEY_FILE, "r") as f:
     SHARED_KEY = f.read().strip()
 
-# ======================= 帧协议 (和 server 一致) =======================
+
+# ======================= WebSocket 客户端 (自实现) =======================
+async def ws_connect(host, port):
+    """发起 WebSocket 连接 → 返回 (reader, writer)"""
+    reader, writer = await asyncio.open_connection(host, port)
+
+    # 生成随机 key
+    key_b64 = _b64.b64encode(secrets.token_bytes(16)).decode()
+
+    req = (
+        f"GET / HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Upgrade: websocket\r\n"
+        f"Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key_b64}\r\n"
+        f"Sec-WebSocket-Version: 13\r\n"
+        f"\r\n"
+    )
+    writer.write(req.encode())
+    await writer.drain()
+
+    # 读响应
+    resp_buf = b""
+    while b"\r\n\r\n" not in resp_buf:
+        chunk = await asyncio.wait_for(reader.read(4096), timeout=10)
+        if not chunk:
+            raise ConnectionError("服务器断开")
+        resp_buf += chunk
+        if len(resp_buf) > 8192:
+            break
+
+    resp_text = resp_buf.decode("utf-8", errors="replace")
+    if "101" not in resp_text.split("\r\n")[0] or "Sec-WebSocket-Accept" not in resp_text:
+        raise ConnectionError(f"握手失败: {resp_text[:200]}")
+
+    # 验证 Accept
+    expected = _b64.b64encode(
+        _hashlib.sha1((key_b64 + WS_MAGIC).encode()).digest()
+    ).decode()
+    for line in resp_text.split("\r\n"):
+        if line.lower().startswith("sec-websocket-accept:"):
+            actual = line.split(":", 1)[1].strip()
+            if actual != expected:
+                raise ConnectionError(f"Sec-WebSocket-Accept 不匹配")
+
+    return reader, writer
+
+
+async def _ws_send_frame(writer, opcode, payload, masked=True):
+    """写一个 WebSocket 帧
+    客户端必须 MASK → 生成随机 mask key"""
+    if isinstance(payload, str):
+        payload = payload.encode("utf-8")
+
+    length = len(payload)
+    frame = bytearray()
+    frame.append(0x80 | (opcode & 0x0F))  # FIN + opcode
+
+    mask_bit = 0x80 if masked else 0x00
+    if length < 126:
+        frame.append(mask_bit | length)
+    elif length < 65536:
+        frame.append(mask_bit | 126)
+        frame.extend(struct.pack(">H", length))
+    else:
+        frame.append(mask_bit | 127)
+        frame.extend(struct.pack(">Q", length))
+
+    if masked:
+        mask_key = secrets.token_bytes(4)
+        frame.extend(mask_key)
+        payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+    frame.extend(payload)
+    writer.write(bytes(frame))
+    await writer.drain()
+
+
+async def _ws_read_frame(reader):
+    """读一个 WebSocket 帧 (服务端发来的 → 不带 MASK)"""
+    hdr = await reader.readexactly(2)
+    opcode = hdr[0] & 0x0F
+    masked = (hdr[1] & 0x80) != 0
+    length = hdr[1] & 0x7F
+
+    if length == 126:
+        length = struct.unpack(">H", await reader.readexactly(2))[0]
+    elif length == 127:
+        length = struct.unpack(">Q", await reader.readexactly(8))[0]
+
+    mask_key = await reader.readexactly(4) if masked else b""
+    payload = await reader.readexactly(length) if length > 0 else b""
+
+    if masked and payload:
+        payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+    return opcode, payload
+
+
+async def _ws_text_recv(reader, writer):
+    """读 text frame, 返回 str (自动处理 ping/pong/close)"""
+    while True:
+        opcode, payload = await _ws_read_frame(reader)
+        if opcode == OPCODE_TEXT:
+            return payload.decode("utf-8")
+        elif opcode == OPCODE_PING:
+            await _ws_send_frame(writer, OPCODE_PONG, payload)
+        elif opcode == OPCODE_CLOSE:
+            # 回复 close
+            try:
+                await _ws_send_frame(writer, OPCODE_CLOSE, b"")
+            except:
+                pass
+            return None
+        elif opcode == OPCODE_PONG:
+            pass
+
+
+async def _ws_text_send(writer, text):
+    """发 text frame (客户端带 MASK)"""
+    await _ws_send_frame(writer, OPCODE_TEXT, text)
+
+
+# ======================= JSON 帧 (认证握手) =======================
 class FrameProto:
     @staticmethod
-    async def recv(reader):
-        hdr = await reader.readexactly(4)
-        size = struct.unpack(">I", hdr)[0]
-        if size == 0:
+    async def recv(reader, writer):
+        text = await _ws_text_recv(reader, writer)
+        if text is None:
             return None
-        buf = b""
-        while len(buf) < size:
-            chunk = await reader.read(size - len(buf))
-            if not chunk:
-                return None
-            buf += chunk
-        return json.loads(buf.decode("utf-8"))
+        return json.loads(text)
 
     @staticmethod
     async def send(writer, obj):
-        data = json.dumps(obj).encode("utf-8")
-        writer.write(struct.pack(">I", len(data)) + data)
-        await writer.drain()
+        text = json.dumps(obj)
+        await _ws_text_send(writer, text)
 
 
 # ======================= Worker 主循环 =======================
@@ -138,17 +260,18 @@ async def run_worker():
 
     while True:
         try:
-            log.info(f"连接 {SERVER_HOST}:{SERVER_PORT} ...")
-            reader, writer = await asyncio.open_connection(SERVER_HOST, SERVER_PORT)
+            log.info(f"🔌 WebSocket 连接 {SERVER_HOST}:{SERVER_PORT} ...")
+            reader, writer = await ws_connect(SERVER_HOST, SERVER_PORT)
 
-            # --- 认证 ---
+            # --- Challenge-Response 认证 ---
             nonce_client = secrets.token_hex(16)
             await FrameProto.send(writer, {"type": "HANDSHAKE", "nonce": nonce_client})
 
-            msg = await asyncio.wait_for(FrameProto.recv(reader), timeout=5)
+            msg = await asyncio.wait_for(FrameProto.recv(reader, writer), timeout=10)
             if not msg or msg.get("type") != "CHALLENGE":
                 log.error("服务端无 challenge")
-                break
+                writer.close()
+                continue
 
             nonce_server = msg.get("nonce", "")
             mac = hmac.new(SHARED_KEY.encode(),
@@ -156,35 +279,35 @@ async def run_worker():
                            hashlib.sha256).hexdigest()
             await FrameProto.send(writer, {"type": "AUTH", "hmac": mac})
 
-            msg = await asyncio.wait_for(FrameProto.recv(reader), timeout=5)
+            msg = await asyncio.wait_for(FrameProto.recv(reader, writer), timeout=10)
             if not msg or msg.get("type") != "OK":
                 log.error("认证失败!")
-                break
+                writer.close()
+                continue
 
             log.info("✅ 认证通过, 等待任务 ...")
             backoff = 2
 
             loop_lock = asyncio.Lock()
-
-            # --- 主循环: 心跳 + 收任务 + idle 检查 ---
             last_ping = 0
             last_idle_check = 0
+
             while True:
                 now = time.time()
 
-                # 发心跳
                 if now - last_ping > 10:
-                    await FrameProto.send(writer, {"type": "PING"})
+                    try:
+                        await FrameProto.send(writer, {"type": "PING"})
+                    except Exception:
+                        break
                     last_ping = now
 
-                # ★ 每 60s 检查一次空闲挂起
                 if now - last_idle_check > 60:
                     _check_idle_suspend()
                     last_idle_check = now
 
-                # 等消息 (20s 超时)
                 try:
-                    msg = await asyncio.wait_for(FrameProto.recv(reader), timeout=20)
+                    msg = await asyncio.wait_for(FrameProto.recv(reader, writer), timeout=20)
                 except asyncio.TimeoutError:
                     continue
 
@@ -201,8 +324,7 @@ async def run_worker():
                     jid = msg.get("job_id")
                     task_data = msg.get("data", {})
                     log.info(f"📥 收到任务 {jid}: {task_data.get('filename', '?')}")
-                    # 串行处理: 上一个任务没完成就等
-                    asyncio.create_task(handle_task(writer, jid, task_data, loop_lock))
+                    asyncio.create_task(handle_task(writer, reader, jid, task_data, loop_lock))
 
                 elif mtype == "CLOSE":
                     log.info("服务端关闭连接")
@@ -213,19 +335,17 @@ async def run_worker():
         except Exception as e:
             log.error(f"连接异常: {e}")
 
-        # 重连 (指数退避)
+        # 重连
         log.info(f"{backoff}s 后重连 ...")
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, max_backoff)
 
 
 # ======================= 任务处理 =======================
-async def handle_task(writer, job_id, task_data, lock):
-    """串行处理一个任务 — 按 task_type 分发"""
+async def handle_task(writer, reader, job_id, task_data, lock):
     global _mineru_last_task
     async with lock:
         task_type = task_data.get("task_type", "ocr_pipeline")
-
         if task_type == "export_pdf":
             await _handle_export_pdf(writer, job_id, task_data)
         else:
@@ -233,12 +353,10 @@ async def handle_task(writer, job_id, task_data, lock):
 
 
 async def _handle_export_pdf(writer, job_id, task_data):
-    """导出 PDF — 纯 CPU 任务, 不需要 MinerU"""
     try:
-        _mineru_last_task = time.time()  # 也算活跃
+        _mineru_last_task = time.time()
         export_input = task_data.get("export_input", {})
 
-        # 写临时 JSON → 跑 export_pdf.py → 读 PDF → base64
         tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_jobs")
         os.makedirs(tmpdir, exist_ok=True)
         tmp_in = os.path.join(tmpdir, f"{job_id}_export.json")
@@ -264,13 +382,12 @@ async def _handle_export_pdf(writer, job_id, task_data):
         with open(tmp_out, "rb") as f:
             pdf_b64 = base64.b64encode(f.read()).decode()
 
-        # 清理
         for p in (tmp_in, tmp_out):
             try: os.remove(p)
             except: pass
 
         await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "result": {"pdf_b64": pdf_b64}})
-        log.info(f"  ✅ {job_id} PDF 生成 OK ({len(pdf_b64)//1024}KB base64)")
+        log.info(f"  ✅ {job_id} PDF 生成 OK")
 
     except Exception as e:
         log.error(f"  {job_id} export_pdf: {e}\n{traceback.format_exc()}")
@@ -281,26 +398,22 @@ async def _handle_export_pdf(writer, job_id, task_data):
 
 
 async def _handle_ocr(writer, job_id, task_data):
-    """OCR Pipeline 任务 — MinerU 解析 + 题目构建"""
     global _mineru_last_task
-    _mineru_last_task = time.time()  # 更新活跃时间
+    _mineru_last_task = time.time()
     try:
         filename = task_data.get("filename", "unknown.pdf")
         file_b64 = task_data.get("file_b64", "")
         subject = task_data.get("subject", "")
         education_level = task_data.get("education_level", "")
 
-        # ★ 上报阶段: MinerU 解析中
         await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "mineru_starting"})
 
-        # ★ MinerU 挂起中就拉起 (冷启动可能 10-20s)
         loop = asyncio.get_event_loop()
         miner_ok = await loop.run_in_executor(None, _mineru_start)
         if not miner_ok:
             await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "MinerU parse-server 启动失败"})
             return
 
-        # 写临时文件
         tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_jobs")
         os.makedirs(tmpdir, exist_ok=True)
         tmp_in = os.path.join(tmpdir, f"{job_id}_{filename}")
@@ -311,10 +424,8 @@ async def _handle_ocr(writer, job_id, task_data):
 
         log.info(f"  处理 {filename} ({len(file_b64)//1024}KB base64) → {tmp_in}")
 
-        # ★ 上报阶段: Pipeline 已启动, MinerU 正在上传
         await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "mineru_uploading"})
 
-        # 调用 exam_pipeline.py
         proc = await asyncio.create_subprocess_exec(
             sys.executable, PIPELINE_SCRIPT,
             tmp_in,
@@ -326,15 +437,11 @@ async def _handle_ocr(writer, job_id, task_data):
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # ★ 逐行解析 pipeline stdout → 发细粒度 PROGRESS
-        # exam_pipeline.py print 格式: [MinerU] xxx / [Flatten] xxx / [Group] xxx / [Validate] xxx
-        # ★ 整个 stdout 循环 + proc.wait 都包在 PIPELINE_TIMEOUT 内, 防止 MinerU 挂起导致永远卡死
         _prev_stage = None
-        _progress_lines = []  # 收集关键行用于日志
-        _stdout_done = asyncio.Event()
+        _progress_lines = []
 
         async def _read_stdout():
-            nonlocal _prev_stage, _progress_lines
+            nonlocal _prev_stage
             try:
                 async for raw_line in proc.stdout:
                     line = raw_line.decode("utf-8", errors="replace").strip()
@@ -342,65 +449,42 @@ async def _handle_ocr(writer, job_id, task_data):
                         continue
                     _progress_lines.append(line)
                     if len(_progress_lines) > 30:
-                        _progress_lines = _progress_lines[-30:]
-
+                        _progress_lines[-30:]
                     new_stage = None
                     progress_hint = None
-
                     if "[MinerU] 提交" in line:
                         new_stage = "mineru_uploading"
-                    elif "[MinerU] job_id=" in line or ("轮询" in line and "MinerU" not in _prev_stage):
+                    elif "[MinerU] job_id=" in line:
                         new_stage = "mineru_parsing"
-                    elif "[MinerU]" in line and "/" in line and ("(" in line or "页" in line or "/" in line):
+                    elif "[MinerU]" in line and "/" in line:
                         new_stage = "mineru_parsing"
                         m = __import__("re").search(r'(\d+)/(\d+)', line)
-                        if m:
-                            progress_hint = f"{m.group(1)}/{m.group(2)} 页"
-                    elif "[MinerU] ✅ 完成" in line or "[MinerU] 下载" in line:
-                        new_stage = "mineru_downloading"
-                    elif "[MinerU] ✅ PageJSON" in line or "[MinerU] ✅ zip" in line or "[MinerU] ✅ zip 解压" in line:
+                        if m: progress_hint = f"{m.group(1)}/{m.group(2)} 页"
+                    elif "[MinerU] ✅" in line or "[Flatten] ✅" in line:
                         new_stage = "flatten_blocks"
-                    elif "[MinerU] ✅" in line:
-                        new_stage = "flatten_blocks"
-                    elif "[Flatten] ✅" in line:
+                    elif "[Group] ✅" in line:
                         new_stage = "group_questions"
-                    elif "[Group] ✅ 切出" in line:
-                        new_stage = "validate_questions"
                         m = __import__("re").search(r'切出 (\d+) 道', line)
                         if m: progress_hint = f"识别出 {m.group(1)} 道"
                     elif "[Validate]" in line and "✅" in line:
                         new_stage = "done"
-                    elif "[MinerU] 完成" in line:
-                        new_stage = "mineru_downloading"
-
                     if new_stage and (new_stage != _prev_stage or progress_hint):
-                        payload = {"type": "PROGRESS", "job_id": job_id, "stage": new_stage}
-                        if progress_hint:
-                            payload["progress"] = progress_hint
-                        await FrameProto.send(writer, payload)
+                        await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": new_stage, "progress": progress_hint or ""})
                         _prev_stage = new_stage
-                        log.info(f"  📊 {job_id} → {new_stage}{' ('+progress_hint+')' if progress_hint else ''}")
-            finally:
-                _stdout_done.set()
+            except Exception as e:
+                log.warning(f"stdout reader 异常: {e}")
 
         reader_task = asyncio.create_task(_read_stdout())
 
         try:
-            # ★ 总超时 PIPELINE_TIMEOUT (300s), 保护整个 stdout 循环 + proc.wait
             await asyncio.wait_for(proc.wait(), PIPELINE_TIMEOUT)
         except asyncio.TimeoutError:
             log.error(f"  pipeline timeout ({PIPELINE_TIMEOUT}s) — 杀进程")
             proc.kill()
             await proc.wait()
-            # 等 stdout reader 收尾
-            try:
-                await asyncio.wait_for(reader_task, 5)
-            except:
-                reader_task.cancel()
             await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": f"pipeline timeout ({PIPELINE_TIMEOUT}s)"})
             return
 
-        # 进程结束后, 等 stdout reader 把最后几行读完 (最多 10s)
         try:
             await asyncio.wait_for(reader_task, 10)
         except asyncio.TimeoutError:
@@ -410,14 +494,11 @@ async def _handle_ocr(writer, job_id, task_data):
 
         if proc.returncode != 0:
             stderr = (await proc.stderr.read()).decode()
-            log.error(f"  pipeline rc={proc.returncode}: {stderr[:500]}")
             await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": f"pipeline rc={proc.returncode}: {stderr[:200]}"})
             return
 
-        # ★ 上报阶段: 完成
         await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "done"})
 
-        # 读结果
         if not os.path.exists(tmp_out):
             await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "pipeline no output file"})
             return
@@ -429,7 +510,6 @@ async def _handle_ocr(writer, job_id, task_data):
         qcount = len(result.get("questions", []))
         log.info(f"  ✅ {job_id} 完成 → {qcount} 道题")
 
-        # 清理
         for p in (tmp_in, tmp_out):
             try: os.remove(p)
             except: pass

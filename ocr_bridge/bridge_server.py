@@ -4,20 +4,25 @@
 StudyScape Bridge Server — OCR Relay (公网服务器运行)
 ===================================================
 双监听 (asyncio):
-  1. 0.0.0.0:1200  TCP  — 接受家里云 Worker 主动连接
-                         Challenge-Response 认证 (HMAC-SHA256)
-                         未认证连接 → 伪装 HTTP 404 后关闭
+  1. 0.0.0.0:1200  WebSocket — 家里云 Worker 主动连接
+                                Challenge-Response 认证 (HMAC-SHA256)
+                                非 WS 连接 → 伪装 HTTP 404 后关闭
 
   2. 127.0.0.1:1201 HTTP — 只允许 PHP-FPM localhost 提交任务
-     POST /upload       {job_id, filename, file_b64, ...} → 入队
+     POST /upload       {filename, file_b64, ...} → 入队
+     POST /export_pdf   {export_input} → 家里云生成 PDF
      GET  /status/{id}  返回任务状态 + 结果 JSON
+     GET  /health       健康检查
 
 链路:
-  家里云 Worker ──TCP(1200)──▶ bridge_server ──队列──▶ PHP-FPM ──HTTP(1201)──▶ admin 页面
+  家里云 Worker ──WebSocket(1200)──▶ bridge_server ──队列──▶ PHP-FPM ──HTTP(1201)──▶ admin
        ▲                                                          │
        └────── 返回 JSON 结果 ◀───────────────────────────────────┘
 
-启动: systemctl start studyscape-bridge (公网服务器)
+★ 自实现 WebSocket (零第三方依赖, 纯 asyncio)
+★ 认证帧协议沿用原版: [4字节 big-endian 长度][JSON payload]
+
+启动: systemctl start studyscape-bridge (公网服务器 207.57.127.180)
 """
 
 import asyncio
@@ -30,19 +35,29 @@ import secrets
 import struct
 import base64
 import logging
+import hashlib as _hashlib
+import base64 as _b64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 # ======================= 配置 =======================
-TCP_PORT = 1200          # Worker 连接端口 (公网)
+WS_PORT = 1200           # Worker WebSocket 端口 (公网)
 HTTP_PORT = 1201         # PHP 本地接口 (仅 localhost)
 KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_key.txt")
 WORKER_TIMEOUT = 30      # Worker 心跳超时 (秒)
-RESULT_TTL = 14400        # done/failed 结果保留 4h 后清
-QUEUED_TIMEOUT = 600      # queued 10min 没被 worker 取 → failed
-QUEUED_MAX_HOURS = 2      # queued 超过 2h 直接清（不想等 worker 了）
-PDF_CACHE_TTL = 3600      # _pdf_cache 1h 没被访问就删
-MAX_QUEUED = 50           # 队列上限，超过拒绝新任务
+RESULT_TTL = 14400       # done/failed 结果保留 4h 后清
+QUEUED_TIMEOUT = 600     # queued 10min 没被 worker 取 → failed
+QUEUED_MAX_HOURS = 2     # queued 超过 2h 直接清
+PDF_CACHE_TTL = 3600     # _pdf_cache 1h 没被访问就删
+MAX_QUEUED = 50          # 队列上限
+
+# WebSocket 魔数
+WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+OPCODE_TEXT = 0x01
+OPCODE_BINARY = 0x02
+OPCODE_CLOSE = 0x08
+OPCODE_PING = 0x09
+OPCODE_PONG = 0x0A
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,51 +79,158 @@ if len(SHARED_KEY) < 32:
     log.error("密钥太短 (需要 >= 32 字符)")
     raise SystemExit(1)
 
-# ======================= 帧协议 =======================
+
+# ======================= WebSocket 握手 + 帧 =======================
+async def ws_handshake(reader, writer):
+    """读 HTTP Upgrade 请求 → 回 101 → 返回 (子协议, None 表示握手失败已关闭)"""
+    # 读请求头 (最多 8KB)
+    req_buf = b""
+    while b"\r\n\r\n" not in req_buf:
+        chunk = await asyncio.wait_for(reader.read(4096), timeout=5)
+        if not chunk:
+            return None
+        req_buf += chunk
+        if len(req_buf) > 8192:
+            return None
+
+    req_text = req_buf.decode("utf-8", errors="replace")
+    lines = req_text.split("\r\n")
+    if not lines or "Upgrade: websocket" not in req_text.lower():
+        # 非 WS → 伪装 404
+        writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        writer.close()
+        return None
+
+    # 找 Sec-WebSocket-Key
+    ws_key = None
+    for line in lines[1:]:
+        if line.lower().startswith("sec-websocket-key:"):
+            ws_key = line.split(":", 1)[1].strip()
+            break
+
+    if not ws_key:
+        writer.close()
+        return None
+
+    # 计算 Sec-WebSocket-Accept
+    accept_key = _b64.b64encode(
+        _hashlib.sha1((ws_key + WS_MAGIC).encode()).digest()
+    ).decode()
+
+    resp = (
+        b"HTTP/1.1 101 Switching Protocols\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Sec-WebSocket-Accept: " + accept_key.encode() + b"\r\n"
+        b"\r\n"
+    )
+    writer.write(resp)
+    await writer.drain()
+    return "ws"
+
+
+async def ws_read_frame(reader):
+    """读一个 WebSocket 帧, 返回 (opcode, payload_bytes)
+    自动处理 MASK (客户端发来的帧必带 MASK)"""
+    hdr = await reader.readexactly(2)
+    opcode = hdr[0] & 0x0F
+    masked = (hdr[1] & 0x80) != 0
+    length = hdr[1] & 0x7F
+
+    if length == 126:
+        length_bytes = await reader.readexactly(2)
+        length = struct.unpack(">H", length_bytes)[0]
+    elif length == 127:
+        length_bytes = await reader.readexactly(8)
+        length = struct.unpack(">Q", length_bytes)[0]
+
+    mask_key = await reader.readexactly(4) if masked else b""
+    payload = await reader.readexactly(length) if length > 0 else b""
+
+    if masked and payload:
+        payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+    return opcode, payload
+
+
+async def ws_write_frame(writer, opcode, payload_bytes):
+    """写一个 WebSocket 帧 (服务端发 → 不带 MASK)"""
+    length = len(payload_bytes)
+    frame = bytearray()
+    frame.append(0x80 | (opcode & 0x0F))  # FIN + opcode
+    if length < 126:
+        frame.append(length)
+    elif length < 65536:
+        frame.append(126)
+        frame.extend(struct.pack(">H", length))
+    else:
+        frame.append(127)
+        frame.extend(struct.pack(">Q", length))
+    frame.extend(payload_bytes)
+    writer.write(bytes(frame))
+    await writer.drain()
+
+
+async def ws_text_recv(reader):
+    """读一个 text frame, 返回 str (自动处理 ping/pong/close)"""
+    while True:
+        opcode, payload = await ws_read_frame(reader)
+        if opcode == OPCODE_TEXT:
+            return payload.decode("utf-8")
+        elif opcode == OPCODE_BINARY:
+            return payload  # 暂不支持 binary payload, 但也不拒绝
+        elif opcode == OPCODE_PING:
+            await ws_write_frame(writer, OPCODE_PONG, payload)
+        elif opcode == OPCODE_CLOSE:
+            return None  # 告诉上层连接关了
+        elif opcode == OPCODE_PONG:
+            pass
+
+
+async def ws_text_send(writer, text):
+    """发一个 text frame"""
+    await ws_write_frame(writer, OPCODE_TEXT, text.encode("utf-8"))
+
+
+# ======================= 认证帧协议 (沿用原版) =======================
 # 帧 = [4字节 big-endian 长度][JSON payload]
 # 认证握手:
 #   Worker → Server  : HANDSHAKE {nonce_client}
 #   Server → Worker  : CHALLENGE {nonce_server}
-#   Worker → Server  : AUTH {hmac}  hmac = HMAC-SHA256(key, nonce_client + nonce_server)
+#   Worker → Server  : AUTH {hmac}
 #   Server → Worker  : OK  / FAIL
 
 class FrameProto:
+    """JSON 帧 — 通过 WebSocket text frame 承载"""
     @staticmethod
     async def recv(reader):
-        hdr = await reader.readexactly(4)
-        size = struct.unpack(">I", hdr)[0]
-        if size == 0:
+        text = await ws_text_recv(reader)
+        if text is None:
             return None
-        buf = b""
-        while len(buf) < size:
-            chunk = await reader.read(size - len(buf))
-            if not chunk:
-                return None
-            buf += chunk
-        return json.loads(buf.decode("utf-8"))
+        # WebSocket text frame 直接就是 JSON (不再有 4 字节长度头)
+        return json.loads(text)
 
     @staticmethod
     async def send(writer, obj):
-        data = json.dumps(obj).encode("utf-8")
-        writer.write(struct.pack(">I", len(data)) + data)
-        await writer.drain()
+        text = json.dumps(obj).encode("utf-8")
+        await ws_write_frame(writer, OPCODE_TEXT, text)
 
 
-# ======================= 全局状态 =======================
+# ======================= 全局状态 (完全沿用原版) =======================
 class BridgeState:
     def __init__(self, persist_dir=None):
         self.worker_reader = None
         self.worker_writer = None
         self.worker_last_ping = 0
         self.worker_lock = asyncio.Lock()
-        self.queue = {}     # job_id → job dict
+        self.queue = {}
         self.next_id = 0
         self.lock = asyncio.Lock()
         if persist_dir is None:
             persist_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_bridge_jobs")
         self.persist_dir = persist_dir
         os.makedirs(self.persist_dir, exist_ok=True)
-        # ★ data 文件单独存目录（不内嵌 JSON）
         self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_job_files")
         os.makedirs(self.data_dir, exist_ok=True)
         self._load_persisted()
@@ -117,23 +239,15 @@ class BridgeState:
         return os.path.join(self.persist_dir, f"{jid}.json")
 
     def _data_file(self, jid):
-        """queued/processing 状态的 base64 data 单独存这里"""
         return os.path.join(self.data_dir, f"{jid}.b64")
 
     def _persist(self, jid, job):
-        """
-        存盘策略:
-        - queued/processing: base64 data 写 _data_file(jid).b64，job JSON 里只保留 data_size + data_path
-        - done/failed: 完全移除 data (已 finish，结果里不含原始文件)，也不存 result 全文
-        """
         status = job.get("status", "")
         fp = self._job_file(jid)
 
         if status in ("queued", "processing"):
-            # 把 data 抽到外部文件
             data_val = job.get("data")
             if data_val and isinstance(data_val, dict) and data_val.get("file_b64"):
-                # 写外部文件（幂等：已存在就跳过）
                 data_fp = self._data_file(jid)
                 if not os.path.exists(data_fp):
                     try:
@@ -141,17 +255,14 @@ class BridgeState:
                             f.write(data_val["file_b64"])
                     except Exception as e:
                         log.warning(f"data 抽取失败 {jid}: {e}")
-                # job JSON 只存元信息
                 slim = dict(job)
-                slim["data"] = None           # 清空内嵌 data
-                slim["data_path"] = data_fp   # 指向外部文件
+                slim["data"] = None
+                slim["data_path"] = data_fp
                 slim["data_size"] = len(data_val["file_b64"])
             else:
                 slim = job
         else:
-            # done/failed: 全精简（不存 data，也不存 result 全文）
             slim = {k: v for k, v in job.items() if k not in ("data", "result")}
-            # 删 data 文件
             data_fp = self._data_file(jid)
             if os.path.exists(data_fp):
                 try: os.remove(data_fp)
@@ -164,7 +275,6 @@ class BridgeState:
             log.warning(f"持久化失败 {jid}: {e}")
 
     def _load_data(self, jid, job):
-        """从外部文件把 data 读回 job（供 push_task/dequeue 使用）"""
         data_path = job.get("data_path")
         if not data_path:
             return job
@@ -188,11 +298,6 @@ class BridgeState:
                 pass
 
     def _load_persisted(self):
-        """启动时从磁盘加载遗留 jobs
-        
-        processing 状态的 job 在 bridge 重启后 worker 那边也丢了 → 改 failed
-        queued 的继续等 worker 拉
-        """
         loaded = 0
         try:
             for fn in os.listdir(self.persist_dir):
@@ -220,7 +325,6 @@ class BridgeState:
 
     async def enqueue(self, job):
         async with self.lock:
-            # 有界队列检查
             queued_count = sum(1 for j in self.queue.values() if j["status"] in ("queued", "processing"))
             if queued_count >= MAX_QUEUED:
                 raise RuntimeError(f"queue full ({queued_count}/{MAX_QUEUED})")
@@ -234,7 +338,6 @@ class BridgeState:
         return jid
 
     async def dequeue(self):
-        """Worker 拉取一个待处理任务。返回 (jid, job_data) 或 None"""
         async with self.lock:
             queued_sorted = sorted(
                 [(jid, job) for jid, job in self.queue.items() if job["status"] == "queued"],
@@ -260,7 +363,6 @@ class BridgeState:
                 self._persist(jid, self.queue[jid])
 
     async def update_stage(self, jid, stage, progress=""):
-        """Worker 上报进度阶段 + 可选进度提示 (如 '3/10 页')"""
         async with self.lock:
             if jid in self.queue:
                 self.queue[jid]["stage"] = stage
@@ -273,7 +375,6 @@ class BridgeState:
             job = self.queue.get(jid)
             if not job:
                 return None
-            # 计算队列位置: 当前 processing = 0, queued 按 enqueued_at 排
             qpos = 0
             if job["status"] == "queued":
                 all_queued = sorted(
@@ -286,7 +387,6 @@ class BridgeState:
                         break
             out = dict(job)
             out["queue_position"] = qpos
-            # 不回传 data (base64)
             out.pop("data", None)
             return out
 
@@ -304,11 +404,9 @@ class BridgeState:
                     enqueued_at = job.get("enqueued_at", 0)
                     waited = now - enqueued_at
                     if waited > QUEUED_MAX_HOURS * 3600:
-                        # 超过 2h 直接清掉（worker 挂了也不想等）
                         log.warning(f"🗑️ {jid} queued {int(waited)}s > {QUEUED_MAX_HOURS}h, 丢弃")
                         to_delete.append(jid)
                     elif waited > QUEUED_TIMEOUT:
-                        # 10min 没被 worker 取走 → failed
                         job["status"] = "failed"
                         job["error"] = "timeout: worker unavailable"
                         job["finished_at"] = now
@@ -318,7 +416,6 @@ class BridgeState:
                 self._delete_persist(jid)
 
     async def cleanup_pdf_cache(self):
-        """清 _pdf_cache/ 里过期的 PDF (1h 没被访问)"""
         if not os.path.isdir(PDF_CACHE_DIR):
             return
         now = time.time()
@@ -336,7 +433,6 @@ class BridgeState:
             log.info(f"🧹 _pdf_cache 清理 {freed//1024}KB")
 
     async def push_task(self, jid):
-        """把 queue 里的 jid 任务推给当前 worker"""
         async with self.worker_lock:
             if not self.worker_writer:
                 return False
@@ -348,7 +444,6 @@ class BridgeState:
                 job["started_at"] = time.time()
                 job["stage"] = "mineru_starting"
                 self._persist(jid, job)
-            # ★ 把外部文件的 data 读回来再发给 worker
             job_to_send = self._load_data(jid, dict(job))
             await FrameProto.send(self.worker_writer, {
                 "type": "TASK",
@@ -361,13 +456,11 @@ class BridgeState:
 
 STATE = BridgeState()
 
-# PDF 缓存目录 (给 api.php 直接读)
 PDF_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_pdf_cache")
 os.makedirs(PDF_CACHE_DIR, exist_ok=True)
 
 
 def _save_pdf(jid, pdf_b64):
-    """把 worker 回传的 PDF base64 落盘"""
     try:
         raw = base64.b64decode(pdf_b64)
         fp = os.path.join(PDF_CACHE_DIR, f"{jid}.pdf")
@@ -377,27 +470,33 @@ def _save_pdf(jid, pdf_b64):
     except Exception as e:
         log.warning(f"  PDF 落盘失败 {jid}: {e}")
 
-# ======================= TCP 认证 =======================
+
+# ======================= WebSocket Worker 处理 =======================
 async def handle_worker(reader, writer):
     addr = writer.get_extra_info("peername")
-    log.info(f"TCP 连接来自 {addr}")
+    log.info(f"WS 连接来自 {addr}")
+
+    # --- WebSocket 握手 ---
+    ok = await ws_handshake(reader, writer)
+    if ok is None:
+        log.warning(f"  {addr} 握手失败 → 关闭")
+        try: writer.close()
+        except: pass
+        return
 
     # --- Challenge-Response 认证 ---
     try:
         # Step 1: 等 Worker 发 HANDSHAKE
-        msg = await asyncio.wait_for(FrameProto.recv(reader), timeout=5)
+        msg = await asyncio.wait_for(FrameProto.recv(reader), timeout=10)
         if not msg or msg.get("type") != "HANDSHAKE":
-            # 伪装成 HTTP 404 让扫端口的人以为是 HTTP server 但路径错了
-            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            await writer.drain()
+            log.warning(f"  {addr} 非 HANDSHAKE → 关闭")
+            await ws_write_frame(writer, OPCODE_CLOSE, b"")
             writer.close()
-            log.warning(f"  {addr} 非 HANDSHAKE, 返回 HTTP 404 后关闭")
             return
 
         nonce_client = msg.get("nonce", "")
         if not nonce_client or len(nonce_client) < 8:
             writer.close()
-            log.warning(f"  {addr} 非法 nonce")
             return
 
         # Step 2: Server 发 CHALLENGE
@@ -405,10 +504,9 @@ async def handle_worker(reader, writer):
         await FrameProto.send(writer, {"type": "CHALLENGE", "nonce": nonce_server})
 
         # Step 3: 等 AUTH
-        msg = await asyncio.wait_for(FrameProto.recv(reader), timeout=5)
+        msg = await asyncio.wait_for(FrameProto.recv(reader), timeout=10)
         if not msg or msg.get("type") != "AUTH":
             writer.close()
-            log.warning(f"  {addr} 非 AUTH")
             return
 
         client_hmac = msg.get("hmac", "")
@@ -427,7 +525,6 @@ async def handle_worker(reader, writer):
 
         async with STATE.worker_lock:
             if STATE.worker_writer:
-                # 踢掉旧 worker
                 try: STATE.worker_writer.close()
                 except: pass
             STATE.worker_reader = reader
@@ -460,7 +557,6 @@ async def handle_worker(reader, writer):
                         result = msg.get("result")
                         error = msg.get("error")
                         await STATE.set_result(jid, result, error)
-                        # PDF 导出结果直接落盘 (方便 api.php 直接读)
                         if result and result.get("pdf_b64"):
                             _save_pdf(jid, result["pdf_b64"])
                         log.info(f"  📦 Worker 完成 {jid}: status={'OK' if error is None else 'FAIL'}")
@@ -485,21 +581,24 @@ async def handle_worker(reader, writer):
         await worker_loop()
 
     except Exception as e:
-        log.error(f"TCP handler 异常 {addr}: {e}")
+        log.error(f"WS handler 异常 {addr}: {e}")
     finally:
+        try:
+            await ws_write_frame(writer, OPCODE_CLOSE, b"")
+        except:
+            pass
         try: writer.close()
         except: pass
 
 
 # ======================= HTTP 1201 (PHP 接口) =======================
 def _worker_online():
-    """判断家里云 Worker 是否在线: 已认证 + 最近 WORKER_TIMEOUT 内有心跳"""
     return bool(STATE.worker_writer) and (time.time() - STATE.worker_last_ping) < WORKER_TIMEOUT
 
 
 class PHPHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass  # 静默（主日志已覆盖）
+        pass
 
     def _send(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -511,7 +610,6 @@ class PHPHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_OPTIONS(self):
-        # CORS preflight
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -520,34 +618,32 @@ class PHPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        # 健康检查
         if path == "/health":
             online = _worker_online()
+            queued = sum(1 for j in STATE.queue.values() if j["status"] in ("queued", "processing"))
             self._send(200, {
                 "bridge": "ok",
+                "protocol": "websocket",
                 "worker_online": online,
                 "seconds_since_last_ping": int(time.time() - STATE.worker_last_ping) if STATE.worker_last_ping else None,
-                "queued_jobs": sum(1 for j in STATE.queue.values() if j["status"] in ("queued", "processing")),
+                "queued_jobs": queued,
             })
             return
-        # 查状态
         if path.startswith("/status/"):
             jid = path[len("/status/"):]
             job = asyncio.run_coroutine_threadsafe(STATE.get_status(jid), event_loop).result()
             if not job:
                 self._send(404, {"error": "任务不存在", "job_id": jid})
                 return
-            qpos = int(job.get("queue_position", 0))
-            # 清理敏感字段（file_b64 不回传）
             out = {
                 "job_id": job["job_id"],
-                "status": job["status"],   # queued / processing / done / failed
+                "status": job["status"],
                 "filename": job.get("filename", ""),
-                "error": job.get("error"),  # 失败时的错误字符串
-                "result": job.get("result"),  # done 时的 Contract B JSON
-                "stage": job.get("stage", ""),          # ★ 细粒度阶段
-                "progress": job.get("progress", ""),    # ★ 进度提示 (如 "3/10 页")
-                "queue_position": qpos,                 # ★ 队列位置
+                "error": job.get("error"),
+                "result": job.get("result"),
+                "stage": job.get("stage", ""),
+                "progress": job.get("progress", ""),
+                "queue_position": int(job.get("queue_position", 0)),
             }
             self._send(200, out)
             return
@@ -559,18 +655,12 @@ class PHPHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
 
         if path == "/upload":
-            # ① JSON 解析
             try:
                 payload = json.loads(body.decode("utf-8")) if body else {}
             except json.JSONDecodeError as e:
-                self._send(400, {
-                    "error": "JSON 格式错误",
-                    "detail": str(e),
-                    "hint": "检查 Content-Type 是否为 application/json",
-                })
+                self._send(400, {"error": "JSON 格式错误", "detail": str(e)})
                 return
 
-            # ② 必需字段
             filename = payload.get("filename", "").strip()
             file_b64 = payload.get("file_b64", "").strip()
             subject = payload.get("subject", "")
@@ -578,43 +668,30 @@ class PHPHandler(BaseHTTPRequestHandler):
             paper_name = payload.get("paper_name", "")
 
             if not filename:
-                self._send(400, {"error": "缺少 filename 字段", "hint": "需要传原始 PDF/图片文件名"})
+                self._send(400, {"error": "缺少 filename 字段"})
                 return
             if not file_b64:
-                self._send(400, {"error": "缺少 file_b64 字段", "hint": "需要传文件的 base64 编码"})
+                self._send(400, {"error": "缺少 file_b64 字段"})
                 return
 
-            # ③ base64 可解码性验证
             try:
                 raw = base64.b64decode(file_b64)
             except Exception as e:
                 self._send(400, {"error": "file_b64 解码失败", "detail": str(e)})
                 return
 
-            # ④ 文件大小上限 (50MB)
             max_bytes = 50 * 1024 * 1024
             if len(raw) > max_bytes:
                 self._send(413, {"error": f"文件过大 ({len(raw)//1024//1024}MB), 上限 50MB"})
                 return
 
-            # ⑤ Worker 在线检查
             if not _worker_online():
-                online_flag = bool(STATE.worker_writer)
-                last_ping = STATE.worker_last_ping
-                detail_parts = []
-                if not online_flag:
-                    detail_parts.append("家里云 Worker 尚未连入公网 bridge")
-                else:
-                    elapsed = int(time.time() - last_ping)
-                    detail_parts.append(f"Worker 心跳已断 {elapsed}s (超时 {WORKER_TIMEOUT}s)")
                 self._send(503, {
                     "error": "worker offline",
-                    "detail": "; ".join(detail_parts),
-                    "hint": "家里云检查: sudo systemctl status studyscape-bridge-client",
+                    "hint": "家里云 bridge-client 是否在运行?",
                 })
                 return
 
-            # ⑥ 推断文件类型
             ftype = "pdf"
             if raw[:8] == b"%PDF-":
                 ftype = "pdf"
@@ -628,7 +705,6 @@ class PHPHandler(BaseHTTPRequestHandler):
                 ftype = "webp"
             log.info(f"收到上传: {filename} ({ftype}, {len(raw)//1024}KB) → subject={subject}")
 
-            # ⑦ 入队并推送（queue full → 503）
             job = {
                 "filename": filename,
                 "file_b64": file_b64,
@@ -643,18 +719,11 @@ class PHPHandler(BaseHTTPRequestHandler):
                 self._send(503, {"error": str(e), "hint": "OCR 队列积压, 请稍后重试"})
                 return
 
-            # 立即推送 + watchdog 保险 (queued 超过 60s 自动重推)
             asyncio.run_coroutine_threadsafe(STATE.push_task(jid), event_loop)
-
-            self._send(202, {
-                "job_id": jid,
-                "status": "queued",
-                "message": "任务已提交, 等待家里云处理",
-            })
+            self._send(202, {"job_id": jid, "status": "queued", "message": "任务已提交"})
             return
 
         if path == "/export_pdf":
-            """接收 PDF 导出请求: 题目 JSON → 家里云生成 PDF → 回传 base64"""
             try:
                 payload = json.loads(body.decode("utf-8")) if body else {}
             except json.JSONDecodeError as e:
@@ -665,8 +734,7 @@ class PHPHandler(BaseHTTPRequestHandler):
             if not export_input or not isinstance(export_input, dict):
                 self._send(400, {"error": "缺少 export_input 字段"})
                 return
-            questions = export_input.get("questions", [])
-            if not questions:
+            if not export_input.get("questions"):
                 self._send(400, {"error": "questions 为空"})
                 return
 
@@ -681,9 +749,7 @@ class PHPHandler(BaseHTTPRequestHandler):
                 self._send(503, {"error": str(e), "hint": "队列满, 请稍后"})
                 return
 
-            # 立即推送 + watchdog 保险
             asyncio.run_coroutine_threadsafe(STATE.push_task(jid), event_loop)
-
             self._send(202, {"job_id": jid, "status": "queued", "message": "PDF 生成任务已提交"})
             return
 
@@ -699,22 +765,16 @@ async def cleanup_loop():
 
 
 async def watchdog_loop():
-    """看门狗: worker 在线但 queued jobs 超过 60s 没派发 → 重新推"""
-    RESEND_GRACE = 60   # queued 超过 60s 就重推
-    SCAN_INTERVAL = 30  # 每 30s 扫一次
-    _resent = {}  # jid → 上次重推时间
-    MAX_RESEND = 3  # 最多重推 3 次
-
+    RESEND_GRACE = 60
+    SCAN_INTERVAL = 30
+    _resent = {}
+    MAX_RESEND = 3
     log.info(f"🐕 watchdog 启动 (每 {SCAN_INTERVAL}s 扫, queued>{RESEND_GRACE}s 重推)")
 
-    # 首次立即扫 —— 重启后遗留的 queued jobs 可能已经等很久了
     while True:
         try:
             async with STATE.lock:
-                queued = [
-                    (jid, job) for jid, job in STATE.queue.items()
-                    if job["status"] == "queued"
-                ]
+                queued = [(jid, job) for jid, job in STATE.queue.items() if job["status"] == "queued"]
             if queued:
                 log.info(f"🐕 扫描到 {len(queued)} 个 queued jobs")
             else:
@@ -727,7 +787,6 @@ async def watchdog_loop():
                     waited = now - enqueued_at
                     last_resent = _resent.get(jid, 0)
                     resent_count = _resent.get(f"{jid}_count", 0)
-
                     if waited > RESEND_GRACE and now - last_resent > 30 and resent_count < MAX_RESEND:
                         await STATE.push_task(jid)
                         _resent[jid] = now
@@ -735,7 +794,6 @@ async def watchdog_loop():
                         log.warning(f"🐕 watchdog: {jid} 排队 {int(waited)}s, 第 {resent_count+1} 次重推")
         except Exception as e:
             log.error(f"watchdog 异常: {e}")
-
         await asyncio.sleep(SCAN_INTERVAL)
 
 
@@ -743,26 +801,23 @@ async def main():
     global event_loop
     event_loop = asyncio.get_running_loop()
 
-    # TCP 1200 server
-    tcp_server = await asyncio.start_server(
-        handle_worker, "0.0.0.0", TCP_PORT
+    # WebSocket 1200 server (家里云 Worker 连接)
+    ws_server = await asyncio.start_server(
+        handle_worker, "0.0.0.0", WS_PORT
     )
-    log.info(f"✅ TCP Worker 端口: 0.0.0.0:{TCP_PORT}")
+    log.info(f"✅ WebSocket Worker 端口: 0.0.0.0:{WS_PORT} (无第三方依赖, 纯 asyncio)")
 
-    # HTTP 1201 server (仅 localhost)
+    # HTTP 1201 server (PHP 本地接口)
     http_server = ThreadingHTTPServer(("127.0.0.1", HTTP_PORT), PHPHandler)
     import threading
     threading.Thread(target=http_server.serve_forever, daemon=True).start()
     log.info(f"✅ HTTP PHP 接口: 127.0.0.1:{HTTP_PORT} (仅 localhost)")
 
-    # 清理定时
     asyncio.create_task(cleanup_loop())
-
-    # 看门狗: queued jobs 自动重推
     asyncio.create_task(watchdog_loop())
 
-    async with tcp_server:
-        await tcp_server.serve_forever()
+    async with ws_server:
+        await ws_server.serve_forever()
 
 
 if __name__ == "__main__":
