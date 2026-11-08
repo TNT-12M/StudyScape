@@ -1,4 +1,45 @@
 <?php
+// ===================== 家里云存储 bridge 辅助函数 =====================
+// bridge HTTP 接口走 localhost:1201 (Python asyncio HTTP server)
+if (!function_exists('_bridge_storage')) {
+    /**
+     * 调家里云 bridge HTTP 接口（存储相关）
+     * @param string $path   如 '/storage/store'
+     * @param array  $body   JSON body
+     * @return array ['ok'=>bool, 'status'=>int, 'data'=>array, 'error'=>string]
+     */
+    function _bridge_storage(string $path, array $body): array {
+        $url = "http://127.0.0.1:1201{$path}";
+        $json = json_encode($body, JSON_UNESCAPED_UNICODE);
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => $json,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 70,   // bridge → 家里云有 60s timeout
+            CURLOPT_CONNECTTIMEOUT => 5,
+        ]);
+        $resp = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = curl_error($ch);
+        curl_close($ch);
+
+        if ($resp === false) {
+            return ['ok' => false, 'status' => 0, 'data' => [], 'error' => $err ?: 'curl 失败'];
+        }
+        $data = json_decode($resp, true) ?: [];
+        $bridgeOk = ($httpCode >= 200 && $httpCode < 300) && !empty($data['ok']);
+        return ['ok' => $bridgeOk, 'status' => $httpCode, 'data' => $data, 'error' => $data['error'] ?? ''];
+    }
+
+    /** 文件 → base64 + SHA256 */
+    function _file_b64_sha(string $absPath): array {
+        $raw = file_get_contents($absPath);
+        return [base64_encode($raw), hash('sha256', $raw), strlen($raw)];
+    }
+}
+
 // ===================== 压缩包解压 helper（顶级函数，material_upload / material_extract 共用）=====================
 // 参数: $f = $_FILES['file'] 数组; $realName = 原始文件名; $ext = strtolower(pathinfo(...))
 // 逻辑: move -> 解压到 materials/tmp_extract/{token}/ -> 返回清单 (jsonOut 直接 exit)
@@ -3068,25 +3109,55 @@ if ($action) {
                 if ($rawEducationLevel === '') jsonOut(false, '请选择所属学段');
                 $educationLevel = validateEducationLevel($rawEducationLevel);
 
-                // 安全存储文件名（api.php 位于项目根，materials 同级）
+                // 安全存储文件名
                 $matDir = __DIR__ . '/../../../materials';
-                if (!is_dir($matDir)) @mkdir($matDir, 0755, true);
                 $stored = uniqid('mat_', true) . '.' . $ext;
-                $stored = preg_replace('/[^A-Za-z0-9._-]/', '', $stored); // 安全化
-                $relPath = 'materials/' . $stored;
-                $absPath = $matDir . DIRECTORY_SEPARATOR . $stored;
-                if (!move_uploaded_file($f['tmp_name'], $absPath)) {
-                    @unlink($f['tmp_name']);
-                    jsonOut(false, "文件保存失败，请检查 materials/ 目录权限");
-                }
-                @chmod($absPath, 0644);
+                $stored = preg_replace('/[^A-Za-z0-9._-]/', '', $stored);
 
+                // ===== 先读 tmp_name → SHA256 + base64 → 发给家里云 =====
+                [$fileB64, $clientSha, $fileSize] = _file_b64_sha($f['tmp_name']);
+
+                // 调 bridge HTTP → storage/store (bridge 再走 WS 给家里云)
+                $bridgeRes = _bridge_storage('/storage/store', [
+                    'stored_name' => $stored,
+                    'sha256'      => $clientSha,
+                    'size'        => $fileSize,
+                    'mime'        => $mime,
+                    'file_b64'    => $fileB64,
+                ]);
+
+                // 删 PHP 临时文件（无论成功失败都清）
+                @unlink($f['tmp_name']);
+
+                if (!$bridgeRes['ok']) {
+                    $err = $bridgeRes['error'] ?: '家里云存储失败';
+                    if (str_contains($err, 'worker offline')) {
+                        jsonOut(false, "家里云存储未上线，请检查 bridge-client");
+                    }
+                    jsonOut(false, "存储到家里云失败：{$err}");
+                }
+
+                // bridge 侧 SHA256 已校验过（bridge_storage/store 里做了双重校验）
+                $homeSha = $bridgeRes['data']['sha256'] ?? '';
+                if ($homeSha !== '' && !hash_equals($clientSha, $homeSha)) {
+                    // 三端 SHA256 不一致 → 不入库
+                    _bridge_storage('/storage/delete', ['stored_name' => $stored]);
+                    jsonOut(false, "传输校验失败 (client={$clientSha} home={$homeSha})");
+                }
+
+                // 入库：file_path 留空表示 remote（家里云有文件，公网机没有）
                 dbQuery($db,
-                    "INSERT INTO materials(filename, stored_name, file_path, file_size, mime_type, subject, description, uploaded_by, education_level, category_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    [$origName, $stored, $relPath, (int)$f['size'], $mime, $subject, $desc, getUid(), $educationLevel, $categoryId > 0 ? $categoryId : null]
+                    "INSERT INTO materials(filename, stored_name, file_path, file_size, mime_type, subject, description, uploaded_by, education_level, category_id, sha256, storage_node) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [$origName, $stored, '', $fileSize, $mime, $subject, $desc, getUid(), $educationLevel, $categoryId > 0 ? $categoryId : null, $clientSha, 'home']
                 );
                 $newId = (int)$db->lastInsertRowID();
-                jsonOut(true, "上传成功", ['material_id' => $newId, 'filename' => $origName, 'size' => (int)$f['size'], 'education_level' => $educationLevel]);
+                jsonOut(true, "上传成功（家里云存储）", [
+                    'material_id' => $newId,
+                    'filename'    => $origName,
+                    'size'        => $fileSize,
+                    'sha256'      => $clientSha,
+                    'education_level' => $educationLevel,
+                ]);
                 break;
 
             // ---------- 压缩包解压入口（独立上传走此 case, material_upload 里也调同函数）----------
@@ -3487,30 +3558,87 @@ if ($action) {
                 }
                 // ★ token 不一次性消费 — 留 5 分钟宽限让 iOS Safari 重试/预检
                 // unset($_SESSION['download_tokens'][$token]);  // 之前注释掉, 改为过期自动清理
-                $rel = trim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string)$info['file_path']), DIRECTORY_SEPARATOR);
-                $abs = __DIR__ . '/../../../' . $rel;
-                // 目录穿越防御
-                $baseDir = realpath(__DIR__ . '/../../..') . DIRECTORY_SEPARATOR;
-                $realAbs = realpath($abs);
-                if ($realAbs === false || strpos($realAbs, $baseDir) !== 0 || !is_file($realAbs)) {
+
+                // ===== 先查 DB 拿到 stored_name + sha256 =====
+                $mid = (int)($info['material_id'] ?? 0);
+                $storedName = (string)($info['stored_name'] ?? '');
+                $expectedSha = '';
+                if ($mid > 0) {
+                    $row = dbQuery($db, "SELECT stored_name, sha256, storage_node FROM materials WHERE id=?", [$mid])->fetch(PDO::FETCH_ASSOC);
+                    if ($row) {
+                        $storedName = $row['stored_name'];
+                        $expectedSha = $row['sha256'] ?? '';
+                        $node = $row['storage_node'] ?? '';
+                    }
+                }
+                if ($storedName === '') {
                     http_response_code(404);
-                    $http_status = 404;
-                    $title = '文件不存在';
-                    $message = '该资料文件已被删除或路径异常。';
                     include __DIR__ . '/../../error.php';
                     exit;
                 }
-                $mid = (int)($info['material_id'] ?? 0);
+
+                // ===== storage_node 为空/=local 且本地有文件 → 直接走旧逻辑（兼容历史）=====
+                $matDir = __DIR__ . '/../../../materials';
+                $localAbs = $matDir . DIRECTORY_SEPARATOR . $storedName;
+                $useLocal = false;
+                if (($node === '' || $node === 'local') && is_file($localAbs)) {
+                    $useLocal = true;
+                }
+
+                // ===== 走家里云 retrieve =====
+                $tmpAbs = '';
+                if (!$useLocal) {
+                    $bridgeRes = _bridge_storage('/storage/retrieve', ['stored_name' => $storedName]);
+                    if (!$bridgeRes['ok']) {
+                        $err = $bridgeRes['error'] ?? '家里云未找到文件';
+                        http_response_code(502);
+                        $http_status = 502;
+                        $title = '存储后端暂不可用';
+                        $message = $err;
+                        include __DIR__ . '/../../error.php';
+                        exit;
+                    }
+                    $b64 = $bridgeRes['data']['file_b64'] ?? '';
+                    if ($b64 === '') {
+                        http_response_code(404);
+                        $title = '文件不存在';
+                        $message = '家里云未找到该资料。';
+                        include __DIR__ . '/../../error.php';
+                        exit;
+                    }
+                    // 解码 → 临时文件
+                    $tmpAbs = sys_get_temp_dir() . '/studyscape_dl_' . bin2hex(random_bytes(4));
+                    $raw = base64_decode($b64, true);
+                    if ($raw === false) {
+                        http_response_code(502);
+                        include __DIR__ . '/../../error.php';
+                        exit;
+                    }
+                    $actualSha = hash('sha256', $raw);
+                    if ($expectedSha !== '' && !hash_equals($expectedSha, $actualSha)) {
+                        http_response_code(502);
+                        $title = '传输校验失败';
+                        $message = "SHA256 不匹配 (db={$expectedSha} home={$actualSha})";
+                        include __DIR__ . '/../../error.php';
+                        exit;
+                    }
+                    file_put_contents($tmpAbs, $raw);
+                    $realAbs = $tmpAbs;
+                    $contentLen = strlen($raw);
+                } else {
+                    $realAbs = $localAbs;
+                    $contentLen = filesize($localAbs);
+                }
+
                 if ($mid > 0) {
                     dbQuery($db, "UPDATE materials SET downloads = COALESCE(downloads,0) + 1 WHERE id=?", [$mid]);
                 }
                 // 输出
                 $filename = (string)($info['filename'] ?? 'download');
                 header('Content-Type: application/octet-stream');
-                header('Accept-Ranges: bytes');          // iOS Safari 需要, 支持断点续传
-                header('X-Content-Type-Options: nosniff'); // 防 MIME-sniffing, iOS 不强行预览
-                header('Content-Length: ' . filesize($realAbs));
-                // ★ 优先用 RFC 5987 UTF-8 (iOS/Chrome/Firefox 支持), 老 IE 走 rawurlencode
+                header('Accept-Ranges: bytes');
+                header('X-Content-Type-Options: nosniff');
+                header('Content-Length: ' . $contentLen);
                 if (preg_match('/MSIE|Trident|Edge/i', $_SERVER['HTTP_USER_AGENT'] ?? '')) {
                     header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '"');
                 } else {
@@ -3523,6 +3651,7 @@ if ($action) {
                     while (!feof($fh)) { echo fread($fh, 65536); if (connection_status() !== 0) break; }
                     fclose($fh);
                 }
+                if ($tmpAbs !== '' && is_file($tmpAbs)) @unlink($tmpAbs);
                 exit;
 
             // ==================== 默认 ====================

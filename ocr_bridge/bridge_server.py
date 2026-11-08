@@ -228,6 +228,9 @@ class BridgeState:
         self.queue = {}
         self.next_id = 0
         self.lock = asyncio.Lock()
+        # 同步存储通道
+        self.pending_storage = {}   # request_id → (Event, result_dict)
+        self.storage_lock = asyncio.Lock()
         if persist_dir is None:
             persist_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_bridge_jobs")
         self.persist_dir = persist_dir
@@ -454,6 +457,48 @@ class BridgeState:
             log.info(f"  📤 推送任务 {jid} 给 worker")
             return True
 
+    # ======== 同步存储通道 (绕过 OCR 队列) ========
+    async def storage_request(self, request_id, payload, timeout=30):
+        """发一个同步存储请求给家里云 → 等 Event 被 set → 返回结果 dict"""
+        event = asyncio.Event()
+        result_holder = {}
+        async with self.storage_lock:
+            self.pending_storage[request_id] = (event, result_holder)
+
+        try:
+            async with self.worker_lock:
+                if not self.worker_writer:
+                    async with self.storage_lock:
+                        self.pending_storage.pop(request_id, None)
+                    return {"ok": False, "error": "worker offline"}
+                await FrameProto.send(self.worker_writer, {
+                    "type": "STORAGE_TASK",
+                    "request_id": request_id,
+                    "data": payload,
+                })
+            try:
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                async with self.storage_lock:
+                    self.pending_storage.pop(request_id, None)
+                return {"ok": False, "error": f"timeout ({timeout}s)"}
+            async with self.storage_lock:
+                return dict(result_holder)
+        finally:
+            async with self.storage_lock:
+                self.pending_storage.pop(request_id, None)
+
+    def storage_resolve(self, request_id, result):
+        """worker_loop 收到 STORAGE_RESULT 时调用"""
+        async def _resolve():
+            async with self.storage_lock:
+                item = self.pending_storage.get(request_id)
+            if item:
+                event, holder = item
+                holder.update(result)
+                event.set()
+        asyncio.run_coroutine_threadsafe(_resolve(), event_loop)
+
 
 STATE = BridgeState()
 
@@ -561,6 +606,13 @@ async def handle_worker(reader, writer):
                         if result and result.get("pdf_b64"):
                             _save_pdf(jid, result["pdf_b64"])
                         log.info(f"  📦 Worker 完成 {jid}: status={'OK' if error is None else 'FAIL'}")
+
+                    elif mtype == "STORAGE_RESULT":
+                        request_id = msg.get("request_id")
+                        result = {k: v for k, v in msg.items() if k not in ("type", "request_id")}
+                        STATE.storage_resolve(request_id, result)
+                        ok = "✅" if result.get("ok") else "❌"
+                        log.info(f"  {ok} STORAGE_RESULT {request_id}: ok={result.get('ok')}")
 
                     elif mtype == "BYE":
                         break
@@ -754,7 +806,114 @@ class PHPHandler(BaseHTTPRequestHandler):
             self._send(202, {"job_id": jid, "status": "queued", "message": "PDF 生成任务已提交"})
             return
 
-        self._send(404, {"error": f"未知端点: {path}", "available": ["/upload (POST)", "/export_pdf (POST)"]})
+        # ======== 存储端点 ========
+        if path == "/storage/store":
+            """PHP → bridge → 家里云存文件。body={stored_name, sha256, size, mime, file_b64}"""
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except json.JSONDecodeError as e:
+                self._send(400, {"error": "JSON 格式错误", "detail": str(e)}); return
+
+            required = ["stored_name", "file_b64"]
+            missing = [k for k in required if not payload.get(k)]
+            if missing:
+                self._send(400, {"error": f"缺少字段: {missing}"}); return
+
+            try:
+                raw = base64.b64decode(payload["file_b64"])
+            except Exception as e:
+                self._send(400, {"error": "file_b64 解码失败", "detail": str(e)}); return
+
+            # bridge 侧也算一次 SHA256（双重校验）
+            bridge_sha = _hashlib.sha256(raw).hexdigest()
+            if payload.get("sha256") and not hmac.compare_digest(bridge_sha, payload["sha256"]):
+                self._send(400, {"error": "SHA256 不匹配", "client_sha": payload["sha256"], "bridge_sha": bridge_sha}); return
+
+            # 生成 request_id 发给家里云
+            req_id = f"stor_{int(time.time())}_{secrets.token_hex(4)}"
+            storage_payload = {
+                "action": "store",
+                "stored_name": payload["stored_name"],
+                "sha256": bridge_sha,
+                "size": len(raw),
+                "mime": payload.get("mime", ""),
+                "file_b64": payload["file_b64"],
+            }
+            try:
+                result = asyncio.run_coroutine_threadsafe(
+                    STATE.storage_request(req_id, storage_payload, timeout=60), event_loop
+                ).result(timeout=65)
+            except Exception as e:
+                self._send(500, {"error": str(e)}); return
+
+            if result.get("ok"):
+                self._send(200, {"ok": True, "sha256": result.get("sha256"), "home_path": result.get("home_path")})
+            else:
+                self._send(502, {"ok": False, "error": result.get("error", "unknown")})
+            return
+
+        if path == "/storage/retrieve":
+            """PHP → bridge → 家里云取文件。body={stored_name} → 返回 base64"""
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except json.JSONDecodeError as e:
+                self._send(400, {"error": "JSON 格式错误"}); return
+
+            stored_name = (payload.get("stored_name") or "").strip()
+            if not stored_name:
+                self._send(400, {"error": "缺少 stored_name"}); return
+
+            req_id = f"rtr_{int(time.time())}_{secrets.token_hex(4)}"
+            storage_payload = {
+                "action": "retrieve",
+                "stored_name": stored_name,
+            }
+            try:
+                result = asyncio.run_coroutine_threadsafe(
+                    STATE.storage_request(req_id, storage_payload, timeout=60), event_loop
+                ).result(timeout=65)
+            except Exception as e:
+                self._send(500, {"error": str(e)}); return
+
+            if result.get("ok"):
+                self._send(200, {
+                    "ok": True,
+                    "file_b64": result.get("file_b64", ""),
+                    "sha256": result.get("sha256", ""),
+                    "size": result.get("size", 0),
+                    "mime": result.get("mime", ""),
+                })
+            else:
+                self._send(404, {"ok": False, "error": result.get("error", "not found")})
+            return
+
+        if path == "/storage/delete":
+            """PHP → bridge → 家里云删文件。body={stored_name}"""
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except json.JSONDecodeError:
+                self._send(400, {"error": "JSON 格式错误"}); return
+
+            stored_name = (payload.get("stored_name") or "").strip()
+            if not stored_name:
+                self._send(400, {"error": "缺少 stored_name"}); return
+
+            req_id = f"del_{int(time.time())}_{secrets.token_hex(4)}"
+            result = asyncio.run_coroutine_threadsafe(
+                STATE.storage_request(req_id, {"action": "delete", "stored_name": stored_name}, timeout=30),
+                event_loop
+            ).result(timeout=35)
+
+            if result.get("ok"):
+                self._send(200, {"ok": True})
+            else:
+                self._send(502, {"ok": False, "error": result.get("error")})
+            return
+
+        self._send(404, {"error": f"未知端点: {path}", "available": [
+            "/upload (POST)", "/export_pdf (POST)",
+            "/storage/store (POST)", "/storage/retrieve (POST)", "/storage/delete (POST)"
+        ]})
 
 
 # ======================= 主入口 =======================

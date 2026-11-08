@@ -40,6 +40,13 @@ PIPELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
 PDF_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export_pdf.py")
 PIPELINE_TIMEOUT = 300
 
+# 家里云存储根目录 (StudyScape 项目 data/StudyScape/materials)
+HOME_STORAGE_ROOT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "data", "StudyScape"
+)
+HOME_MATERIALS_DIR = os.path.join(HOME_STORAGE_ROOT, "materials")
+
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 OPCODE_TEXT = 0x01
 OPCODE_BINARY = 0x02
@@ -326,6 +333,12 @@ async def run_worker():
                     log.info(f"📥 收到任务 {jid}: {task_data.get('filename', '?')}")
                     asyncio.create_task(handle_task(writer, reader, jid, task_data, loop_lock))
 
+                elif mtype == "STORAGE_TASK":
+                    req_id = msg.get("request_id")
+                    storage_data = msg.get("data", {})
+                    log.info(f"💾 STORAGE  {req_id}: {storage_data.get('action')} {storage_data.get('stored_name', '?')}")
+                    asyncio.create_task(handle_storage(writer, req_id, storage_data))
+
                 elif mtype == "CLOSE":
                     log.info("服务端关闭连接")
                     break
@@ -339,6 +352,96 @@ async def run_worker():
         log.info(f"{backoff}s 后重连 ...")
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, max_backoff)
+
+
+# ======================= 存储处理 (家里云本地磁盘) =======================
+def _safe_path(root_dir, filename):
+    """安全路径拼接: 防止 path traversal, 只允许字母数字._-"""
+    filename = os.path.basename(filename)
+    if not filename or filename == "." or filename == "..":
+        return None
+    if not all(c.isalnum() or c in "._-" for c in filename):
+        return None
+    full = os.path.join(root_dir, filename)
+    real_root = os.path.realpath(root_dir)
+    real_full = os.path.realpath(os.path.dirname(full))
+    if not real_full.startswith(real_root):
+        return None
+    return full
+
+
+async def handle_storage(writer, req_id, data):
+    """处理家里云存储请求: store / retrieve / delete"""
+    action = data.get("action", "")
+    stored_name = data.get("stored_name", "")
+    os.makedirs(HOME_MATERIALS_DIR, exist_ok=True)
+
+    async def reply(result):
+        result["request_id"] = req_id
+        result["type"] = "STORAGE_RESULT"
+        await FrameProto.send(writer, result)
+
+    try:
+        safe_fp = _safe_path(HOME_MATERIALS_DIR, stored_name)
+        if not safe_fp:
+            await reply({"ok": False, "error": "非法文件名"})
+            return
+
+        if action == "store":
+            file_b64 = data.get("file_b64", "")
+            expected_sha = data.get("sha256", "")
+            if not file_b64:
+                await reply({"ok": False, "error": "缺 file_b64"})
+                return
+            raw = base64.b64decode(file_b64)
+            # SHA256 校验
+            actual_sha = hashlib.sha256(raw).hexdigest()
+            if expected_sha and not hmac.compare_digest(actual_sha, expected_sha):
+                await reply({"ok": False, "error": f"SHA256 mismatch expected={expected_sha} actual={actual_sha}"})
+                return
+            # 写文件
+            tmp_fp = safe_fp + ".tmp"
+            with open(tmp_fp, "wb") as f:
+                f.write(raw)
+            os.replace(tmp_fp, safe_fp)
+            log.info(f"  💾 存储完成: {stored_name} ({len(raw)//1024}KB, sha256={actual_sha[:16]}...)")
+            await reply({"ok": True, "sha256": actual_sha, "home_path": safe_fp})
+
+        elif action == "retrieve":
+            if not os.path.isfile(safe_fp):
+                await reply({"ok": False, "error": "文件不存在"})
+                return
+            raw = open(safe_fp, "rb").read()
+            file_b64 = base64.b64encode(raw).decode()
+            sha = hashlib.sha256(raw).hexdigest()
+            # mime
+            mime = ""
+            ext = stored_name.rsplit(".", 1)[-1].lower() if "." in stored_name else ""
+            mime_map = {"pdf": "application/pdf", "doc": "application/msword",
+                        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "xls": "application/vnd.ms-excel", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "ppt": "application/vnd.ms-powerpoint", "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "txt": "text/plain", "md": "text/markdown",
+                        "zip": "application/zip", "rar": "application/x-rar-compressed"}
+            mime = mime_map.get(ext, "application/octet-stream")
+            log.info(f"  📤 读取文件: {stored_name} ({len(raw)//1024}KB)")
+            await reply({"ok": True, "file_b64": file_b64, "sha256": sha, "size": len(raw), "mime": mime})
+
+        elif action == "delete":
+            if os.path.isfile(safe_fp):
+                os.remove(safe_fp)
+                log.info(f"  🗑️  删除: {stored_name}")
+            await reply({"ok": True})
+
+        else:
+            await reply({"ok": False, "error": f"未知 action: {action}"})
+
+    except Exception as e:
+        log.error(f"  storage 错误 {req_id}: {e}")
+        try:
+            await reply({"ok": False, "error": str(e)[:200]})
+        except:
+            pass
 
 
 # ======================= 任务处理 =======================

@@ -157,6 +157,23 @@ try {
     // 静默：表不存在等已被 CREATE 兜底
 }
 
+// 兼容旧库：materials 表缺少 sha256 / storage_node 列则补上
+try {
+    $res = $db->query("PRAGMA table_info(materials)");
+    $cols = [];
+    if ($res) {
+        while ($c = $res->fetchArray(SQLITE3_ASSOC)) $cols[] = strtolower($c['name']);
+    }
+    if (!in_array('sha256', $cols)) $db->exec("ALTER TABLE materials ADD COLUMN sha256 TEXT");
+    if (!in_array('storage_node', $cols)) {
+        $db->exec("ALTER TABLE materials ADD COLUMN storage_node TEXT DEFAULT 'local'");
+        // 历史有本地文件的记录统一标记为 local
+        $db->exec("UPDATE materials SET storage_node='local' WHERE storage_node IS NULL");
+    }
+} catch (Exception $e) {
+    // 静默：表不存在等已被 CREATE 兜底
+}
+
 // 注册审批已取消：兼容历史账号，统一视为已注册账号。
 try {
     $db->exec("UPDATE users SET is_approved=1 WHERE is_approved=0");
