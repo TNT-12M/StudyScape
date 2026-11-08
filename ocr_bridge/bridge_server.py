@@ -38,7 +38,11 @@ TCP_PORT = 1200          # Worker 连接端口 (公网)
 HTTP_PORT = 1201         # PHP 本地接口 (仅 localhost)
 KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_key.txt")
 WORKER_TIMEOUT = 30      # Worker 心跳超时 (秒)
-RESULT_TTL = 14400        # 结果缓存 4 小时 (秒) — 公网机磁盘小, 且 PHP 端捞完就删了
+RESULT_TTL = 14400        # done/failed 结果保留 4h 后清
+QUEUED_TIMEOUT = 600      # queued 10min 没被 worker 取 → failed
+QUEUED_MAX_HOURS = 2      # queued 超过 2h 直接清（不想等 worker 了）
+PDF_CACHE_TTL = 3600      # _pdf_cache 1h 没被访问就删
+MAX_QUEUED = 50           # 队列上限，超过拒绝新任务
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,38 +101,91 @@ class BridgeState:
         self.worker_writer = None
         self.worker_last_ping = 0
         self.worker_lock = asyncio.Lock()
-        self.queue = {}     # job_id → job dict {enqueued_at, status, data, result}
+        self.queue = {}     # job_id → job dict
         self.next_id = 0
         self.lock = asyncio.Lock()
-        # ★ 磁盘持久化: bridge 重启不丢 jobs
         if persist_dir is None:
             persist_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_bridge_jobs")
         self.persist_dir = persist_dir
         os.makedirs(self.persist_dir, exist_ok=True)
+        # ★ data 文件单独存目录（不内嵌 JSON）
+        self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_job_files")
+        os.makedirs(self.data_dir, exist_ok=True)
         self._load_persisted()
 
     def _job_file(self, jid):
         return os.path.join(self.persist_dir, f"{jid}.json")
 
+    def _data_file(self, jid):
+        """queued/processing 状态的 base64 data 单独存这里"""
+        return os.path.join(self.data_dir, f"{jid}.b64")
+
     def _persist(self, jid, job):
-        """写磁盘 —— queued/processing 必须完整存 data (含 file_b64), done/failed 排除 data 省空间"""
-        if job.get("status") in ("done", "failed"):
-            slim = {k: v for k, v in job.items() if k != "data"}
+        """
+        存盘策略:
+        - queued/processing: base64 data 写 _data_file(jid).b64，job JSON 里只保留 data_size + data_path
+        - done/failed: 完全移除 data (已 finish，结果里不含原始文件)，也不存 result 全文
+        """
+        status = job.get("status", "")
+        fp = self._job_file(jid)
+
+        if status in ("queued", "processing"):
+            # 把 data 抽到外部文件
+            data_val = job.get("data")
+            if data_val and isinstance(data_val, dict) and data_val.get("file_b64"):
+                # 写外部文件（幂等：已存在就跳过）
+                data_fp = self._data_file(jid)
+                if not os.path.exists(data_fp):
+                    try:
+                        with open(data_fp, "w", encoding="utf-8") as f:
+                            f.write(data_val["file_b64"])
+                    except Exception as e:
+                        log.warning(f"data 抽取失败 {jid}: {e}")
+                # job JSON 只存元信息
+                slim = dict(job)
+                slim["data"] = None           # 清空内嵌 data
+                slim["data_path"] = data_fp   # 指向外部文件
+                slim["data_size"] = len(data_val["file_b64"])
+            else:
+                slim = job
         else:
-            slim = job  # queued/processing 完整存, 重启恢复后 worker 能继续干
+            # done/failed: 全精简（不存 data，也不存 result 全文）
+            slim = {k: v for k, v in job.items() if k not in ("data", "result")}
+            # 删 data 文件
+            data_fp = self._data_file(jid)
+            if os.path.exists(data_fp):
+                try: os.remove(data_fp)
+                except: pass
+
         try:
-            with open(self._job_file(jid), "w", encoding="utf-8") as f:
+            with open(fp, "w", encoding="utf-8") as f:
                 json.dump(slim, f, ensure_ascii=False)
         except Exception as e:
-            logging.warning(f"持久化失败 {jid}: {e}")
+            log.warning(f"持久化失败 {jid}: {e}")
+
+    def _load_data(self, jid, job):
+        """从外部文件把 data 读回 job（供 push_task/dequeue 使用）"""
+        data_path = job.get("data_path")
+        if not data_path:
+            return job
+        if not os.path.exists(data_path):
+            log.warning(f"data 文件丢失 {jid}: {data_path}")
+            return job
+        try:
+            with open(data_path, "r", encoding="utf-8") as f:
+                file_b64 = f.read()
+            job["data"] = {"file_b64": file_b64}
+        except Exception as e:
+            log.warning(f"data 读取失败 {jid}: {e}")
+        return job
 
     def _delete_persist(self, jid):
-        try:
-            fp = self._job_file(jid)
-            if os.path.exists(fp):
-                os.remove(fp)
-        except Exception:
-            pass
+        for fp in (self._job_file(jid), self._data_file(jid)):
+            try:
+                if os.path.exists(fp):
+                    os.remove(fp)
+            except Exception:
+                pass
 
     def _load_persisted(self):
         """启动时从磁盘加载遗留 jobs
@@ -163,6 +220,10 @@ class BridgeState:
 
     async def enqueue(self, job):
         async with self.lock:
+            # 有界队列检查
+            queued_count = sum(1 for j in self.queue.values() if j["status"] in ("queued", "processing"))
+            if queued_count >= MAX_QUEUED:
+                raise RuntimeError(f"queue full ({queued_count}/{MAX_QUEUED})")
             self.next_id += 1
             jid = f"job_{int(time.time())}_{self.next_id}"
             job["job_id"] = jid
@@ -232,19 +293,47 @@ class BridgeState:
     async def cleanup_old(self):
         now = time.time()
         async with self.lock:
+            to_delete = []
             for jid in list(self.queue.keys()):
                 job = self.queue[jid]
-                if job["status"] in ("done", "failed"):
+                status = job["status"]
+                if status in ("done", "failed"):
                     if now - job.get("finished_at", 0) > RESULT_TTL:
-                        del self.queue[jid]
-                        self._delete_persist(jid)
-                elif job["status"] == "queued":
-                    if now - job.get("enqueued_at", 0) > 600:
-                        # 10 分钟没被 worker 取走 → 超时
+                        to_delete.append(jid)
+                elif status == "queued":
+                    enqueued_at = job.get("enqueued_at", 0)
+                    waited = now - enqueued_at
+                    if waited > QUEUED_MAX_HOURS * 3600:
+                        # 超过 2h 直接清掉（worker 挂了也不想等）
+                        log.warning(f"🗑️ {jid} queued {int(waited)}s > {QUEUED_MAX_HOURS}h, 丢弃")
+                        to_delete.append(jid)
+                    elif waited > QUEUED_TIMEOUT:
+                        # 10min 没被 worker 取走 → failed
                         job["status"] = "failed"
                         job["error"] = "timeout: worker unavailable"
                         job["finished_at"] = now
                         self._persist(jid, job)
+            for jid in to_delete:
+                del self.queue[jid]
+                self._delete_persist(jid)
+
+    async def cleanup_pdf_cache(self):
+        """清 _pdf_cache/ 里过期的 PDF (1h 没被访问)"""
+        if not os.path.isdir(PDF_CACHE_DIR):
+            return
+        now = time.time()
+        freed = 0
+        for fn in os.listdir(PDF_CACHE_DIR):
+            fp = os.path.join(PDF_CACHE_DIR, fn)
+            try:
+                stat = os.stat(fp)
+                if now - stat.st_atime > PDF_CACHE_TTL:
+                    freed += stat.st_size
+                    os.remove(fp)
+            except Exception:
+                pass
+        if freed:
+            log.info(f"🧹 _pdf_cache 清理 {freed//1024}KB")
 
     async def push_task(self, jid):
         """把 queue 里的 jid 任务推给当前 worker"""
@@ -254,17 +343,17 @@ class BridgeState:
             job = self.queue.get(jid)
             if not job:
                 return False
-            # ★ 状态迁移: queued → processing (同 dequeue 的逻辑)
-            # 之前漏了这步, 导致 api.php 一直拿到 status=queued, 前端永远显示"排队中"
             if job.get("status") == "queued":
                 job["status"] = "processing"
                 job["started_at"] = time.time()
                 job["stage"] = "mineru_starting"
                 self._persist(jid, job)
+            # ★ 把外部文件的 data 读回来再发给 worker
+            job_to_send = self._load_data(jid, dict(job))
             await FrameProto.send(self.worker_writer, {
                 "type": "TASK",
                 "job_id": jid,
-                "data": job,
+                "data": job_to_send,
             })
             log.info(f"  📤 推送任务 {jid} 给 worker")
             return True
@@ -539,7 +628,7 @@ class PHPHandler(BaseHTTPRequestHandler):
                 ftype = "webp"
             log.info(f"收到上传: {filename} ({ftype}, {len(raw)//1024}KB) → subject={subject}")
 
-            # ⑦ 入队并推送
+            # ⑦ 入队并推送（queue full → 503）
             job = {
                 "filename": filename,
                 "file_b64": file_b64,
@@ -548,7 +637,11 @@ class PHPHandler(BaseHTTPRequestHandler):
                 "education_level": education_level,
                 "paper_name": paper_name or os.path.splitext(filename)[0],
             }
-            jid = asyncio.run_coroutine_threadsafe(STATE.enqueue(job), event_loop).result()
+            try:
+                jid = asyncio.run_coroutine_threadsafe(STATE.enqueue(job), event_loop).result()
+            except RuntimeError as e:
+                self._send(503, {"error": str(e), "hint": "OCR 队列积压, 请稍后重试"})
+                return
 
             # 立即推送 + watchdog 保险 (queued 超过 60s 自动重推)
             asyncio.run_coroutine_threadsafe(STATE.push_task(jid), event_loop)
@@ -582,7 +675,11 @@ class PHPHandler(BaseHTTPRequestHandler):
                 return
 
             job = {"task_type": "export_pdf", "export_input": export_input}
-            jid = asyncio.run_coroutine_threadsafe(STATE.enqueue(job), event_loop).result()
+            try:
+                jid = asyncio.run_coroutine_threadsafe(STATE.enqueue(job), event_loop).result()
+            except RuntimeError as e:
+                self._send(503, {"error": str(e), "hint": "队列满, 请稍后"})
+                return
 
             # 立即推送 + watchdog 保险
             asyncio.run_coroutine_threadsafe(STATE.push_task(jid), event_loop)
@@ -598,6 +695,7 @@ async def cleanup_loop():
     while True:
         await asyncio.sleep(60)
         await STATE.cleanup_old()
+        await STATE.cleanup_pdf_cache()
 
 
 async def watchdog_loop():
