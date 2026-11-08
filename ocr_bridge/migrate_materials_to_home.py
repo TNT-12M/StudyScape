@@ -10,7 +10,7 @@ StudyScape 现有资料迁移脚本 (公网机运行)
 """
 import sqlite3, json, os, sys, time, hashlib, base64, urllib.request, urllib.error
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根 (ocr_bridge/../)
 DB = os.path.join(ROOT, "exam.db")
 MAT_DIR = os.path.join(ROOT, "materials")
 BRIDGE = "http://127.0.0.1:1201"
