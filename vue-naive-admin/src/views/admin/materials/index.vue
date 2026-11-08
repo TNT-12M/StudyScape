@@ -51,15 +51,22 @@
               </n-space>
             </div>
 
-            <n-alert v-if="!fileItems.length" type="info" :show-icon="false">尚未选择文件</n-alert>
+            <n-alert v-if="!fileItems.length" type="info" :show-icon="false">尚未选择文件（支持 PDF/Word/Excel/PPT/TXT/图片，也支持 ZIP/RAR/7z 压缩包自动解压）</n-alert>
+
+            <n-alert v-if="hasArchiveItems" type="warning" :show-icon="true" style="margin-bottom: 8px">
+              这些文件来自压缩包解压，请确认学段/分类/科目后点击"批量入库"（后端统一 move + INSERT）
+            </n-alert>
 
             <div v-else class="file-list">
               <div v-for="(item, index) in fileItems" :key="item.uid" class="file-item">
                 <div class="file-item-main">
                   <div class="file-icon">📄</div>
                   <div class="file-info">
-                    <n-input v-model:value="item.filename" size="small" placeholder="文件名" class="file-name-input" />
-                    <div class="file-meta">{{ formatSize(item.file.size) }} · {{ item.file.type || '未知类型' }}</div>
+                    <div style="display:flex;align-items:center;gap:6px">
+                      <n-input v-model:value="item.filename" size="small" placeholder="文件名" class="file-name-input" />
+                      <n-tag v-if="item._isArchiveItem" size="small" round bordered>压缩包解压</n-tag>
+                    </div>
+                    <div class="file-meta">{{ formatSize(item.size ?? item.file?.size) }} · {{ item.file?.type || guessType(item.filename) }}</div>
                   </div>
                 </div>
                 <div class="file-item-fields">
@@ -80,7 +87,7 @@
             <n-space justify="end" v-if="fileItems.length">
               <n-button @click="clearAll">清空</n-button>
               <n-button type="primary" :loading="uploading" :disabled="!canUpload" @click="startBatchUpload">
-                批量上传（{{ fileItems.length }} 个）
+                {{ hasArchiveItems ? '批量入库' : '批量上传' }}（{{ fileItems.length }} 个）
               </n-button>
             </n-space>
           </n-space>
@@ -193,6 +200,7 @@ const levelOptions = [
 const fileItems = ref([])
 let uidCounter = 0
 
+const hasArchiveItems = computed(() => fileItems.value.some(it => it._isArchiveItem))
 const canUpload = computed(() => fileItems.value.length > 0 && !uploading.value && fileItems.value.every(it => it.education_level))
 
 const subjectOptions = computed(() => subjects.value.map(item => ({ label: item, value: item })))
@@ -293,16 +301,66 @@ function onPageSizeChange(pageSize) {
   loadMaterials()
 }
 
-function handleBeforeUpload({ file }) {
+const ALLOWED_EXTS = ['pdf','doc','docx','txt','md','xls','xlsx','ppt','pptx','zip','rar','7z','jpg','jpeg','png','gif','webp','bmp','mp4','mp3']
+const ARCHIVE_EXTS = ['zip','rar','7z']
+
+async function handleBeforeUpload({ file }) {
   const f = file.file
   if (!f) return false
-  // 跳过重复
-  if (fileItems.value.some(it => it.file.name === f.name && it.file.size === f.size)) return false
-  // 大小检查（50MB）
-  if (f.size > 50 * 1024 * 1024) {
-    message.warning(`文件 ${f.name} 超过 50MB，已跳过`)
+  // 跳过重复（含已展开的 archive item）
+  if (fileItems.value.some(it => it.filename === f.name && !it._isArchiveItem)) return false
+  // 大小检查（压缩包 200MB, 普通 50MB）
+  const ext = f.name.split('.').pop().toLowerCase()
+  const isArchive = ARCHIVE_EXTS.includes(ext)
+  const maxSize = isArchive ? 200 * 1024 * 1024 : 50 * 1024 * 1024
+  if (f.size > maxSize) {
+    message.warning(`文件 ${f.name} 超过 ${Math.round(maxSize/1024/1024)}MB，已跳过`)
     return false
   }
+  if (!ALLOWED_EXTS.includes(ext)) {
+    message.warning(`不支持的格式: .${ext}`)
+    return false
+  }
+
+  // ===== 压缩包走解压流程 =====
+  if (isArchive) {
+    message.info(`正在解析压缩包 ${f.name} ...`)
+    try {
+      const res = await phpMaterialsApi.extract({
+        file: f,
+        education_level: batchForm.education_level,
+        subject: batchForm.subject || '',
+      })
+      const data = res.data || res
+      if (!data || !Array.isArray(data.files) || !data.files.length) {
+        message.error(res.message || '压缩包里没有可导入的文件')
+        return false
+      }
+      // 展开成多个 item
+      for (const finfo of data.files) {
+        fileItems.value.push({
+          uid: ++uidCounter,
+          _isArchiveItem: true,              // 标记: 不是直接上传的 file
+          _archiveToken: data.token,         // 后端临时目录 token
+          filename: finfo.filename,
+          file: null,                        // 没有原生 File 对象
+          education_level: data.education_level_default || batchForm.education_level,
+          category_id: batchForm.category_id || null,
+          subject: data.subject_default || batchForm.subject || '',
+          description: '',
+          size: finfo.size,
+          status: '',
+          errorMsg: '',
+        })
+      }
+      message.success(`✓ ${f.name} 解压成功，${data.files.length} 个文件待入库`)
+    } catch (e) {
+      message.error(`解压失败: ${e.message || e}`)
+    }
+    return false
+  }
+
+  // ===== 普通文件直接入队 =====
   fileItems.value.push({
     uid: ++uidCounter,
     file: f,
@@ -356,8 +414,45 @@ async function startBatchUpload() {
   let successCount = 0
   let failCount = 0
 
-  for (const item of fileItems.value) {
-    if (item.status === 'success') continue
+  // 分开两类: 压缩包展开 vs 普通文件
+  const archiveItems = fileItems.value.filter(it => it._isArchiveItem && it.status !== 'success')
+  const normalItems = fileItems.value.filter(it => !it._isArchiveItem && it.status !== 'success')
+
+  // ===== 1. 压缩包展开的 → 调 batchConfirm (一次性批量入库) =====
+  if (archiveItems.length) {
+    // 按 token 分组（可能多个压缩包）
+    const byToken = {}
+    for (const ai of archiveItems) {
+      if (!byToken[ai._archiveToken]) byToken[ai._archiveToken] = []
+      byToken[ai._archiveToken].push(ai)
+    }
+    for (const [token, items] of Object.entries(byToken)) {
+      for (const ai of items) ai.status = 'uploading'
+      try {
+        const res = await phpMaterialsApi.batchConfirm({
+          token,
+          items: items.map(it => ({
+            filename: it.filename,
+            education_level: it.education_level,
+            category_id: it.category_id || 0,
+            subject: it.subject,
+            description: it.description,
+          })),
+        })
+        const data = res.data || res
+        const n = data?.success_count ?? items.length
+        successCount += n
+        // 标记为 success
+        for (const ai of items) ai.status = 'success'
+      } catch (e) {
+        failCount += items.length
+        for (const ai of items) { ai.status = 'error'; ai.errorMsg = e.message || '批量入库失败' }
+      }
+    }
+  }
+
+  // ===== 2. 普通文件 → 逐个 upload =====
+  for (const item of normalItems) {
     item.status = 'uploading'
     item.errorMsg = ''
     try {
@@ -380,12 +475,11 @@ async function startBatchUpload() {
 
   uploading.value = false
   if (successCount > 0) {
-    message.success(`上传完成：成功 ${successCount} 个${failCount ? `，失败 ${failCount} 个` : ''}`)
-    // 移除成功的，保留失败的方便重试
+    message.success(`完成：成功 ${successCount} 个${failCount ? `，失败 ${failCount} 个` : ''}`)
     fileItems.value = fileItems.value.filter(it => it.status !== 'success')
     loadMaterials()
   } else {
-    message.error(`全部上传失败，请检查文件格式和大小`)
+    message.error(`全部失败，请检查`)
   }
 }
 
@@ -441,6 +535,12 @@ function formatSize(value) {
   let index = 0
   while (size >= 1024 && index < units.length - 1) { size /= 1024; index++ }
   return `${size.toFixed(index ? 1 : 0)} ${units[index]}`
+}
+
+function guessType(filename) {
+  const map = { pdf: 'PDF 文档', doc: 'Word 文档', docx: 'Word 文档', xls: 'Excel 表格', xlsx: 'Excel 表格', ppt: 'PPT 演示', pptx: 'PPT 演示', txt: '文本', md: 'Markdown', zip: '压缩包', rar: '压缩包', '7z': '压缩包', jpg: '图片', jpeg: '图片', png: '图片', gif: '图片', webp: '图片' }
+  const ext = (filename || '').split('.').pop().toLowerCase()
+  return map[ext] || `${ext.toUpperCase()} 文件`
 }
 
 async function download(row) {

@@ -85,6 +85,8 @@ export const phpMaterialsApi = {
   categoryAdd: data => phpAction('material_category_add', data),
   categoryUpdate: data => phpAction('material_category_update', data),
   categoryRemove: id => phpAction('material_category_delete', { id }),
+  extract: data => phpAction('material_extract', data, { timeout: 60000 }),        // zip → 清单
+  batchConfirm: data => phpAction('material_batch_confirm', data, { timeout: 120000 }),  // 批量入库
 }
 
 // 资料需求反馈

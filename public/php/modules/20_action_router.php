@@ -1,4 +1,90 @@
 <?php
+// ===================== 压缩包解压 helper（顶级函数，material_upload / material_extract 共用）=====================
+// 参数: $f = $_FILES['file'] 数组; $realName = 原始文件名; $ext = strtolower(pathinfo(...))
+// 逻辑: move -> 解压到 materials/tmp_extract/{token}/ -> 返回清单 (jsonOut 直接 exit)
+if (!function_exists('_material_extract_archive')) {
+    function _material_extract_archive(array $f, string $realName, string $ext): void {
+        $matDir = __DIR__ . '/../../../materials';
+        $tmpRoot = $matDir . '/tmp_extract';
+        if (!is_dir($tmpRoot)) @mkdir($tmpRoot, 0755, true);
+        $token = 'ext_' . bin2hex(random_bytes(8));
+        $tmpDir = $tmpRoot . '/' . $token;
+        if (!@mkdir($tmpDir, 0750, true)) jsonOut(false, '临时目录创建失败');
+
+        $absPath = (string)($f['tmp_name'] ?? '');
+        $archiveStored = $matDir . '/tmp_extract/' . $token . '.' . $ext;
+        if (!move_uploaded_file($absPath, $archiveStored)) jsonOut(false, '压缩包保存失败');
+
+        $okExt = ['pdf','doc','docx','txt','md','xls','xlsx','ppt','pptx','jpg','jpeg','png','gif','webp','bmp'];
+        $files = [];
+
+        // ZIP: PHP ZipArchive（宝塔通常装了 ext-zip）
+        if ($ext === 'zip' && class_exists('ZipArchive')) {
+            $za = new ZipArchive();
+            $res = $za->open($archiveStored);
+            if ($res === true) {
+                for ($i = 0; $i < $za->numFiles; $i++) {
+                    $name = $za->getNameIndex($i);
+                    if ($name === false || str_ends_with($name, '/')) continue;
+                    if (str_contains($name, '..') || str_starts_with($name, '/')) continue;  // 路径穿越防护
+                    $ze = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+                    if (!in_array($ze, $okExt, true)) continue;
+                    $za->extractTo($tmpDir, [$name]);
+                    $bn = basename($name);
+                    $dst = $tmpDir . '/' . $bn;
+                    if (!file_exists($dst)) continue;
+                    $stat = $za->statIndex($i);
+                    $files[] = ['filename' => $bn, 'size' => (int)($stat['size'] ?? (filesize($dst) ?: 0)), 'can_import' => true];
+                }
+                $za->close();
+            }
+        }
+        // RAR / 7Z / 其他: shell 命令 fallback
+        elseif ($ext === 'rar') {
+            @shell_exec('unrar x -o+ -y -idq ' . escapeshellarg($archiveStored) . ' ' . escapeshellarg($tmpDir . '/'));
+        } else {
+            @shell_exec('unzip -o ' . escapeshellarg($archiveStored) . ' -d ' . escapeshellarg($tmpDir) . ' 2>/dev/null');
+        }
+
+        // shell 解压的: 扫描目录收集（包括嵌套子目录 → 扁平化）
+        if (count($files) === 0) {
+            foreach (glob($tmpDir . '/**/*', GLOB_BRACE) as $fp) {
+                if (!is_file($fp)) continue;
+                $bn = basename($fp);
+                if ($bn === basename($archiveStored)) continue;
+                $ze = strtolower(pathinfo($bn, PATHINFO_EXTENSION));
+                if (!in_array($ze, $okExt, true)) continue;
+                if (dirname($fp) !== $tmpDir) @rename($fp, $tmpDir . '/' . $bn);
+                $files[] = ['filename' => $bn, 'size' => (int)(filesize($fp) ?: 0), 'can_import' => true];
+            }
+        }
+
+        // 同 basename 去重
+        $seenF = [];
+        $files = array_values(array_filter($files, function ($f) use (&$seenF) {
+            if (isset($seenF[$f['filename']])) return false;
+            $seenF[$f['filename']] = true; return true;
+        }));
+
+        @unlink($archiveStored);  // 清源压缩包
+
+        if (count($files) === 0) {
+            @rmdir($tmpDir);
+            jsonOut(false, '压缩包里没有找到可导入的文件（仅支持: ' . implode('/', $okExt) . '）');
+        }
+
+        @file_put_contents($tmpDir . '/.meta', json_encode(['created' => time(), 'archive_name' => $realName], JSON_UNESCAPED_UNICODE));
+
+        jsonOut(true, '解压成功，共 ' . count($files) . ' 个可导入文件', [
+            'token' => $token,
+            'tmp_dir' => $tmpDir,
+            'files' => $files,
+            'education_level_default' => validateEducationLevel($_POST['education_level'] ?? 'junior'),
+            'subject_default' => sanitizeInput($_POST['subject'] ?? ''),
+        ]);
+    }
+}
+
 // ===================== API处理 =====================
 if ($action) {
     try {
@@ -2938,11 +3024,17 @@ if ($action) {
                 $max = 50 * 1024 * 1024;
                 if ((int)$f['size'] > $max) jsonOut(false, "文件超过 50MB 上限");
                 // 扩展名白名单（以实际上传文件为准，防止伪造）
-                $allowedExts = ['pdf','doc','docx','txt','md','xls','xlsx','ppt','pptx'];
+                $allowedExts = ['pdf','doc','docx','txt','md','xls','xlsx','ppt','pptx','zip','rar','7z'];
+                $archiveExts = ['zip','rar','7z'];  // 压缩包要自动解压
                 $realName = (string)$f['name'];
                 $ext = strtolower(pathinfo($realName, PATHINFO_EXTENSION));
                 if (!in_array($ext, $allowedExts, true)) {
                     jsonOut(false, "不允许的扩展名：$ext。仅允许：" . implode('/', $allowedExts));
+                }
+
+                // ===== 压缩包走解压流程（两步：extract → 前端展示 → confirm 入库）=====
+                if (in_array($ext, $archiveExts, true)) {
+                    _material_extract_archive($f, $realName, $ext);  // 调顶级函数（内部 jsonOut exit）
                 }
                 // 显示文件名：优先用前端传入的 filename，否则用原始文件名
                 $customName = trim((string)($_POST['filename'] ?? ''));
@@ -2995,6 +3087,91 @@ if ($action) {
                 );
                 $newId = (int)$db->lastInsertRowID();
                 jsonOut(true, "上传成功", ['material_id' => $newId, 'filename' => $origName, 'size' => (int)$f['size'], 'education_level' => $educationLevel]);
+                break;
+
+            // ---------- 压缩包解压入口（独立上传走此 case, material_upload 里也调同函数）----------
+            case 'material_extract':
+                requireContentPermission('material_manage');
+                if (empty($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) jsonOut(false, '请上传压缩包');
+                $f = $_FILES['file'];
+                $ext = strtolower(pathinfo((string)$f['name'], PATHINFO_EXTENSION));
+                if (!in_array($ext, ['zip','rar','7z'], true)) jsonOut(false, '仅支持 zip/rar/7z');
+                _material_extract_archive($f, (string)$f['name'], $ext);  // 内部 jsonOut exit
+                break;
+
+            // ---------- 批量确认入库（前端展示后调此接口）----------
+            case 'material_batch_confirm':
+                requireContentPermission('material_manage');
+                $token = trim((string)($_POST['token'] ?? ''));
+                if ($token === '' || !preg_match('/^ext_[a-f0-9]{16}$/', $token)) jsonOut(false, 'token 无效');
+                $tmpDir = __DIR__ . '/../../../materials/tmp_extract/' . $token;
+                if (!is_dir($tmpDir)) jsonOut(false, '临时目录已过期，请重新上传');
+
+                $meta = json_decode(@file_get_contents($tmpDir . '/.meta') ?: '', true);
+                $items = json_decode($_POST['items'] ?? '[]', true);
+                if (!is_array($items) || !count($items)) jsonOut(false, '没有选中任何文件');
+
+                $matDir = __DIR__ . '/../../../materials';
+                $okExt = ['pdf','doc','docx','txt','md','xls','xlsx','ppt','pptx','jpg','jpeg','png','gif','webp','bmp'];
+                $uploadedBy = getUid();
+                $successCount = 0;
+                $errors = [];
+
+                foreach ($items as $idx => $it) {
+                    $filename = sanitizeInput((string)($it['filename'] ?? ''));
+                    if ($filename === '' || preg_match('/[\/\\\\]/', $filename)) { $errors[] = "第 $idx 项文件名非法"; continue; }
+                    $src = $tmpDir . '/' . $filename;
+                    if (!is_file($src)) { $errors[] = "文件丢失: $filename"; continue; }
+                    $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+                    if (!in_array($ext, $okExt, true)) { $errors[] = "扩展名不支持: $filename"; continue; }
+
+                    $level = validateEducationLevel($it['education_level'] ?? 'junior');
+                    $subject = sanitizeInput($it['subject'] ?? '');
+                    $categoryId = (int)($it['category_id'] ?? 0);
+                    $desc = sanitizeInput($it['description'] ?? '');
+
+                    $mime = '';
+                    if (function_exists('finfo_open')) {
+                        $finfo = @finfo_open(FILEINFO_MIME_TYPE);
+                        if ($finfo) { $mime = @finfo_file($finfo, $src); @finfo_close($finfo); }
+                    }
+
+                    $stored = 'mat_' . bin2hex(random_bytes(8)) . '.' . $ext;
+                    $stored = preg_replace('/[^A-Za-z0-9._-]/', '', $stored);
+                    $dst = $matDir . '/' . $stored;
+
+                    if (!rename($src, $dst)) {
+                        @copy($src, $dst);
+                        @unlink($src);
+                    }
+                    if (!file_exists($dst)) { $errors[] = "保存失败: $filename"; continue; }
+                    @chmod($dst, 0644);
+
+                    dbQuery($db,
+                        "INSERT INTO materials(filename, stored_name, file_path, file_size, mime_type, subject, description, uploaded_by, education_level, category_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        [$filename, $stored, 'materials/' . $stored, (int)(filesize($dst) ?: 0), $mime, $subject, $desc, $uploadedBy, $level, $categoryId > 0 ? $categoryId : null]
+                    );
+                    $successCount++;
+                }
+
+                // 清理临时目录
+                foreach (glob($tmpDir . '/*') as $gf) @unlink($gf);
+                @rmdir($tmpDir);
+
+                // 顺便清其他过期的 tmp_extract 目录（>24h）
+                foreach (glob(__DIR__ . '/../../../materials/tmp_extract/*/.meta') as $mf) {
+                    $m = json_decode(@file_get_contents($mf) ?: '', true);
+                    if (isset($m['created']) && time() - (int)$m['created'] > 86400) {
+                        $oldDir = dirname($mf);
+                        foreach (glob($oldDir . '/*') as $og) @unlink($og);
+                        @rmdir($oldDir);
+                    }
+                }
+
+                jsonOut(true, "批量入库完成：成功 $successCount 个" . ($errors ? '，' . count($errors) . ' 个跳过' : ''), [
+                    'success_count' => $successCount,
+                    'errors' => $errors,
+                ]);
                 break;
 
             // ---------- 管理员编辑资料元数据 ----------
