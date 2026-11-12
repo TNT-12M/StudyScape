@@ -40,12 +40,22 @@ PIPELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
 PDF_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export_pdf.py")
 PIPELINE_TIMEOUT = 300
 
-# 家里云存储根目录 (StudyScape 项目 data/StudyScape/materials)
-HOME_STORAGE_ROOT = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "data", "StudyScape"
-)
+# 家里云存储根目录 — 必须指向 /data 盘 (系统盘只有 109G, /data 有 116G)
+# 优先级: 环境变量 → /data/StudyScape → fallback 项目内 data/StudyScape
+def _resolve_storage_root():
+    env = os.environ.get("STUDYSCAPE_STORAGE_ROOT", "").strip()
+    if env and os.path.isdir(os.path.dirname(env)):
+        return env
+    # /data 盘路径 (最优先)
+    data_disk = "/data/StudyScape"
+    if os.path.isdir("/data"):
+        return data_disk
+    # fallback: 项目内 data 目录 (但项目本身在 /home/lian 会占系统盘)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "StudyScape")
+
+HOME_STORAGE_ROOT = _resolve_storage_root()
 HOME_MATERIALS_DIR = os.path.join(HOME_STORAGE_ROOT, "materials")
+HOME_TMP_DIR = os.path.join(HOME_STORAGE_ROOT, "_tmp_jobs")  # OCR pipeline 临时文件也走 /data
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 OPCODE_TEXT = 0x01
@@ -460,7 +470,7 @@ async def _handle_export_pdf(writer, job_id, task_data):
         _mineru_last_task = time.time()
         export_input = task_data.get("export_input", {})
 
-        tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_jobs")
+        tmpdir = HOME_TMP_DIR
         os.makedirs(tmpdir, exist_ok=True)
         tmp_in = os.path.join(tmpdir, f"{job_id}_export.json")
         tmp_out = os.path.join(tmpdir, f"{job_id}.pdf")
@@ -517,7 +527,7 @@ async def _handle_ocr(writer, job_id, task_data):
             await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": "MinerU parse-server 启动失败"})
             return
 
-        tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_jobs")
+        tmpdir = HOME_TMP_DIR
         os.makedirs(tmpdir, exist_ok=True)
         tmp_in = os.path.join(tmpdir, f"{job_id}_{filename}")
         tmp_out = os.path.join(tmpdir, f"{job_id}_result.json")
