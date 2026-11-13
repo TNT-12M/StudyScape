@@ -87,8 +87,26 @@ data/password.key
 # ===== OCR Bridge 密钥 + 临时文件 =====
 ocr_bridge/bridge_key.txt
 ocr_bridge/_tmp_jobs/
+ocr_bridge/__pycache__/
 
-# ===== OCR 运行结果（正式源码之外的运行数据） =====
+# ===== MinerU / OCR 运行输出 =====
+blobs/
+output_*.json
+*.bak.*
+ocr_pipeline/__pycache__/
+__pycache__/
+
+# ===== StudyScape 分布式存储目录 (数据文件, 不入库) =====
+data/StudyScape/
+data/study_questions.db
+
+# ===== systemd 服务文件 (服务器特定, 路径写死, 不入库) =====
+*.service
+
+# ===== 大体积测试 PDF =====
+*真题*.pdf
+
+# ===== StudyScape 运行结果（正式源码之外的运行数据） =====
 data/ocr_batches/
 
 .ssh_temp/

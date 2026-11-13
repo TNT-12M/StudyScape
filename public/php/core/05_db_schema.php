@@ -8,6 +8,7 @@ try {
 } catch (Exception $e) {
     die(json_encode(['success' => false, 'message' => '数据库连接失败: ' . $e->getMessage()]));
 }
+
 try {
     $passwordKey = loadPasswordKey();
 } catch (Throwable $e) {
@@ -15,8 +16,46 @@ try {
     die(json_encode(['success' => false, 'message' => '密码密钥初始化失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
 
-// 创建表
-$createSql = "
+// ===== 题库 DB 路径解析: 优先数据盘, fallback 系统盘 =====
+// 静态题库 (questions/papers/paper_questions) 放数据盘 /data/StudyScape/questions.db
+// 动态业务 (users/materials/attempts/answers) 放系统盘 exam.db
+if (!function_exists('_resolveQuestionsDbPath')) {
+    function _resolveQuestionsDbPath(): string {
+        // 1. 环境变量 (部署时可覆盖)
+        $env = trim((string)(getenv('STUDYSCAPE_QUESTIONS_DB') ?: ''));
+        if ($env && (is_dir(dirname($env)) || @mkdir(dirname($env), 0755, true))) {
+            return $env;
+        }
+        // 2. 探测数据盘 (家里云有 /data, 公网机可能没有)
+        foreach (['/data/StudyScape/questions.db', '/data/study_questions.db', '/mnt/data/StudyScape/questions.db'] as $candidate) {
+            if (is_dir(dirname($candidate)) || @mkdir(dirname($candidate), 0755, true)) {
+                return $candidate;
+            }
+        }
+        // 3. fallback: 系统盘项目内 data/
+        $fallback = __DIR__ . '/../../../data/study_questions.db';
+        @mkdir(dirname($fallback), 0755, true);
+        return $fallback;
+    }
+}
+
+$questionsDbFile = _resolveQuestionsDbPath();
+
+// ===== ATTACH 题库 DB =====
+// SQLite ATTACH 后, action_router 里的所有 SQL 一行不改!
+// 查询 "SELECT * FROM questions" 自动命中 qdb schema (因为 main 里已不存在 questions 表)
+$safeQPath = str_replace("'", "''", $questionsDbFile);
+try {
+    $db->exec("ATTACH DATABASE '{$safeQPath}' AS qdb");
+    // 记住路径给调试
+    $db->exec("PRAGMA application_id = 0x53544442");
+} catch (Exception $e) {
+    error_log("⚠️ ATTACH qdb 失败，题库将和业务数据共库: " . $e->getMessage());
+    $questionsDbFile = $dbFile; // fallback: 和主库同一个文件
+}
+
+// ===== MAIN SCHEMA (exam.db — 系统盘, 高频读写) =====
+$createMainSql = "
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
@@ -43,59 +82,15 @@ CREATE TABLE IF NOT EXISTS exam_data (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- 题目表：题干、选项、答案、解析、题型、科目、难度、分值
-CREATE TABLE IF NOT EXISTS questions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    subject TEXT NOT NULL,
-    question_type TEXT NOT NULL,
-    content TEXT NOT NULL,
-    options TEXT,
-    correct_answer TEXT NOT NULL,
-    explanation TEXT,
-    difficulty INTEGER DEFAULT 1,
-    points REAL DEFAULT 1.0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_questions_subject ON questions(subject);
-CREATE INDEX IF NOT EXISTS idx_questions_type ON questions(question_type);
-
--- ===== P1-B: 方案B 组卷考试 / 自由刷题（4 张新表，不动现有表） =====
-
--- 试卷表（组卷考试用）
-CREATE TABLE IF NOT EXISTS papers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT,
-    duration_minutes INTEGER NOT NULL DEFAULT 60,
-    is_published INTEGER DEFAULT 0,
-    created_by INTEGER,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_papers_published ON papers(is_published);
-
--- 试卷-题目关联表
-CREATE TABLE IF NOT EXISTS paper_questions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    paper_id INTEGER NOT NULL,
-    question_id INTEGER NOT NULL,
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    points REAL NOT NULL DEFAULT 1.0
-);
-CREATE INDEX IF NOT EXISTS idx_pq_paper ON paper_questions(paper_id);
-CREATE INDEX IF NOT EXISTS idx_pq_question ON paper_questions(question_id);
-
--- 考试/刷题尝试记录（B1 + B2 共用）
 CREATE TABLE IF NOT EXISTS exam_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    attempt_type TEXT NOT NULL,           -- 'exam' 组卷 / 'practice' 自由刷题
-    paper_id INTEGER,                     -- B1时为试卷ID；B2时为NULL
+    attempt_type TEXT NOT NULL,
+    paper_id INTEGER,
     user_id INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'in_progress', -- 'in_progress' / 'submitted'
+    status TEXT NOT NULL DEFAULT 'in_progress',
     started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     submitted_at DATETIME,
-    duration_minutes INTEGER NOT NULL DEFAULT 0, -- B1来自试卷；B2用户输入，0=不限时
+    duration_minutes INTEGER NOT NULL DEFAULT 0,
     self_score_total REAL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -103,22 +98,20 @@ CREATE INDEX IF NOT EXISTS idx_attempts_user ON exam_attempts(user_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_paper ON exam_attempts(paper_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_type ON exam_attempts(attempt_type);
 
--- 作答明细表（B1 + B2 共用，每题一条）
 CREATE TABLE IF NOT EXISTS exam_answers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     attempt_id INTEGER NOT NULL,
     question_id INTEGER NOT NULL,
-    student_answer TEXT,                 -- 多空填空存 JSON 数组；单选/多选/判断存字符串
-    self_correct INTEGER,               -- 1=对,0=错,NULL=未评
+    student_answer TEXT,
+    self_correct INTEGER,
     self_score REAL,
-    auto_correct INTEGER,               -- 预留：自动判分（本期恒 NULL）
-    auto_score REAL,                    -- 预留：自动判分（本期恒 NULL）
+    auto_correct INTEGER,
+    auto_score REAL,
     judged_at DATETIME
 );
 CREATE INDEX IF NOT EXISTS idx_answers_attempt ON exam_answers(attempt_id);
 CREATE INDEX IF NOT EXISTS idx_answers_question ON exam_answers(question_id);
 
--- ===== P2-C: 资料下载 =====
 CREATE TABLE IF NOT EXISTS materials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     filename TEXT NOT NULL,
@@ -136,14 +129,88 @@ CREATE TABLE IF NOT EXISTS materials (
 CREATE INDEX IF NOT EXISTS idx_materials_subject ON materials(subject);
 ";
 try {
-    $db->exec($createSql);
+    $db->exec($createMainSql);
 } catch (Exception $e) {
-    die(json_encode(['success' => false, 'message' => '创建表失败: ' . $e->getMessage()]));
+    die(json_encode(['success' => false, 'message' => '创建主表失败: ' . $e->getMessage()]));
 }
 
-// 兼容旧库：若 questions 表缺少 updated_at 列则补上
+// ===== QDB SCHEMA (questions.db — 数据盘, 静态题库资产) =====
+$createQSql = "
+CREATE TABLE IF NOT EXISTS qdb.questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject TEXT NOT NULL,
+    question_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    options TEXT,
+    correct_answer TEXT NOT NULL,
+    explanation TEXT,
+    difficulty INTEGER DEFAULT 1,
+    points REAL DEFAULT 1.0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS qdb_idx_questions_subject ON questions(subject);
+CREATE INDEX IF NOT EXISTS qdb_idx_questions_type ON questions(question_type);
+
+CREATE TABLE IF NOT EXISTS qdb.papers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    duration_minutes INTEGER NOT NULL DEFAULT 60,
+    is_published INTEGER DEFAULT 0,
+    created_by INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS qdb_idx_papers_published ON papers(is_published);
+
+CREATE TABLE IF NOT EXISTS qdb.paper_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id INTEGER NOT NULL,
+    question_id INTEGER NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    points REAL NOT NULL DEFAULT 1.0
+);
+CREATE INDEX IF NOT EXISTS qdb_idx_pq_paper ON paper_questions(paper_id);
+CREATE INDEX IF NOT EXISTS qdb_idx_pq_question ON paper_questions(question_id);
+";
 try {
-    $res = $db->query("PRAGMA table_info(questions)");
+    $db->exec($createQSql);
+} catch (Exception $e) {
+    error_log("⚠️ 创建题库表失败: " . $e->getMessage() . " — 题库功能可能不可用");
+}
+
+// ===== 升级迁移: main.questions → qdb.questions =====
+// 旧 exam.db 里 questions/papers/paper_questions 可能在 main schema 里
+// 如果 qdb.questions 还没数据, 就把 main 的数据迁过去再 DROP main 的表
+$qTables = ['questions', 'papers', 'paper_questions'];
+foreach ($qTables as $t) {
+    try {
+        // main 里有没有?
+        $res = $db->query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='" . SQLite3::escapeString($t) . "'");
+        if ($res && $row = $res->fetchArray()) {
+            $count = (int)$db->querySingle("SELECT COUNT(*) FROM main.{$t}");
+            if ($count > 0) {
+                // 检查 qdb 里是不是空 (避免覆盖已有)
+                $qcount = (int)$db->querySingle("SELECT COUNT(*) FROM qdb.{$t}");
+                if ($qcount === 0) {
+                    error_log("📦 升级迁移 main.{$t} ({$count} 行) → qdb.{$t}");
+                    $db->exec("INSERT INTO qdb.{$t} SELECT * FROM main.{$t}");
+                } else {
+                    error_log("⚠️ main.{$t} 有 {$count} 行但 qdb.{$t} 已有 {$qcount} 行 — 跳过迁移");
+                }
+            }
+            // DROP main 的表 (无论有没有数据)
+            $db->exec("DROP TABLE main.{$t}");
+        }
+    } catch (Exception $e) {
+        error_log("升级迁移 {$t} 失败: " . $e->getMessage());
+    }
+}
+
+// ===== 兼容旧库: qdb.questions 补 updated_at 列 =====
+try {
+    $res = $db->query("PRAGMA qdb.table_info(questions)");
     $hasUpdated = false;
     if ($res) {
         while ($c = $res->fetchArray(SQLITE3_ASSOC)) {
@@ -151,13 +218,13 @@ try {
         }
     }
     if (!$hasUpdated) {
-        $db->exec("ALTER TABLE questions ADD COLUMN updated_at DATETIME");
+        $db->exec("ALTER TABLE qdb.questions ADD COLUMN updated_at DATETIME");
     }
 } catch (Exception $e) {
-    // 静默：表不存在等已被 CREATE 兜底
+    // 静默
 }
 
-// 兼容旧库：materials 表缺少 sha256 / storage_node 列则补上
+// ===== 兼容旧库: materials 补 sha256 / storage_node =====
 try {
     $res = $db->query("PRAGMA table_info(materials)");
     $cols = [];
@@ -167,18 +234,17 @@ try {
     if (!in_array('sha256', $cols)) $db->exec("ALTER TABLE materials ADD COLUMN sha256 TEXT");
     if (!in_array('storage_node', $cols)) {
         $db->exec("ALTER TABLE materials ADD COLUMN storage_node TEXT DEFAULT 'local'");
-        // 历史有本地文件的记录统一标记为 local
         $db->exec("UPDATE materials SET storage_node='local' WHERE storage_node IS NULL");
     }
 } catch (Exception $e) {
-    // 静默：表不存在等已被 CREATE 兜底
+    // 静默
 }
 
 // 注册审批已取消：兼容历史账号，统一视为已注册账号。
 try {
     $db->exec("UPDATE users SET is_approved=1 WHERE is_approved=0");
 } catch (Exception $e) {
-    // 静默：用户表已由 CREATE TABLE 兜底
+    // 静默
 }
 
-// 学段与题库分类迁移：只在缺列时添加，历史记录统一回填为 junior。
+// 学段与题库分类迁移（继续读文件剩余部分...）
