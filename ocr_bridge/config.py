@@ -111,7 +111,3 @@ else:
     STORAGE_ROOT = os.path.join(ROOT_DIR, "data", "StudyScape")
 
 KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_key.txt")
-
-# --- frps 配置 (公网机做 frps 时) ---
-FRPS_BIND_PORT = env_int("FRPS_BIND_PORT", 7000)
-FRPS_TOKEN = env("FRPS_TOKEN", "")
