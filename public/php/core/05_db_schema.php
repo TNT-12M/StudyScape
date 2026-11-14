@@ -5,6 +5,11 @@ $dbFile = __DIR__ . '/../../../exam.db';
 try {
     $db = new SQLite3($dbFile);
     $db->enableExceptions(true);
+    // SQLite 并发优化: WAL 模式 + busy_timeout 30s (PHP-FPM 多进程时必加)
+    $db->exec('PRAGMA journal_mode=WAL;');
+    $db->exec('PRAGMA busy_timeout=30000;');
+    $db->exec('PRAGMA synchronous=NORMAL;');
+    $db->exec('PRAGMA cache_size=-64000;');  // 64MB 缓存
 } catch (Exception $e) {
     die(json_encode(['success' => false, 'message' => '数据库连接失败: ' . $e->getMessage()]));
 }
