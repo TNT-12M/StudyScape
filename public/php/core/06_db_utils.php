@@ -1,6 +1,32 @@
 <?php
+/**
+ * 搜索所有已 ATTACH 的 schema (main, qdb, temp, ...)
+ * SQLite ATTACH 后默认 schema 顺序: main → qdb → temp → 其他
+ * 但 PRAGMA table_info 只查默认 schema, 所以要遍历所有 schema
+ */
+function _allSchemas(SQLite3 $db): array {
+    $schemas = [];
+    $r = $db->query("PRAGMA database_list");
+    while ($row = $r->fetchArray(SQLITE3_ASSOC)) {
+        $schemas[] = $row['name']; // main, qdb, temp, ...
+    }
+    return $schemas ?: ['main'];
+}
+function _findTableSchema(SQLite3 $db, string $table): ?string {
+    foreach (_allSchemas($db) as $schema) {
+        $safe = preg_replace('/[^A-Za-z0-9_]/', '', $table);
+        $safeSchema = preg_replace('/[^A-Za-z0-9_]/', '', $schema);
+        $r = $db->querySingle("SELECT name FROM {$safeSchema}.sqlite_master WHERE type='table' AND name='{$safe}'");
+        if ($r) return $schema;
+    }
+    return null;
+}
 function tableHasColumn(SQLite3 $db, string $table, string $column): bool {
-    $result = $db->query("PRAGMA table_info(" . preg_replace('/[^A-Za-z0-9_]/', '', $table) . ")");
+    $schema = _findTableSchema($db, $table);
+    if (!$schema) return false;
+    $safe = preg_replace('/[^A-Za-z0-9_]/', '', $table);
+    $safeSchema = preg_replace('/[^A-Za-z0-9_]/', '', $schema);
+    $result = $db->query("PRAGMA {$safeSchema}.table_info({$safe})");
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
         if (strcasecmp($row['name'], $column) === 0) return true;
     }
@@ -15,21 +41,21 @@ try {
         $db->exec("ALTER TABLE users ADD COLUMN is_initial_root INTEGER NOT NULL DEFAULT 0");
     }
     if (!tableHasColumn($db, 'questions', 'education_level')) {
-        $db->exec("ALTER TABLE questions ADD COLUMN education_level TEXT NOT NULL DEFAULT 'junior'");
+        $db->exec("ALTER TABLE qdb.questions ADD COLUMN education_level TEXT NOT NULL DEFAULT 'junior'");
     }
     if (!tableHasColumn($db, 'questions', 'category')) {
-        $db->exec("ALTER TABLE questions ADD COLUMN category TEXT NOT NULL DEFAULT 'single'");
+        $db->exec("ALTER TABLE qdb.questions ADD COLUMN category TEXT NOT NULL DEFAULT 'single'");
     }
     if (!tableHasColumn($db, 'questions', 'is_html')) {
         // 富 HTML 题干（含 base64 图片/表格等 PaperCutter-VL 输出）：1=是，0=否
-        $db->exec("ALTER TABLE questions ADD COLUMN is_html INTEGER NOT NULL DEFAULT 0");
+        $db->exec("ALTER TABLE qdb.questions ADD COLUMN is_html INTEGER NOT NULL DEFAULT 0");
     }
     // OCR 流水线对接：匹配码 + 原始题号（用于题目-答案精准匹配）
     if (!tableHasColumn($db, 'questions', 'match_key')) {
-        $db->exec("ALTER TABLE questions ADD COLUMN match_key TEXT NOT NULL DEFAULT ''");
+        $db->exec("ALTER TABLE qdb.questions ADD COLUMN match_key TEXT NOT NULL DEFAULT ''");
     }
     if (!tableHasColumn($db, 'questions', 'source_qid')) {
-        $db->exec("ALTER TABLE questions ADD COLUMN source_qid TEXT NOT NULL DEFAULT ''");
+        $db->exec("ALTER TABLE qdb.questions ADD COLUMN source_qid TEXT NOT NULL DEFAULT ''");
     }
     if (!tableHasColumn($db, 'materials', 'education_level')) {
         $db->exec("ALTER TABLE materials ADD COLUMN education_level TEXT NOT NULL DEFAULT 'junior'");
@@ -50,10 +76,10 @@ try {
     $db->exec("UPDATE questions SET education_level='junior' WHERE education_level IS NULL OR education_level='' OR education_level NOT IN ('junior','senior')");
     $db->exec("UPDATE questions SET category=question_type WHERE category IS NULL OR category='' OR category NOT IN ('single','multiple','judge','fill','multi_fill','short')");
     $db->exec("UPDATE materials SET education_level='junior' WHERE education_level IS NULL OR education_level='' OR education_level NOT IN ('junior','senior')");
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_education_level ON questions(education_level)");
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_level_subject ON questions(education_level, subject)");
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_match_key ON questions(match_key)");
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_source_qid ON questions(source_qid)");
+    $db->exec("CREATE INDEX IF NOT EXISTS qdb.idx_questions_education_level ON questions(education_level)");
+    $db->exec("CREATE INDEX IF NOT EXISTS qdb.idx_questions_level_subject ON questions(education_level, subject)");
+    $db->exec("CREATE INDEX IF NOT EXISTS qdb.idx_questions_match_key ON questions(match_key)");
+    $db->exec("CREATE INDEX IF NOT EXISTS qdb.idx_questions_source_qid ON questions(source_qid)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_materials_education_level ON materials(education_level)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_materials_level_subject ON materials(education_level, subject)");
 
@@ -487,10 +513,10 @@ try {
 
 // ===== 质量质检: questions 加 quality + quality_flags =====
 try {
-    try { $db->exec("ALTER TABLE questions ADD COLUMN quality TEXT NOT NULL DEFAULT 'good'"); } catch (Throwable $ignored) {}
-    try { $db->exec("ALTER TABLE questions ADD COLUMN quality_flags TEXT NOT NULL DEFAULT ''"); } catch (Throwable $ignored) {}
-    try { $db->exec("ALTER TABLE questions ADD COLUMN quality_scanned_at DATETIME"); } catch (Throwable $ignored) {}
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_questions_quality ON questions(quality)");
+    try { $db->exec("ALTER TABLE qdb.questions ADD COLUMN quality TEXT NOT NULL DEFAULT 'good'"); } catch (Throwable $ignored) {}
+    try { $db->exec("ALTER TABLE qdb.questions ADD COLUMN quality_flags TEXT NOT NULL DEFAULT ''"); } catch (Throwable $ignored) {}
+    try { $db->exec("ALTER TABLE qdb.questions ADD COLUMN quality_scanned_at DATETIME"); } catch (Throwable $ignored) {}
+    $db->exec("CREATE INDEX IF NOT EXISTS qdb.idx_questions_quality ON questions(quality)");
 } catch (Exception $e) {
     error_log('Questions quality migration failed: ' . $e->getMessage());
 }

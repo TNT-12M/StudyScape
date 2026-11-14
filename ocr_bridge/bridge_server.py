@@ -40,10 +40,13 @@ import base64 as _b64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-# ======================= 配置 =======================
-WS_PORT = 1200           # Worker WebSocket 端口 (公网)
-HTTP_PORT = 1201         # PHP 本地接口 (仅 localhost)
-KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_key.txt")
+# ======================= 配置 (全部从 server.env / 环境变量读, 零硬编码) =======================
+from config import (
+    BRIDGE_LISTEN_HOST, BRIDGE_LISTEN_PORT, PHP_BRIDGE_HTTP_PORT, KEY_FILE,
+)
+WS_HOST = BRIDGE_LISTEN_HOST  # 兼容旧代码变量名
+WS_PORT = BRIDGE_LISTEN_PORT
+HTTP_PORT = PHP_BRIDGE_HTTP_PORT
 WORKER_TIMEOUT = 30      # Worker 心跳超时 (秒)
 RESULT_TTL = 14400       # done/failed 结果保留 4h 后清
 QUEUED_TIMEOUT = 600     # queued 10min 没被 worker 取 → failed
@@ -961,17 +964,18 @@ async def main():
     global event_loop
     event_loop = asyncio.get_running_loop()
 
-    # WebSocket 1200 server (家里云 Worker 连接)
+    # WebSocket Worker 监听 (家里云 Worker 连接)
     ws_server = await asyncio.start_server(
-        handle_worker, "0.0.0.0", WS_PORT
+        handle_worker, WS_HOST, WS_PORT
     )
-    log.info(f"✅ WebSocket Worker 端口: 0.0.0.0:{WS_PORT} (无第三方依赖, 纯 asyncio)")
+    log.info(f"✅ WebSocket Worker: {WS_HOST}:{WS_PORT} (纯 asyncio)")
 
-    # HTTP 1201 server (PHP 本地接口)
-    http_server = ThreadingHTTPServer(("127.0.0.1", HTTP_PORT), PHPHandler)
+    # HTTP PHP 接口 (仅 localhost, 安全不暴露公网)
+    http_bind_host = "127.0.0.1"
+    http_server = ThreadingHTTPServer((http_bind_host, HTTP_PORT), PHPHandler)
     import threading
     threading.Thread(target=http_server.serve_forever, daemon=True).start()
-    log.info(f"✅ HTTP PHP 接口: 127.0.0.1:{HTTP_PORT} (仅 localhost)")
+    log.info(f"✅ HTTP PHP 接口: {http_bind_host}:{HTTP_PORT} (仅 localhost)")
 
     asyncio.create_task(cleanup_loop())
     asyncio.create_task(watchdog_loop())

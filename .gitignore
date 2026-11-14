@@ -29,8 +29,17 @@ php.ini
 *.ini.local
 .env
 .env.local
+server.env          # ★ 分布式架构配置 (各服务器不同, 勿入库)
+server.env.*.local
 smtp.env
 AccessKey .env
+AccessKey.env
+
+# ===== frp 穿透配置 (服务器特定, 含 token/IP, 勿入库) =====
+frpc.toml
+frps.toml
+frpc.*.toml
+frps.*.toml
 
 # ===== 临时/补丁脚本（开发期一次性脚本，不入库）=====
 patch_*.php

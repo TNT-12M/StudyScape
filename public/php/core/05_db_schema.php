@@ -16,15 +16,20 @@ try {
     die(json_encode(['success' => false, 'message' => '密码密钥初始化失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
 
-// ===== 题库 DB 路径解析: 优先数据盘, fallback 系统盘 =====
-// 静态题库 (questions/papers/paper_questions) 放数据盘 /data/StudyScape/questions.db
-// 动态业务 (users/materials/attempts/answers) 放系统盘 exam.db
+// ===== 题库 DB 路径解析 =====
+// 优先级: 环境变量 > server.env 的 QUESTIONS_DB_PATH > 数据盘探测 > fallback 项目内
+// 分布式架构下, 公网机本地有 questions.db 副本 (定期 rsync 从家里云拉取)
 if (!function_exists('_resolveQuestionsDbPath')) {
     function _resolveQuestionsDbPath(): string {
-        // 1. 环境变量 (部署时可覆盖)
-        $env = trim((string)(getenv('STUDYSCAPE_QUESTIONS_DB') ?: ''));
-        if ($env && (is_dir(dirname($env)) || @mkdir(dirname($env), 0755, true))) {
-            return $env;
+        // 1. 最高优先: 环境变量 / server.env
+        $configured = env('QUESTIONS_DB_PATH');
+        if ($configured) {
+            if (is_file($configured)) return $configured;
+            // 目录不存在就创建 (首次部署)
+            $dir = dirname($configured);
+            if (!is_dir($dir) && @mkdir($dir, 0755, true) && is_dir($dir)) {
+                return $configured;
+            }
         }
         // 2. 探测数据盘 (家里云有 /data, 公网机可能没有)
         foreach (['/data/StudyScape/questions.db', '/data/study_questions.db', '/mnt/data/StudyScape/questions.db'] as $candidate) {
@@ -149,8 +154,8 @@ CREATE TABLE IF NOT EXISTS qdb.questions (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS qdb_idx_questions_subject ON questions(subject);
-CREATE INDEX IF NOT EXISTS qdb_idx_questions_type ON questions(question_type);
+CREATE INDEX IF NOT EXISTS qdb.idx_questions_subject ON questions(subject);
+CREATE INDEX IF NOT EXISTS qdb.idx_questions_type ON questions(question_type);
 
 CREATE TABLE IF NOT EXISTS qdb.papers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,7 +167,7 @@ CREATE TABLE IF NOT EXISTS qdb.papers (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS qdb_idx_papers_published ON papers(is_published);
+CREATE INDEX IF NOT EXISTS qdb.idx_papers_published ON papers(is_published);
 
 CREATE TABLE IF NOT EXISTS qdb.paper_questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,8 +176,8 @@ CREATE TABLE IF NOT EXISTS qdb.paper_questions (
     sort_order INTEGER NOT NULL DEFAULT 0,
     points REAL NOT NULL DEFAULT 1.0
 );
-CREATE INDEX IF NOT EXISTS qdb_idx_pq_paper ON paper_questions(paper_id);
-CREATE INDEX IF NOT EXISTS qdb_idx_pq_question ON paper_questions(question_id);
+CREATE INDEX IF NOT EXISTS qdb.idx_pq_paper ON paper_questions(paper_id);
+CREATE INDEX IF NOT EXISTS qdb.idx_pq_question ON paper_questions(question_id);
 ";
 try {
     $db->exec($createQSql);

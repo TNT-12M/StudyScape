@@ -32,28 +32,19 @@ import traceback
 import hashlib as _hashlib
 import base64 as _b64
 
-# ======================= 配置 =======================
-SERVER_HOST = "207.57.127.180"
-SERVER_PORT = 1200
-KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_key.txt")
+# ======================= 配置 (全部从 server.env / 环境变量读, 零硬编码) =======================
+from config import (
+    BRIDGE_REMOTE_HOST, BRIDGE_REMOTE_PORT,
+    STORAGE_ROOT, KEY_FILE,
+)
+SERVER_HOST = BRIDGE_REMOTE_HOST  # 兼容旧代码里的变量名
+SERVER_PORT = BRIDGE_REMOTE_PORT
 PIPELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "exam_pipeline.py")
 PDF_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export_pdf.py")
 PIPELINE_TIMEOUT = 300
 
-# 家里云存储根目录 — 必须指向 /data 盘 (系统盘只有 109G, /data 有 116G)
-# 优先级: 环境变量 → /data/StudyScape → fallback 项目内 data/StudyScape
-def _resolve_storage_root():
-    env = os.environ.get("STUDYSCAPE_STORAGE_ROOT", "").strip()
-    if env and os.path.isdir(os.path.dirname(env)):
-        return env
-    # /data 盘路径 (最优先)
-    data_disk = "/data/StudyScape"
-    if os.path.isdir("/data"):
-        return data_disk
-    # fallback: 项目内 data 目录 (但项目本身在 /home/lian 会占系统盘)
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "StudyScape")
-
-HOME_STORAGE_ROOT = _resolve_storage_root()
+# 家里云存储根目录
+HOME_STORAGE_ROOT = STORAGE_ROOT
 HOME_MATERIALS_DIR = os.path.join(HOME_STORAGE_ROOT, "materials")
 HOME_TMP_DIR = os.path.join(HOME_STORAGE_ROOT, "_tmp_jobs")  # OCR pipeline 临时文件也走 /data
 
