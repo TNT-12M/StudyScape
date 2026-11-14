@@ -122,3 +122,4 @@ data/ocr_batches/
 
 # ===== 单体拆分备份（开发期归档，不入库）=====
 public/api.php.bak_split
+security.env
