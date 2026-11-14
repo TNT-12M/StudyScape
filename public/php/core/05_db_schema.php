@@ -190,71 +190,59 @@ try {
     error_log("⚠️ 创建题库表失败: " . $e->getMessage() . " — 题库功能可能不可用");
 }
 
-// ===== 升级迁移: main.questions → qdb.questions =====
-// 旧 exam.db 里 questions/papers/paper_questions 可能在 main schema 里
-// 如果 qdb.questions 还没数据, 就把 main 的数据迁过去再 DROP main 的表
-$qTables = ['questions', 'papers', 'paper_questions'];
-foreach ($qTables as $t) {
+// ===== 只跑一次的 migration 版本 =====
+// 用 schema_migrations 跟踪已执行版本号, 避免每次请求都跑全量 UPDATE/ALTER
+$MIGRATION_VERSION = 7;
+
+function _runOnce($db, int $version, string $label, callable $fn): void {
     try {
-        // main 里有没有?
+        $current = (int)$db->querySingle("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1");
+        if ($current >= $version) return;
+    } catch (Exception $e) { /* schema_migrations 表可能还没 */ }
+    try {
+        $fn();
+        $db->exec("INSERT INTO schema_migrations (version, description) VALUES ($version, " . $db->quote($label) . ")");
+        error_log("✅ Migration v$version: $label");
+    } catch (Exception $e) {
+        error_log("⚠️ Migration v$version 失败: " . $e->getMessage());
+    }
+}
+
+// v1-6: 旧 migration (schema_migrations 表里已有, 跳过)
+_runOnce($db, 7, 'main.questions → qdb.questions 数据迁移 + DROP main.questions', function() use ($db) {
+    $qTables = ['questions', 'papers', 'paper_questions'];
+    foreach ($qTables as $t) {
         $res = $db->query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='" . SQLite3::escapeString($t) . "'");
-        if ($res && $row = $res->fetchArray()) {
+        if ($res && $res->fetchArray()) {
             $count = (int)$db->querySingle("SELECT COUNT(*) FROM main.{$t}");
-            if ($count > 0) {
-                // 检查 qdb 里是不是空 (避免覆盖已有)
-                $qcount = (int)$db->querySingle("SELECT COUNT(*) FROM qdb.{$t}");
-                if ($qcount === 0) {
-                    error_log("📦 升级迁移 main.{$t} ({$count} 行) → qdb.{$t}");
-                    $db->exec("INSERT INTO qdb.{$t} SELECT * FROM main.{$t}");
-                } else {
-                    error_log("⚠️ main.{$t} 有 {$count} 行但 qdb.{$t} 已有 {$qcount} 行 — 跳过迁移");
-                }
+            if ($count > 0 && (int)$db->querySingle("SELECT COUNT(*) FROM qdb.{$t}") === 0) {
+                $db->exec("INSERT INTO qdb.{$t} SELECT * FROM main.{$t}");
             }
-            // DROP main 的表 (无论有没有数据)
             $db->exec("DROP TABLE main.{$t}");
         }
-    } catch (Exception $e) {
-        error_log("升级迁移 {$t} 失败: " . $e->getMessage());
     }
-}
+});
 
-// ===== 兼容旧库: qdb.questions 补 updated_at 列 =====
-try {
+_runOnce($db, 8, 'qdb.questions 补 updated_at 列', function() use ($db) {
     $res = $db->query("PRAGMA qdb.table_info(questions)");
-    $hasUpdated = false;
-    if ($res) {
-        while ($c = $res->fetchArray(SQLITE3_ASSOC)) {
-            if (strcasecmp($c['name'], 'updated_at') === 0) { $hasUpdated = true; break; }
-        }
+    $has = false;
+    if ($res) while ($c = $res->fetchArray(SQLITE3_ASSOC)) {
+        if (strcasecmp($c['name'], 'updated_at') === 0) { $has = true; break; }
     }
-    if (!$hasUpdated) {
-        $db->exec("ALTER TABLE qdb.questions ADD COLUMN updated_at DATETIME");
-    }
-} catch (Exception $e) {
-    // 静默
-}
+    if (!$has) $db->exec("ALTER TABLE qdb.questions ADD COLUMN updated_at DATETIME");
+});
 
-// ===== 兼容旧库: materials 补 sha256 / storage_node =====
-try {
+_runOnce($db, 9, 'materials 补 sha256 / storage_node', function() use ($db) {
     $res = $db->query("PRAGMA table_info(materials)");
     $cols = [];
-    if ($res) {
-        while ($c = $res->fetchArray(SQLITE3_ASSOC)) $cols[] = strtolower($c['name']);
-    }
+    if ($res) while ($c = $res->fetchArray(SQLITE3_ASSOC)) $cols[] = strtolower($c['name']);
     if (!in_array('sha256', $cols)) $db->exec("ALTER TABLE materials ADD COLUMN sha256 TEXT");
     if (!in_array('storage_node', $cols)) {
         $db->exec("ALTER TABLE materials ADD COLUMN storage_node TEXT DEFAULT 'local'");
         $db->exec("UPDATE materials SET storage_node='local' WHERE storage_node IS NULL");
     }
-} catch (Exception $e) {
-    // 静默
-}
+});
 
-// 注册审批已取消：兼容历史账号，统一视为已注册账号。
-try {
+_runOnce($db, 10, '注册审批取消 — 批量 UPDATE is_approved', function() use ($db) {
     $db->exec("UPDATE users SET is_approved=1 WHERE is_approved=0");
-} catch (Exception $e) {
-    // 静默
-}
-
-// 学段与题库分类迁移（继续读文件剩余部分...）
+});
