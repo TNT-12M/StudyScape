@@ -50,6 +50,7 @@ export const basicRoutes = [
       { name: 'AdminFeedback', path: 'feedback', component: () => import('@/views/admin/feedback/index.vue'), meta: { title: '开发者反馈', requiresRoot: true } },
       { name: 'AdminAnnouncements', path: 'announcements', component: () => import('@/views/admin/announcements/index.vue'), meta: { title: '公告管理', requiresRoot: true } },
       { name: 'AdminSettings', path: 'settings', component: () => import('@/views/admin/settings/index.vue'), meta: { title: '引导设置', requiresRoot: true } },
+      { name: 'AdminQr', path: 'qr', component: () => import('@/views/admin/qr/index.vue'), meta: { title: '二维码管理', requiresRoot: true } },
       { name: 'AdminOcr', path: 'ocr', component: () => import('@/views/admin/ocr/index.vue'), meta: { title: '智能 OCR 审核', requiresPermission: 'question_import' } },
       { name: 'AdminProfile', path: 'profile', component: () => import('@/views/shared/profile/index.vue'), meta: { title: '个人资料' } },
     ],
