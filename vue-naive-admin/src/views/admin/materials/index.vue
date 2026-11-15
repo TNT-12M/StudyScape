@@ -207,9 +207,12 @@ const subjectOptions = computed(() => subjects.value.map(item => ({ label: item,
 const categoryOptions = computed(() => {
   const level = filters.education_level
   const list = categories.value.filter(c => !level || c.education_level === level)
+  const levelLabel = v => v === 'senior' ? '高中' : v === 'junior' ? '初中' : ''
+  // 学段选"全部"时，同名分类加学段后缀区分，避免下拉里看起来"重复"
+  const showLevelSuffix = !level
   return [
     { label: '全部分类', value: null },
-    ...list.map(c => ({ label: c.name, value: c.id })),
+    ...list.map(c => ({ label: showLevelSuffix ? `${c.name} [${levelLabel(c.education_level)}]` : c.name, value: c.id })),
   ]
 })
 // 分类管理弹窗按学段过滤后的列表
