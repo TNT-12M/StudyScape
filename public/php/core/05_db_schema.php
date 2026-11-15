@@ -201,7 +201,7 @@ function _runOnce($db, int $version, string $label, callable $fn): void {
     } catch (Exception $e) { /* schema_migrations 表可能还没 */ }
     try {
         $fn();
-        $db->exec("INSERT INTO schema_migrations (version, description) VALUES ($version, " . $db->quote($label) . ")");
+        $db->exec("INSERT INTO schema_migrations (version, description) VALUES ($version, '" . SQLite3::escapeString($label) . "')");
         error_log("✅ Migration v$version: $label");
     } catch (Exception $e) {
         error_log("⚠️ Migration v$version 失败: " . $e->getMessage());
