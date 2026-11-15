@@ -883,6 +883,22 @@ if ($action) {
                 jsonOut(true, '通知已读');
                 break;
 
+            case 'notification_clear':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)(getUid());
+                // 按 id 删除单条个人通知（正 id）
+                $id = (int)($_POST['id'] ?? 0);
+                if ($id > 0) {
+                    // 只能删自己的个人通知 (type <> 'announcement')
+                    $cnt = dbQuery($db, 'DELETE FROM notifications WHERE id=? AND user_id=? AND type <> ?', [$id, $uid, 'announcement']);
+                    jsonOut(true, '已删除', ['deleted' => $cnt ?: 0]);
+                } else {
+                    // 清空全部个人通知 (公告一律不动)
+                    $cnt = dbQuery($db, 'DELETE FROM notifications WHERE user_id=? AND type <> ?', [$uid, 'announcement']);
+                    jsonOut(true, '通知已清空', ['deleted' => $cnt ?: 0]);
+                }
+                break;
+
             // ---------- 公告管理（仅 root） ----------
             case 'admin_announcement_list':
                 $adminUid = requireRoot();

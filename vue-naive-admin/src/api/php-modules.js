@@ -125,6 +125,8 @@ export const phpNotificationApi = {
   list: data => phpAction('notification_list', data, { bypassCsrf: true }),
   unreadCount: () => phpAction('notification_unread_count', {}, { bypassCsrf: true }),
   markRead: (id, relatedId) => phpAction('notification_mark_read', id ? { id, related_id: relatedId || 0 } : {}),
+  // 单条删除传 id，全部清空不传
+  clear: (id) => phpAction('notification_clear', id ? { id } : {}),
 }
 
 export const phpAdminFeedbackApi = {

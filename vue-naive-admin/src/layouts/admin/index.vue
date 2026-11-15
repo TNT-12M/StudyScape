@@ -1,4 +1,4 @@
-﻿<template>
+﻿﻿<template>
   <div class="admin-shell">
     <!-- 移动端遮罩 -->
     <div v-if="mobileSidebarOpen" class="sidebar-mask" @click="mobileSidebarOpen = false" />
@@ -84,16 +84,22 @@
                   </n-text>
                   <div class="notify-list-wrap">
                     <n-list size="small">
-                      <n-list-item v-for="item in personalNotifs" :key="`not-${item.id}`">
+                      <n-list-item v-for="item in personalNotifs" :key="`not-${item.id}`" class="notify-item">
                         <n-thing :title="item.title" :description="item.body" />
+                        <button class="notify-del-btn" title="删除这条通知" @click.stop="clearNotification(item.id)">×</button>
                       </n-list-item>
                     </n-list>
                   </div>
                 </div>
               </template>
-              <n-button v-if="unreadCount" size="small" @click="readNotifications">
-                全部标记已读
-              </n-button>
+              <n-space>
+                <n-button v-if="unreadCount" size="small" @click="readNotifications">
+                  全部标记已读
+                </n-button>
+                <n-button v-if="personalNotifs.length" size="small" type="error" ghost @click="clearAllNotifications">
+                  🗑️ 清空通知
+                </n-button>
+              </n-space>
             </n-space>
           </n-popover>
           <SessionProfileLink to="/StudyScape/profile" />
@@ -152,6 +158,21 @@ async function loadNotifications() {
 async function readNotifications() {
   await phpNotificationApi.markRead()
   await loadNotifications()
+}
+async function clearNotification(id) {
+  try {
+    await phpNotificationApi.clear(id)
+    await loadNotifications()
+  }
+  catch { /* 静默失败 */ }
+}
+async function clearAllNotifications() {
+  if (!confirm('确认清空所有通知吗？（公告不会被清除）')) return
+  try {
+    await phpNotificationApi.clear()
+    await loadNotifications()
+  }
+  catch { /* 静默失败 */ }
 }
 onMounted(() => {
   loadNotifications()
@@ -425,5 +446,34 @@ async function logout() {
   white-space: normal;
   word-break: break-all;
   font-size: 12px;
+}
+.notify-item {
+  position: relative;
+  padding-right: 24px !important;
+}
+.notify-del-btn {
+  position: absolute;
+  top: 8px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--n-text-color-3);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 1;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.notify-item:hover .notify-del-btn {
+  display: flex;
+}
+.notify-del-btn:hover {
+  color: #fff !important;
+  background: var(--n-error-color);
 }
 </style>
