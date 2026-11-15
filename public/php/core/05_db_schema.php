@@ -1,33 +1,32 @@
 <?php
 
 // ===================== SQLite 初始化 =====================
-// 带重试: new SQLite3() 打开时就要拿锁, busy_timeout 必须在构造前设置
-// 所以用环境变量 SQLITE_BUSY_TIMEOUT 让 sqlite3 驱动在打开时就带 30s 等待
 $dbFile = __DIR__ . '/../../../exam.db';
-$_ENV['SQLITE_BUSY_TIMEOUT'] = 30000;
-putenv('SQLITE_BUSY_TIMEOUT=30000');
-
-// 重试打开: 最多等 30s, 每次 sleep 0.5s
-$db = null;
-$lastError = '';
-for ($tries = 0; $tries < 60; $tries++) {
-    try {
-        $db = new SQLite3($dbFile, SQLITE3_OPEN_READWRITE);
-        $db->enableExceptions(true);
-        break;
-    } catch (Exception $e) {
-        $lastError = $e->getMessage();
-        usleep(500000); // 0.5s
+try {
+    $db = new SQLite3($dbFile, SQLITE3_OPEN_READWRITE);
+    $db->enableExceptions(true);
+} catch (Exception $e) {
+    // 锁被占时最多等 30s, 每次 sleep 0.1s
+    for ($tries = 0; $tries < 300; $tries++) {
+        usleep(100000);
+        try {
+            $db = new SQLite3($dbFile, SQLITE3_OPEN_READWRITE);
+            $db->enableExceptions(true);
+            break;
+        } catch {}
+    }
+    if (!$db) {
+        die(json_encode(['success' => false, 'message' => '数据库连接失败: ' . $e->getMessage()]));
     }
 }
-if (!$db) {
-    die(json_encode(['success' => false, 'message' => '数据库连接失败 (等待30s): ' . $lastError]));
-}
 
-// SQLite 并发优化: WAL 模式 + 缓存
-$db->exec('PRAGMA journal_mode=WAL;');
+// SQLite 并发优化 (PRAGMA 轻量, 每次执行是查询状态)
+$db->exec('PRAGMA busy_timeout=30000;');
+try {
+    $db->exec('PRAGMA journal_mode=WAL;');
+} catch (Exception $e) { /* 并发下可能拿不到锁, WAL 已持久化, 跳过即可 */ }
 $db->exec('PRAGMA synchronous=NORMAL;');
-$db->exec('PRAGMA cache_size=-64000;');  // 64MB 缓存
+$db->exec('PRAGMA cache_size=-64000;');
 
 try {
     $passwordKey = loadPasswordKey();
@@ -36,51 +35,45 @@ try {
     die(json_encode(['success' => false, 'message' => '密码密钥初始化失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
 
-// ===== 题库 DB 路径解析 =====
-// 优先级: 环境变量 > server.env 的 QUESTIONS_DB_PATH > 数据盘探测 > fallback 项目内
-// 分布式架构下, 公网机本地有 questions.db 副本 (定期 rsync 从家里云拉取)
+// ===== 题库 DB 路径解析 (快速, 不做 mkdir) =====
 if (!function_exists('_resolveQuestionsDbPath')) {
     function _resolveQuestionsDbPath(): string {
-        // 1. 最高优先: 环境变量 / server.env
         $configured = env('QUESTIONS_DB_PATH');
-        if ($configured) {
-            if (is_file($configured)) return $configured;
-            // 目录不存在就创建 (首次部署)
-            $dir = dirname($configured);
-            if (!is_dir($dir) && @mkdir($dir, 0755, true) && is_dir($dir)) {
-                return $configured;
-            }
-        }
-        // 2. 探测数据盘 (家里云有 /data, 公网机可能没有)
+        if ($configured && is_file($configured)) return $configured;
         foreach (['/data/StudyScape/questions.db', '/data/study_questions.db', '/mnt/data/StudyScape/questions.db'] as $candidate) {
-            if (is_dir(dirname($candidate)) || @mkdir(dirname($candidate), 0755, true)) {
-                return $candidate;
-            }
+            if (is_file($candidate)) return $candidate;
         }
-        // 3. fallback: 系统盘项目内 data/
-        $fallback = __DIR__ . '/../../../data/study_questions.db';
-        @mkdir(dirname($fallback), 0755, true);
-        return $fallback;
+        return __DIR__ . '/../../../data/study_questions.db';
     }
 }
 
 $questionsDbFile = _resolveQuestionsDbPath();
 
 // ===== ATTACH 题库 DB =====
-// SQLite ATTACH 后, action_router 里的所有 SQL 一行不改!
-// 查询 "SELECT * FROM questions" 自动命中 qdb schema (因为 main 里已不存在 questions 表)
 $safeQPath = str_replace("'", "''", $questionsDbFile);
 try {
     $db->exec("ATTACH DATABASE '{$safeQPath}' AS qdb");
-    // 记住路径给调试
-    $db->exec("PRAGMA application_id = 0x53544442");
 } catch (Exception $e) {
     error_log("⚠️ ATTACH qdb 失败，题库将和业务数据共库: " . $e->getMessage());
-    $questionsDbFile = $dbFile; // fallback: 和主库同一个文件
+    $questionsDbFile = $dbFile;
 }
 
 // ===== MAIN SCHEMA (exam.db — 系统盘, 高频读写) =====
-$createMainSql = "
+// PHP-FPM 每个 worker 进程内 static 变量共享, 初始化只跑一次
+if (!isset($GLOBALS['_ss_main_schema_done'])) {
+    $GLOBALS['_ss_main_schema_done'] = false;
+}
+if (!$GLOBALS['_ss_main_schema_done']) {
+    try {
+        $db->exec("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+    } catch {}
+
+    // 只有还没完成过的进程才跑 CREATE TABLE/INDEX (SQLite IF NOT EXISTS 也快, 但少跑一次少一次)
+    $mainSchemaDone = false;
+    try { $mainSchemaDone = (bool)$db->querySingle("SELECT 1 FROM schema_migrations WHERE version = 'main_schema_v1'"); } catch {}
+
+    if (!$mainSchemaDone) {
+        $createMainSql = "
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
@@ -98,7 +91,6 @@ CREATE TABLE IF NOT EXISTS users (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_login DATETIME NULL
 );
-
 CREATE TABLE IF NOT EXISTS exam_data (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     type TEXT NOT NULL,
@@ -106,7 +98,6 @@ CREATE TABLE IF NOT EXISTS exam_data (
     json_content TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-
 CREATE TABLE IF NOT EXISTS exam_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     attempt_type TEXT NOT NULL,
@@ -122,7 +113,6 @@ CREATE TABLE IF NOT EXISTS exam_attempts (
 CREATE INDEX IF NOT EXISTS idx_attempts_user ON exam_attempts(user_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_paper ON exam_attempts(paper_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_type ON exam_attempts(attempt_type);
-
 CREATE TABLE IF NOT EXISTS exam_answers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     attempt_id INTEGER NOT NULL,
@@ -136,7 +126,6 @@ CREATE TABLE IF NOT EXISTS exam_answers (
 );
 CREATE INDEX IF NOT EXISTS idx_answers_attempt ON exam_answers(attempt_id);
 CREATE INDEX IF NOT EXISTS idx_answers_question ON exam_answers(question_id);
-
 CREATE TABLE IF NOT EXISTS materials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     filename TEXT NOT NULL,
@@ -153,14 +142,19 @@ CREATE TABLE IF NOT EXISTS materials (
 );
 CREATE INDEX IF NOT EXISTS idx_materials_subject ON materials(subject);
 ";
-try {
-    $db->exec($createMainSql);
-} catch (Exception $e) {
-    die(json_encode(['success' => false, 'message' => '创建主表失败: ' . $e->getMessage()]));
-}
+        try {
+            $db->exec($createMainSql);
+            $db->exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES ('main_schema_v1')");
+        } catch (Exception $e) {
+            die(json_encode(['success' => false, 'message' => '创建主表失败: ' . $e->getMessage()]));
+        }
+    }
 
-// ===== QDB SCHEMA (questions.db — 数据盘, 静态题库资产) =====
-$createQSql = "
+    // ===== QDB SCHEMA =====
+    $qdbSchemaDone = false;
+    try { $qdbSchemaDone = (bool)$db->querySingle("SELECT 1 FROM schema_migrations WHERE version = 'qdb_schema_v1'"); } catch {}
+    if (!$qdbSchemaDone) {
+        $createQSql = "
 CREATE TABLE IF NOT EXISTS qdb.questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     subject TEXT NOT NULL,
@@ -176,7 +170,6 @@ CREATE TABLE IF NOT EXISTS qdb.questions (
 );
 CREATE INDEX IF NOT EXISTS qdb.idx_questions_subject ON questions(subject);
 CREATE INDEX IF NOT EXISTS qdb.idx_questions_type ON questions(question_type);
-
 CREATE TABLE IF NOT EXISTS qdb.papers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -188,7 +181,6 @@ CREATE TABLE IF NOT EXISTS qdb.papers (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS qdb.idx_papers_published ON papers(is_published);
-
 CREATE TABLE IF NOT EXISTS qdb.paper_questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     paper_id INTEGER NOT NULL,
@@ -199,10 +191,15 @@ CREATE TABLE IF NOT EXISTS qdb.paper_questions (
 CREATE INDEX IF NOT EXISTS qdb.idx_pq_paper ON paper_questions(paper_id);
 CREATE INDEX IF NOT EXISTS qdb.idx_pq_question ON paper_questions(question_id);
 ";
-try {
-    $db->exec($createQSql);
-} catch (Exception $e) {
-    error_log("⚠️ 创建题库表失败: " . $e->getMessage() . " — 题库功能可能不可用");
+        try {
+            $db->exec($createQSql);
+            $db->exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES ('qdb_schema_v1')");
+        } catch (Exception $e) {
+            error_log("⚠️ 创建题库表失败: " . $e->getMessage() . " — 题库功能可能不可用");
+        }
+    }
+
+    $GLOBALS['_ss_main_schema_done'] = true;
 }
 
 // ===== 只跑一次的 migration 版本 =====
