@@ -6,11 +6,14 @@
  *   good  — 干净，无 flag
  *   poor  — 有瑕疵但可接受（括号不配对、题干稍短）
  *   trash — 致命缺陷，应隔离（选项数≠4、答案空、公式丢）
+ *
+ * 注意: 这个文件用 SQLite3 API (不是 PDO)
+ *   - SQLite3Result: fetchArray(SQLITE3_ASSOC), 没有 fetchAll()
+ *   - SQLite3:       exec('BEGIN TRANSACTION') / exec('COMMIT') / exec('ROLLBACK'), 没有 beginTransaction()/commit()/rollBack()
+ *   - SQLite3->prepare() 有, 但返回 SQLite3Stmt (->bindValue() + ->execute(), 不是 execute([...]))
  */
 
 // ===== 单道题质检 =====
-// 输入: $q = ['content'=>..., 'options'=>json_string, 'question_type'=>..., 'correct_answer'=>..., ...]
-// 输出: ['quality'=>'good|poor|trash', 'flags'=>['options_not_4', 'formula_missing', ...], 'details'=>[...]]
 function qualityScanQuestion(array $q): array {
     $flags = [];
     $details = [];
@@ -18,7 +21,7 @@ function qualityScanQuestion(array $q): array {
     $content = $q['content'] ?? '';
     $options = json_decode($q['options'] ?? '[]', true);
     $answer = trim($q['correct_answer'] ?? '');
-    $hasImage = preg_match('/<img[^>]+src=[\"\x27](?!data:image\/)/i', $content) === 1;
+    $hasImage = preg_match('/<img[^>]+src=["\x27](?!data:image\/)/i', $content) === 1;
 
     // === 规则 1: 选项数 ===
     if (in_array($ctype, ['single','multiple','judge','单选题','多选题','判断题'], true)) {
@@ -39,18 +42,15 @@ function qualityScanQuestion(array $q): array {
     if (is_array($options) && !empty($options)) {
         foreach (array_values($options) as $i => $opt) {
             $s = (string)$opt;
-            // OCR 残留标记
             if (preg_match('/\[SOI\]|\[EOI\]|\[IMAGE_/', $s)) {
                 $flags[] = 'ocr_residual_option_' . ($i+1);
                 $details[] = "选项" . ($i+1) . "含 OCR 残留标记";
             }
-            // 极短选项 (去掉 A. B. 等前缀后 < 2 字)
             $clean = trim(preg_replace('/^[A-Da-d][.．、\s]*/u', '', $s));
             if ($clean !== '' && mb_strlen($clean) < 2) {
                 $flags[] = 'option_' . ($i+1) . '_too_short';
                 $details[] = "选项" . ($i+1) . "过短 (" . mb_strlen($clean) . "字)";
             }
-            // 只剩闭合符
             if (preg_match('/^[\)）\],，。、;；]+$/u', $clean)) {
                 $flags[] = 'option_' . ($i+1) . '_broken';
                 $details[] = "选项" . ($i+1) . "残缺闭合符";
@@ -73,7 +73,7 @@ function qualityScanQuestion(array $q): array {
         $details[] = '疑似公式丢失 (字母+中文 紧挨着)';
     }
 
-    // === 规则 5: 题干过短 (纯文字题 < 15 字算问题; 有图片的话容忍度高一点) ===
+    // === 规则 5: 题干过短 ===
     $cleanContent = trim(preg_replace('/\s+/u', ' ', strip_tags($content)));
     $len = mb_strlen($cleanContent);
     if ($len === 0 && !$hasImage) {
@@ -100,7 +100,6 @@ function qualityScanQuestion(array $q): array {
     $trashFlags = ['options_json_fail', 'formula_missing', 'answer_empty', 'image_missing', 'content_empty'];
     $isTrash = false;
     foreach ($flags as $f) {
-        // options_not_X_actual_Y 也是致命 (选项数不对就没法做)
         if (str_starts_with($f, 'options_not_')) { $isTrash = true; break; }
         if (in_array($f, $trashFlags)) { $isTrash = true; break; }
     }
@@ -117,19 +116,22 @@ function qualityScanQuestion(array $q): array {
     ];
 }
 
-// ===== 批量扫描 DB 所有题目并更新 =====
+// ===== 批量扫描 DB 所有题目并更新 (SQLite3 写法) =====
 function qualityBulkScan($db): array {
     $total = 0; $good = 0; $poor = 0; $trash = 0; $errors = 0;
 
-    $rows = $db->query("SELECT id, content, options, question_type, correct_answer FROM questions")->fetchAll(PDO::FETCH_ASSOC);
-    foreach ($rows as $row) {
+    // SQLite3 没有 fetchAll, 用 while + fetchArray
+    $res = $db->query("SELECT id, content, options, question_type, correct_answer FROM qdb.questions");
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
         $total++;
         try {
             $result = qualityScanQuestion($row);
-            $flagsJson = json_encode($result['flags'], JSON_UNESCAPED_UNICODE);
-            $now = date('Y-m-d H:i:s');
-            $stmt = $db->prepare("UPDATE questions SET quality = ?, quality_flags = ?, quality_scanned_at = ? WHERE id = ?");
-            $stmt->execute([$result['quality'], $flagsJson, $now, $row['id']]);
+            $flagsJson = SQLite3::escapeString(json_encode($result['flags'], JSON_UNESCAPED_UNICODE));
+            $now = SQLite3::escapeString(date('Y-m-d H:i:s'));
+            $qid = (int)$row['id'];
+            $quality = SQLite3::escapeString($result['quality']);
+            // 直接拼 SQL, SQLite3->prepare()->bindValue 太繁琐
+            $db->exec("UPDATE qdb.questions SET quality='$quality', quality_flags='$flagsJson', quality_scanned_at='$now' WHERE id=$qid");
             switch ($result['quality']) {
                 case 'good':  $good++;  break;
                 case 'poor':  $poor++;  break;
@@ -143,59 +145,75 @@ function qualityBulkScan($db): array {
     return compact('total','good','poor','trash','errors');
 }
 
-// ===== 把坏题移到 trash_questions =====
+// ===== 把坏题移到 trash_questions (SQLite3 事务写法) =====
 function qualityTrashQuestion($db, int $qid, int $adminId = 0, string $reason = ''): bool {
-    $q = $db->query("SELECT * FROM questions WHERE id = $qid")->fetch(PDO::FETCH_ASSOC);
+    $res = $db->query("SELECT * FROM qdb.questions WHERE id = $qid");
+    $q = $res ? $res->fetchArray(SQLITE3_ASSOC) : false;
     if (!$q) return false;
 
-    // 先算一下 quality_flags
     if (empty($q['quality_flags'])) {
         $scan = qualityScanQuestion($q);
         $q['quality_flags'] = json_encode($scan['flags'] ?? [], JSON_UNESCAPED_UNICODE);
     }
 
-    $db->beginTransaction();
+    // SQLite3 事务: exec('BEGIN/COMMIT/ROLLBACK')
+    $db->exec('BEGIN TRANSACTION');
     try {
-        $stmt = $db->prepare("INSERT INTO trash_questions
+        $qid_s = (int)$qid;
+        $reason_s = SQLite3::escapeString($reason ?: 'manual');
+        $qf = SQLite3::escapeString($q['quality_flags'] ?? '');
+        $sub = SQLite3::escapeString($q['subject'] ?? '');
+        $qt  = SQLite3::escapeString($q['question_type'] ?? '');
+        $ct  = SQLite3::escapeString($q['content'] ?? '');
+        $op  = SQLite3::escapeString($q['options'] ?? '');
+        $ca  = SQLite3::escapeString($q['correct_answer'] ?? '');
+        $ex  = SQLite3::escapeString($q['explanation'] ?? '');
+        $diff = (int)($q['difficulty'] ?? 2);
+        $pts  = (float)($q['points'] ?? 1.0);
+        $el   = SQLite3::escapeString($q['education_level'] ?? 'junior');
+        $ca2  = $q['created_at'] ? "'" . SQLite3::escapeString($q['created_at']) . "'" : 'NULL';
+        $aid  = (int)$adminId;
+
+        $db->exec("INSERT INTO trash_questions
             (original_id, reason, quality_flags, subject, question_type, content, options, correct_answer, explanation, difficulty, points, education_level, original_created_at, trashed_by)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
-        $stmt->execute([
-            $qid, $reason ?: 'manual', $q['quality_flags'] ?? '',
-            $q['subject'] ?? '', $q['question_type'] ?? '',
-            $q['content'] ?? '', $q['options'] ?? '', $q['correct_answer'] ?? '', $q['explanation'] ?? '',
-            $q['difficulty'] ?? 2, $q['points'] ?? 1.0, $q['education_level'] ?? 'junior',
-            $q['created_at'] ?? null, $adminId
-        ]);
-        $db->exec("DELETE FROM questions WHERE id = $qid");
-        $db->commit();
+            VALUES ($qid_s, '$reason_s', '$qf', '$sub', '$qt', '$ct', '$op', '$ca', '$ex', $diff, $pts, '$el', $ca2, $aid)");
+        $db->exec("DELETE FROM qdb.questions WHERE id = $qid_s");
+        $db->exec('COMMIT');
         return true;
     } catch (\Throwable $e) {
-        $db->rollBack();
+        $db->exec('ROLLBACK');
         return false;
     }
 }
 
-// ===== 从 trash_questions 恢复回 questions =====
+// ===== 从 trash_questions 恢复回 questions (SQLite3 写法) =====
 function qualityRestoreQuestion($db, int $trashId, int $adminId = 0): bool {
-    $t = $db->query("SELECT * FROM trash_questions WHERE id = $trashId")->fetch(PDO::FETCH_ASSOC);
+    $res = $db->query("SELECT * FROM trash_questions WHERE id = $trashId");
+    $t = $res ? $res->fetchArray(SQLITE3_ASSOC) : false;
     if (!$t) return false;
 
-    $db->beginTransaction();
+    $db->exec('BEGIN TRANSACTION');
     try {
-        $stmt = $db->prepare("INSERT INTO questions
+        $sub = SQLite3::escapeString($t['subject'] ?? '');
+        $qt  = SQLite3::escapeString($t['question_type'] ?? '');
+        $ct  = SQLite3::escapeString($t['content'] ?? '');
+        $op  = SQLite3::escapeString($t['options'] ?? '');
+        $ca  = SQLite3::escapeString($t['correct_answer'] ?? '');
+        $ex  = SQLite3::escapeString($t['explanation'] ?? '');
+        $diff = (int)($t['difficulty'] ?? 2);
+        $pts  = (float)($t['points'] ?? 1.0);
+        $el   = SQLite3::escapeString($t['education_level'] ?? 'junior');
+        $qf   = SQLite3::escapeString($t['quality_flags'] ?? '');
+        $trid = (int)$trashId;
+
+        $db->exec("INSERT INTO qdb.questions
             (subject, question_type, content, options, correct_answer, explanation, difficulty, points, education_level, quality, quality_flags)
-            VALUES (?,?,?,?,?,?,?,?,?, 'poor', ?)");
-        $stmt->execute([
-            $t['subject'] ?? '', $t['question_type'] ?? '',
-            $t['content'] ?? '', $t['options'] ?? '', $t['correct_answer'] ?? '', $t['explanation'] ?? '',
-            $t['difficulty'] ?? 2, $t['points'] ?? 1.0, $t['education_level'] ?? 'junior',
-            $t['quality_flags'] ?? ''
-        ]);
-        $db->exec("DELETE FROM trash_questions WHERE id = $trashId");
-        $db->commit();
+            VALUES ('$sub', '$qt', '$ct', '$op', '$ca', '$ex', $diff, $pts, '$el', 'poor', '$qf')");
+        $db->exec("DELETE FROM trash_questions WHERE id = $trid");
+        $db->exec('COMMIT');
         return true;
     } catch (\Throwable $e) {
-        $db->rollBack();
+        $db->exec('ROLLBACK');
         return false;
     }
 }
