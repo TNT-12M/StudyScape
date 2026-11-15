@@ -273,7 +273,6 @@
           <a v-if="!session.isAuthenticated" @click="goRegister">注册</a>
           <a @click="goSection('features')">核心特点</a>
           <a @click="goSection('flow')">学习闭环</a>
-          <a @click="router.push('/about')">关于学境</a>
         </div>
       </div>
       <div class="copyright container">

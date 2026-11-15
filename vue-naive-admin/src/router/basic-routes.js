@@ -6,12 +6,6 @@ export const basicRoutes = [
     meta: { title: '学境・StudyScape — 学习的新境界', layout: 'empty', public: true },
   },
   {
-    name: 'About',
-    path: '/about',
-    component: () => import('@/views/about/index.vue'),
-    meta: { title: '关于学境', layout: 'empty', public: true },
-  },
-  {
     name: 'Login',
     path: '/login',
     component: () => import('@/views/login/index.vue'),
@@ -36,6 +30,7 @@ export const basicRoutes = [
       { name: 'AppMaterialRequests', path: 'material-requests', component: () => import('@/views/user/material-requests/index.vue'), meta: { title: '资料需求' } },
       { name: 'AppQuestions', path: 'questions', component: () => import('@/views/user/questions/index.vue'), meta: { title: '题库浏览' } },
       { name: 'AppFeedback', path: 'feedback', component: () => import('@/views/user/feedback/index.vue'), meta: { title: '开发者反馈' } },
+      { name: 'AppAbout', path: 'about', component: () => import('@/views/user/about/index.vue'), meta: { title: '加入学境' } },
       { name: 'AppAttempts', path: 'attempts', component: () => import('@/views/user/attempts/index.vue'), meta: { title: '学习记录' } },
       { name: 'AppProfile', path: 'profile', component: () => import('@/views/shared/profile/index.vue'), meta: { title: '个人资料' } },
     ],

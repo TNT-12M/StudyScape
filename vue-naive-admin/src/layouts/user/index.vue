@@ -27,7 +27,7 @@
         <RouterLink to="/app/feedback" active-class="is-active">
           <span class="nav-icon">💬</span><span class="nav-text">开发者反馈</span>
         </RouterLink>
-        <RouterLink to="/about">
+        <RouterLink to="/app/about" active-class="is-active">
           <span class="nav-icon">🤝</span><span class="nav-text">加入学境</span>
         </RouterLink>
         <RouterLink v-if="session.isAdmin" to="/StudyScape" class="nav-admin-link" active-class="is-active">
