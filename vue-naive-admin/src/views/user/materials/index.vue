@@ -3,8 +3,12 @@
     <n-card title="资料中心" :bordered="false" class="page-card">
       <template #header-extra>
         <n-space>
-          <n-button text @click="goRequest">我想要的资料</n-button>
-          <n-button secondary :loading="loading" @click="loadMaterials">刷新</n-button>
+          <n-button text @click="goRequest">
+            我想要的资料
+          </n-button>
+          <n-button secondary :loading="loading" @click="loadMaterials">
+            刷新
+          </n-button>
         </n-space>
       </template>
       <n-space wrap align="center" class="filters">
@@ -12,28 +16,48 @@
         <n-select v-model:value="filters.category_id" clearable :options="categoryOptions" placeholder="全部分类" style="width: 140px" @update:value="loadMaterials" />
         <n-select v-model:value="filters.subject" clearable :options="subjectOptions" placeholder="全部科目" style="width: 140px" @update:value="loadMaterials" />
         <n-input v-model:value="filters.keyword" clearable placeholder="搜索文件名或简介" style="width: 240px" @keyup.enter="loadMaterials">
-          <template #suffix><n-button text @click="loadMaterials">搜索</n-button></template>
+          <template #suffix>
+            <n-button text @click="loadMaterials">
+              搜索
+            </n-button>
+          </template>
         </n-input>
       </n-space>
       <n-alert v-if="error" type="error" :title="error" closable class="mt-16" @close="error = ''" />
       <n-spin :show="loading">
-        <div class="summary muted">共 {{ materials.length }} 份资料</div>
+        <div class="summary muted">
+          共 {{ materials.length }} 份资料
+        </div>
         <n-grid :cols="3" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
           <n-gi v-for="material in materials" :key="material.id" span="3 s:1 m:1 l:1">
             <n-card size="small" class="material-card">
               <template #header>
-                <div class="material-title"><n-tag type="info" size="small">{{ extension(material.filename) }}</n-tag><span>{{ material.filename }}</span></div>
+                <div class="material-title">
+                  <n-tag type="info" size="small">
+                    {{ extension(material.filename) }}
+                  </n-tag><span>{{ material.filename }}</span>
+                </div>
               </template>
-              <div class="material-description">{{ material.description || '暂无简介' }}</div>
+              <div class="material-description">
+                {{ material.description || '暂无简介' }}
+              </div>
               <n-space size="small" wrap class="material-meta">
-                <n-tag v-if="material.education_level" size="small">{{ levelLabel(material.education_level) }}</n-tag>
-                <n-tag v-if="material.category_name" size="small" type="info">{{ material.category_name }}</n-tag>
-                <n-tag v-if="material.subject" size="small" type="success">{{ material.subject }}</n-tag>
+                <n-tag v-if="material.education_level" size="small">
+                  {{ levelLabel(material.education_level) }}
+                </n-tag>
+                <n-tag v-if="material.category_name" size="small" type="info">
+                  {{ material.category_name }}
+                </n-tag>
+                <n-tag v-if="material.subject" size="small" type="success">
+                  {{ material.subject }}
+                </n-tag>
                 <span>{{ formatSize(material.file_size) }}</span>
               </n-space>
               <div class="material-footer">
                 <span class="muted">更新于 {{ formatDate(material.updated_at || material.uploaded_at) }}</span>
-                <n-button type="primary" size="small" :loading="downloading === material.id" @click="download(material)">下载</n-button>
+                <n-button type="primary" size="small" :loading="downloading === material.id" @click="download(material)">
+                  下载
+                </n-button>
               </div>
             </n-card>
           </n-gi>
@@ -47,8 +71,9 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useSessionStore } from '@/store/modules/session'
 import { phpMaterialsApi } from '@/api/php-modules'
+import { useSessionStore } from '@/store/modules/session'
+import { isPdfFile, saveBlob, stampMaterialPdf } from '@/views/user/components/pdf-watermark'
 import { formatDate } from '@/views/user/components/question-utils'
 
 const session = useSessionStore()
@@ -85,7 +110,8 @@ function dedupeCategories(list) {
   const seen = new Set()
   const out = []
   for (const c of list) {
-    if (!c || seen.has(c.id)) continue
+    if (!c || seen.has(c.id))
+      continue
     seen.add(c.id)
     out.push({ ...c, name: (c.name || '').trim() })
   }
@@ -100,7 +126,7 @@ async function loadMaterials() {
     const data = result.data || {}
     categories.value = dedupeCategories(data.categories || [])
     subjects.value = data.subjects || []
-    materials.value = (data.materials || []).map(m => {
+    materials.value = (data.materials || []).map((m) => {
       const cat = categories.value.find(c => c.id === m.category_id)
       return { ...m, category_name: cat?.name || '' }
     })
@@ -114,15 +140,43 @@ async function download(material) {
   try {
     const result = await phpMaterialsApi.token(material.id)
     const token = result.data?.download_token
-    if (!token) throw new Error('下载授权失败')
+    if (!token)
+      throw new Error('下载授权失败')
     const apiUrl = import.meta.env.VITE_PHP_API_URL || '/api.php'
     const url = `${apiUrl}?action=material_download&token=${encodeURIComponent(token)}`
+    const filename = material.filename || '学境资料.pdf'
     const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent)
+
+    // iOS Safari 无法可靠保存 Blob，直接走原始直链；其余平台在浏览器内加水印
+    if (!isIOS && isPdfFile(filename)) {
+      window.$message?.info('正在浏览器内生成带学境水印的版本，请稍候…', { duration: 4000 })
+      const response = await fetch(url, { credentials: 'include' })
+      if (!response.ok)
+        throw new Error('下载链接已失效，请返回资料中心重试')
+      const blob = await response.blob()
+      if (!blob.size)
+        throw new Error('文件内容为空')
+      try {
+        const { blob: stamped, stamped: didStamp } = await stampMaterialPdf(blob, filename)
+        saveBlob(stamped, filename)
+        if (didStamp)
+          window.$message?.success('已生成带学境水印的 PDF')
+      }
+      catch (stampError) {
+        // 加密/损坏 PDF 无法在浏览器加印 → 回退原始直链，保证用户能拿到文件
+        console.warn('[watermark] 加印失败，回退原始文件:', stampError)
+        window.$message?.warning('该 PDF 无法在浏览器加印（可能已加密），已为你下载原始文件')
+        saveBlob(blob, filename)
+      }
+      return
+    }
+
     if (isIOS) {
       // iOS Safari 会拦截隐藏 iframe/target=_blank, 用 window.open 允许用户确认
       window.open(url, '_self')
       window.$message?.info('iOS Safari 会直接预览文件, 请在预览页点右上角分享 → 存储到文件 App', { duration: 6000 })
-    } else {
+    }
+    else {
       const link = document.createElement('a')
       link.href = url
       link.target = '_blank'
@@ -148,16 +202,53 @@ onMounted(loadMaterials)
 </script>
 
 <style scoped>
-.page-card { min-height: 520px; }
-.filters { padding-bottom: 4px; }
-.summary { margin: 18px 0 14px; }
-.mt-16 { margin-top: 16px; }
-.material-card { height: 100%; }
-.material-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.material-title > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.material-description { min-height: 42px; color: var(--n-text-color-2); line-height: 1.6; overflow-wrap: anywhere; }
-.material-meta { margin-top: 16px; }
-.material-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 18px; }
-.muted { color: var(--n-text-color-3); font-size: 12px; }
-.empty { padding: 70px 0; }
+.page-card {
+  min-height: 520px;
+}
+.filters {
+  padding-bottom: 4px;
+}
+.summary {
+  margin: 18px 0 14px;
+}
+.mt-16 {
+  margin-top: 16px;
+}
+.material-card {
+  height: 100%;
+}
+.material-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.material-title > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.material-description {
+  min-height: 42px;
+  color: var(--n-text-color-2);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.material-meta {
+  margin-top: 16px;
+}
+.material-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 18px;
+}
+.muted {
+  color: var(--n-text-color-3);
+  font-size: 12px;
+}
+.empty {
+  padding: 70px 0;
+}
 </style>

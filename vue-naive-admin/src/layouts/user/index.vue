@@ -1,6 +1,6 @@
-﻿<template>
+<template>
   <div class="user-shell">
-    <aside class="user-sidebar">
+    <aside class="user-sidebar" :style="prefs.wallpaperUrl ? { backgroundImage: `linear-gradient(rgba(15,26,40,.72), rgba(15,26,40,.9)), url(${prefs.wallpaperUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' } : undefined">
       <div class="user-brand">
         <strong>学境・StudyScape</strong>
         <span>学习的新境界</span>
@@ -72,6 +72,7 @@
         <RouterView />
       </main>
     </section>
+    <FirstLoginGuide />
   </div>
 </template>
 
@@ -80,10 +81,12 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { phpNotificationApi } from '@/api/php-modules'
 import { SessionProfileLink } from '@/layouts/components'
-import { useSessionStore } from '@/store'
+import { usePrefsStore, useSessionStore } from '@/store'
+import FirstLoginGuide from '@/views/user/components/FirstLoginGuide.vue'
 
 const router = useRouter()
 const session = useSessionStore()
+const prefs = usePrefsStore()
 const notifications = ref([])
 const unreadCount = ref(0)
 async function loadNotifications() {
@@ -98,7 +101,10 @@ async function readNotifications() {
   await phpNotificationApi.markRead()
   await loadNotifications()
 }
-onMounted(loadNotifications)
+onMounted(() => {
+  loadNotifications()
+  prefs.load()
+})
 
 async function logout() {
   await session.logout()

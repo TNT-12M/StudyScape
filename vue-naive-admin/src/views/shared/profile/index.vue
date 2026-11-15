@@ -50,9 +50,37 @@
           </n-gi>
         </n-grid>
         <n-space justify="end">
-          <n-button attr-type="submit" type="primary" :loading="saving">保存资料</n-button>
+          <n-button attr-type="submit" type="primary" :loading="saving">
+            保存资料
+          </n-button>
         </n-space>
       </n-form>
+    </n-card>
+
+    <n-card title="学境壁纸" :bordered="false" style="margin-top: 16px;">
+      <n-alert type="info" :show-icon="false" style="margin-bottom: 14px;">
+        壁纸会显示在学习中心左侧导航栏。图片由管理员放入 <code>assets/wallpapers/</code> 目录，缺失时显示占位色块。
+      </n-alert>
+      <div class="wallpaper-grid">
+        <div class="wallpaper-item" :class="{ active: wpDraft === '' }" @click="wpDraft = ''">
+          <div class="wp-thumb wp-default">
+            默认
+          </div>
+          <span>默认深色</span>
+        </div>
+        <div v-for="i in 4" :key="i" class="wallpaper-item" :class="{ active: wpDraft === `wallpaper-${i}` }" @click="wpDraft = `wallpaper-${i}`">
+          <div class="wp-thumb">
+            <img v-if="!wpFailed[`wallpaper-${i}`]" :src="wallpaperSrc(`wallpaper-${i}`)" alt="" @error="wpFailed[`wallpaper-${i}`] = true">
+            <span v-else>{{ i }}</span>
+          </div>
+          <span>壁纸 {{ i }}</span>
+        </div>
+      </div>
+      <n-space justify="end" style="margin-top: 14px;">
+        <n-button type="primary" :loading="wpSaving" @click="saveWallpaper">
+          保存壁纸
+        </n-button>
+      </n-space>
     </n-card>
 
     <n-card title="修改密码" :bordered="false" style="margin-top: 16px;">
@@ -83,7 +111,9 @@
           </n-gi>
         </n-grid>
         <n-space justify="end">
-          <n-button attr-type="submit" type="primary" :loading="pwdSaving">修改密码</n-button>
+          <n-button attr-type="submit" type="primary" :loading="pwdSaving">
+            修改密码
+          </n-button>
         </n-space>
       </n-form>
     </n-card>
@@ -91,11 +121,29 @@
 </template>
 
 <script setup>
-import { useSessionStore } from '@/store'
 import { phpProfileApi } from '@/api/php-modules'
+import { usePrefsStore, useSessionStore } from '@/store'
 
 const session = useSessionStore()
+const prefs = usePrefsStore()
 const router = useRouter()
+const wpDraft = ref('')
+const wpSaving = ref(false)
+const wpFailed = reactive({})
+
+function wallpaperSrc(name) {
+  return `${import.meta.env.BASE_URL}assets/wallpapers/${name}.jpg`
+}
+async function saveWallpaper() {
+  wpSaving.value = true
+  try {
+    await prefs.save(wpDraft.value)
+    $message.success('壁纸已保存')
+  }
+  catch (error) { $message.error(error.message || '壁纸保存失败') }
+  finally { wpSaving.value = false }
+}
+watch(() => prefs.wallpaper, (value) => { wpDraft.value = value || '' }, { immediate: true })
 const formRef = ref(null)
 const saving = ref(false)
 const form = reactive({
@@ -122,17 +170,22 @@ const pwdRules = {
   },
   new_password: {
     validator: (_, value) => {
-      if (!value) return new Error('请输入新密码')
-      if (value.length < 6) return new Error('新密码至少 6 位')
-      if (value === pwdForm.old_password) return new Error('新密码不能与旧密码相同')
+      if (!value)
+        return new Error('请输入新密码')
+      if (value.length < 6)
+        return new Error('新密码至少 6 位')
+      if (value === pwdForm.old_password)
+        return new Error('新密码不能与旧密码相同')
       return true
     },
     trigger: 'blur',
   },
   confirm_password: {
     validator: (_, value) => {
-      if (!value) return new Error('请再次输入新密码')
-      if (value !== pwdForm.new_password) return new Error('两次输入的密码不一致')
+      if (!value)
+        return new Error('请再次输入新密码')
+      if (value !== pwdForm.new_password)
+        return new Error('两次输入的密码不一致')
       return true
     },
     trigger: 'blur',
@@ -154,7 +207,8 @@ async function changePassword() {
     await router.replace('/login')
   }
   catch (error) {
-    if (error?.errors) return
+    if (error?.errors)
+      return
     $message.error(error.message || '密码修改失败')
     pwdSaving.value = false
   }
@@ -176,9 +230,12 @@ const gradeOptions = [
 
 // 根据年级推导学段
 function gradeToLevel(grade) {
-  if (!grade) return null
-  if (['grade7', 'grade8', 'grade9'].includes(grade)) return 'junior'
-  if (['high1', 'high2', 'high3'].includes(grade)) return 'senior'
+  if (!grade)
+    return null
+  if (['grade7', 'grade8', 'grade9'].includes(grade))
+    return 'junior'
+  if (['high1', 'high2', 'high3'].includes(grade))
+    return 'senior'
   return null
 }
 function gradeLabel(grade) {
@@ -186,10 +243,12 @@ function gradeLabel(grade) {
   return g?.label || grade
 }
 
-const isImageUrl = (value) => {
+function isImageUrl(value) {
   const url = String(value || '').trim()
-  if (!url) return true
-  if (url.length > 512 || /[\u0000- <>\u007f]/.test(url)) return false
+  if (!url)
+    return true
+  if (url.length > 512 || /[\u0000- <>\u007f]/.test(url))
+    return false
   try {
     const parsed = new URL(url)
     return ['http:', 'https:'].includes(parsed.protocol)
@@ -207,16 +266,20 @@ const rules = {
   username: {
     validator: (_, value) => {
       const text = String(value || '').trim()
-      if (text === '') return new Error('用户名不能为空')
-      if ([...text].length < 2) return new Error('用户名至少 2 个字符')
-      if ([...text].length > 20) return new Error('用户名最多 20 个字符')
-      if (!/^[\u4e00-\u9fa5a-zA-Z0-9_]+$/.test(text)) return new Error('用户名只能包含中文、英文、数字、下划线')
+      if (text === '')
+        return new Error('用户名不能为空')
+      if ([...text].length < 2)
+        return new Error('用户名至少 2 个字符')
+      if ([...text].length > 20)
+        return new Error('用户名最多 20 个字符')
+      if (!/^[\u4e00-\u9fa5\w]+$/.test(text))
+        return new Error('用户名只能包含中文、英文、数字、下划线')
       return true
     },
     trigger: ['blur', 'input'],
   },
   avatar: {
-    validator: (_, value) => isImageUrl(value) || new Error('请输入有效的 http/https 图片链接') ,
+    validator: (_, value) => isImageUrl(value) || new Error('请输入有效的 http/https 图片链接'),
     trigger: ['blur', 'change'],
   },
 }
@@ -228,7 +291,8 @@ watch(() => form.avatar, (value) => {
   avatarPreview.value = String(value || '').trim()
 }, { immediate: true })
 watch(() => session.user, (user) => {
-  if (!user) return
+  if (!user)
+    return
   Object.assign(form, {
     username: user.username || '',
     avatar: user.avatar || '',
@@ -260,15 +324,17 @@ async function save() {
             onClose: () => reject(new Error('cancel')),
           })
         })
-      } catch (e) {
-        if (e.message === 'cancel') return
+      }
+      catch (e) {
+        if (e.message === 'cancel')
+          return
       }
     }
 
     saving.value = true
     await session.updateProfile({
       username: form.username.trim(),
-      nickname: '',   // 不再改昵称，留空让后端保持原值
+      nickname: '', // 不再改昵称，留空让后端保持原值
       avatar: form.avatar.trim(),
       gender: form.gender,
       grade: form.grade || '',
@@ -282,7 +348,8 @@ async function save() {
     $message.success(gradeChanged ? '年级已设置，内容已按学段过滤' : '资料已保存')
   }
   catch (error) {
-    if (error?.errors) return
+    if (error?.errors)
+      return
     $message.error(error.message || '资料保存失败')
   }
   finally {
@@ -294,5 +361,51 @@ async function save() {
 <style scoped>
 :deep(.n-form-item-label) {
   align-self: flex-start;
+}
+.wallpaper-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.wallpaper-item {
+  width: 84px;
+  cursor: pointer;
+  text-align: center;
+  font-size: 12px;
+  color: var(--n-text-color-2);
+}
+.wp-thumb {
+  width: 84px;
+  height: 120px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  background: #172033;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 6px;
+  transition: border-color 0.15s;
+}
+.wp-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.wp-thumb span {
+  color: #9eabc1;
+  font-size: 18px;
+}
+.wp-default {
+  background: linear-gradient(160deg, #24334d, #172033);
+  color: #9eabc1;
+}
+.wallpaper-item.active .wp-thumb {
+  border-color: #316c72;
+}
+.wallpaper-item.active span {
+  color: #316c72;
+  font-weight: 600;
 }
 </style>

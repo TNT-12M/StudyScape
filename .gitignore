@@ -29,7 +29,9 @@ php.ini
 *.ini.local
 .env
 .env.local
-server.env          # ★ 分布式架构配置 (各服务器不同, 勿入库)
+# ★ 分布式架构配置 (各服务器不同, 勿入库)
+server.env
+server.env.bak*
 server.env.*.local
 smtp.env
 AccessKey .env

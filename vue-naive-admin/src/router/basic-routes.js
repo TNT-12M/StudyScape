@@ -1,9 +1,15 @@
-﻿export const basicRoutes = [
+export const basicRoutes = [
   {
     name: 'Welcome',
     path: '/welcome',
     component: () => import('@/views/welcome/index.vue'),
     meta: { title: '学境・StudyScape — 学习的新境界', layout: 'empty', public: true },
+  },
+  {
+    name: 'About',
+    path: '/about',
+    component: () => import('@/views/about/index.vue'),
+    meta: { title: '关于学境', layout: 'empty', public: true },
   },
   {
     name: 'Login',
@@ -48,6 +54,7 @@
       { name: 'AdminMaterialRequests', path: 'material-requests', component: () => import('@/views/admin/material-requests/index.vue'), meta: { title: '资料需求', requiresPermission: 'material_manage' } },
       { name: 'AdminFeedback', path: 'feedback', component: () => import('@/views/admin/feedback/index.vue'), meta: { title: '开发者反馈', requiresRoot: true } },
       { name: 'AdminAnnouncements', path: 'announcements', component: () => import('@/views/admin/announcements/index.vue'), meta: { title: '公告管理', requiresRoot: true } },
+      { name: 'AdminSettings', path: 'settings', component: () => import('@/views/admin/settings/index.vue'), meta: { title: '引导设置', requiresRoot: true } },
       { name: 'AdminOcr', path: 'ocr', component: () => import('@/views/admin/ocr/index.vue'), meta: { title: '智能 OCR 审核', requiresPermission: 'question_import' } },
       { name: 'AdminProfile', path: 'profile', component: () => import('@/views/shared/profile/index.vue'), meta: { title: '个人资料' } },
     ],

@@ -267,3 +267,33 @@ _runOnce($db, 9, 'materials 补 sha256 / storage_node', function() use ($db) {
 _runOnce($db, 10, '注册审批取消 — 批量 UPDATE is_approved', function() use ($db) {
     $db->exec("UPDATE users SET is_approved=1 WHERE is_approved=0");
 });
+
+_runOnce($db, 11, '反馈多轮回复表 feedback_replies', function() use ($db) {
+    $db->exec("CREATE TABLE IF NOT EXISTS feedback_replies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        feedback_id INTEGER NOT NULL,
+        author_id INTEGER NOT NULL,
+        author_role TEXT NOT NULL DEFAULT 'user',
+        content TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_feedback_replies_feedback ON feedback_replies(feedback_id, id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_feedback_replies_author ON feedback_replies(feedback_id, author_id, id DESC)");
+});
+
+_runOnce($db, 12, '用户个性化设置表 user_settings', function() use ($db) {
+    $db->exec("CREATE TABLE IF NOT EXISTS user_settings (
+        user_id INTEGER PRIMARY KEY,
+        wallpaper TEXT NOT NULL DEFAULT '',
+        guide_seen INTEGER NOT NULL DEFAULT 0,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+});
+
+_runOnce($db, 13, '站点配置键值表 app_settings', function() use ($db) {
+    $db->exec("CREATE TABLE IF NOT EXISTS app_settings (
+        k TEXT PRIMARY KEY,
+        v TEXT NOT NULL DEFAULT '',
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+});

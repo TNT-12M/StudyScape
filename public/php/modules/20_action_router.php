@@ -743,11 +743,86 @@ if ($action) {
                 $size = max(1, min(50, (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 20)));
                 $total = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM user_feedback WHERE user_id=?', [$uid])['c'] ?? 0);
                 $items = dbFetchAll($db, 'SELECT id, content, contact, status, reply_content, replied_at, created_at, updated_at FROM user_feedback WHERE user_id=? ORDER BY id DESC LIMIT ? OFFSET ?', [$uid, $size, ($page - 1) * $size]);
+                // 附带多轮回复，用户端直接展示完整对话
+                $threads = [];
+                if ($items) {
+                    $ids = array_map('intval', array_column($items, 'id'));
+                    $ph = implode(',', array_fill(0, count($ids), '?'));
+                    $replies = dbFetchAll($db, "SELECT id, feedback_id, author_id, author_role, content, created_at FROM feedback_replies WHERE feedback_id IN ($ph) ORDER BY id ASC", $ids);
+                    foreach ($replies as $r) {
+                        $r['created_at'] = formatDbUtcTimestamp($r['created_at']);
+                        $threads[(int)$r['feedback_id']][] = $r;
+                    }
+                }
                 foreach ($items as &$item) {
                     foreach (['created_at', 'updated_at', 'replied_at'] as $field) if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]);
+                    $item['replies'] = $threads[(int)$item['id']] ?? [];
+                    $item['user_rounds'] = count(array_filter($item['replies'], function ($r) { return $r['author_role'] === 'user'; }));
+                    $item['reply_rounds'] = count(array_filter($item['replies'], function ($r) { return $r['author_role'] === 'admin'; }));
                 }
                 unset($item);
                 jsonOut(true, '', ['items' => $items, 'pagination' => ['page' => $page, 'page_size' => $size, 'total' => $total]]);
+                break;
+
+            // ---------- 反馈多轮回复（用户/root 均可；5 轮上限 + 用户 10 分钟间隔） ----------
+            case 'feedback_reply':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $me = currentUser();
+                $id = (int)($_POST['id'] ?? 0);
+                $content = trim(strip_tags((string)($_POST['content'] ?? '')));
+                if ($id <= 0) jsonOut(false, '参数错误');
+                if ($content === '' || mb_strlen($content, 'UTF-8') < 2) jsonOut(false, '回复内容至少 2 个字符');
+                if (mb_strlen($content, 'UTF-8') > 500) jsonOut(false, '单条回复不能超过 500 个字符');
+                if (preg_match('/[\\x00-\\x1F\\x7F]/u', $content)) jsonOut(false, '回复内容包含非法字符');
+                $fb = dbFetchOne($db, 'SELECT id, user_id, status, created_at FROM user_feedback WHERE id=?', [$id]);
+                if (!$fb) jsonOut(false, '反馈不存在');
+                $isRootReply = (($me['role'] ?? '') === 'root');
+                if (!$isRootReply && (int)$fb['user_id'] !== $uid) jsonOut(false, '无权回复该反馈');
+                $authorRole = $isRootReply ? 'admin' : 'user';
+                $mineCount = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM feedback_replies WHERE feedback_id=? AND author_role=?", [$id, $authorRole])['c'] ?? 0);
+                if ($mineCount >= 5) jsonOut(false, '该反馈的往返回复已达 5 轮上限，请等待进一步处理');
+                if ($authorRole === 'user') {
+                    // 用户两次发言至少间隔 10 分钟（首次以反馈提交时间为基准）
+                    $last = dbFetchOne($db, "SELECT MAX(created_at) AS last_at FROM feedback_replies WHERE feedback_id=? AND author_role='user'", [$id]);
+                    $baseline = ($last['last_at'] ?? '') ?: (string)$fb['created_at'];
+                    if ($baseline !== '') {
+                        $wait = 600 - (time() - strtotime($baseline . ' UTC'));
+                        if ($wait > 0) jsonOut(false, '两次回复需间隔 10 分钟，请 ' . (int)ceil($wait / 60) . ' 分钟后再试');
+                    }
+                }
+                dbQuery($db, 'INSERT INTO feedback_replies(feedback_id, author_id, author_role, content) VALUES(?,?,?,?)', [$id, $uid, $authorRole, $content]);
+                $replyId = (int)$db->lastInsertRowID();
+                $snippet = mb_substr($content, 0, 80, 'UTF-8');
+                if ($authorRole === 'user') {
+                    dbQuery($db, "UPDATE user_feedback SET status='processing', updated_at=CURRENT_TIMESTAMP WHERE id=?", [$id]);
+                    notifyRoots('feedback_reply', '用户回复了反馈 #' . $id, $snippet, $id);
+                } else {
+                    dbQuery($db, 'UPDATE user_feedback SET reply_content=?, replied_by=?, replied_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$content, $uid, $id]);
+                    notifyUser((int)$fb['user_id'], 'feedback_reply', '开发者回复了你的反馈', $snippet, $id);
+                    log_admin_action('reply_feedback', $id);
+                }
+                jsonOut(true, '回复已发送', ['reply' => [
+                    'id' => $replyId, 'author_id' => $uid, 'author_role' => $authorRole,
+                    'content' => $content, 'created_at' => formatDbUtcTimestamp(gmdate('Y-m-d H:i:s')),
+                ]]);
+                break;
+
+            // ---------- 反馈完整对话（用户看自己的 / root 看全部） ----------
+            case 'feedback_thread':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $me = currentUser();
+                $id = (int)($_POST['id'] ?? 0);
+                if ($id <= 0) jsonOut(false, '参数错误');
+                $fb = dbFetchOne($db, 'SELECT id, user_id, content, contact, status, admin_note, reply_content, created_at, updated_at FROM user_feedback WHERE id=?', [$id]);
+                if (!$fb) jsonOut(false, '反馈不存在');
+                if ((($me['role'] ?? '') !== 'root') && (int)$fb['user_id'] !== $uid) jsonOut(false, '无权查看该反馈');
+                $rows = dbFetchAll($db, 'SELECT id, author_id, author_role, content, created_at FROM feedback_replies WHERE feedback_id=? ORDER BY id ASC', [$id]);
+                foreach ($rows as &$row) $row['created_at'] = formatDbUtcTimestamp($row['created_at']);
+                unset($row);
+                foreach (['created_at', 'updated_at'] as $f) if ($fb[$f] !== null) $fb[$f] = formatDbUtcTimestamp($fb[$f]);
+                jsonOut(true, '', ['feedback' => $fb, 'replies' => $rows]);
                 break;
 
             case 'admin_feedback_list':
@@ -761,7 +836,9 @@ if ($action) {
                 if ($keyword !== '') { $where[] = '(f.content LIKE ? OR f.contact LIKE ? OR u.username LIKE ?)'; $like = '%' . $keyword . '%'; array_push($args, $like, $like, $like); }
                 $whereSql = implode(' AND ', $where);
                 $total = (int)(dbFetchOne($db, "SELECT COUNT(*) AS c FROM user_feedback f JOIN users u ON u.id=f.user_id WHERE $whereSql", $args)['c'] ?? 0);
-                $items = dbFetchAll($db, "SELECT f.id, f.user_id, u.username, f.content, f.contact, f.status, f.admin_note, f.reply_content, f.replied_at, f.handled_by, f.handled_at, f.created_at, f.updated_at FROM user_feedback f LEFT JOIN users u ON u.id=f.user_id WHERE $whereSql ORDER BY f.id DESC LIMIT ? OFFSET ?", array_merge($args, [$size, ($page - 1) * $size]));
+                $items = dbFetchAll($db, "SELECT f.id, f.user_id, u.username, f.content, f.contact, f.status, f.admin_note, f.reply_content, f.replied_at, f.handled_by, f.handled_at, f.created_at, f.updated_at,
+                    (SELECT COUNT(*) FROM feedback_replies r WHERE r.feedback_id=f.id) AS reply_count
+                    FROM user_feedback f LEFT JOIN users u ON u.id=f.user_id WHERE $whereSql ORDER BY f.id DESC LIMIT ? OFFSET ?", array_merge($args, [$size, ($page - 1) * $size]));
                 foreach ($items as &$item) {
                     foreach (['created_at', 'updated_at', 'handled_at', 'replied_at'] as $field) if ($item[$field] !== null) $item[$field] = formatDbUtcTimestamp($item[$field]);
                 }
@@ -776,12 +853,16 @@ if ($action) {
                 $actionName = trim((string)($_POST['feedback_action'] ?? $_POST['action_type'] ?? ''));
                 $status = trim((string)($_POST['status'] ?? ''));
                 $note = trim(strip_tags((string)($_POST['admin_note'] ?? '')));
-                if ($id <= 0 || mb_strlen($note, 'UTF-8') > 500) jsonOut(false, '参数无效或备注过长');
+                $replyContent = trim(strip_tags((string)($_POST['reply_content'] ?? '')));
+                if ($id <= 0 || mb_strlen($note, 'UTF-8') > 500 || mb_strlen($replyContent, 'UTF-8') > 500) jsonOut(false, '参数无效、备注或回复过长');
                 $feedback = dbFetchOne($db, 'SELECT id, user_id, status FROM user_feedback WHERE id=?', [$id]);
                 if (!$feedback) jsonOut(false, '反馈不存在');
                 if ($actionName === 'adopt') {
                     $status = 'resolved';
-                    dbQuery($db, 'UPDATE user_feedback SET status=?, admin_note=?, reply_content=?, replied_by=?, replied_at=CURRENT_TIMESTAMP, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$status, $note, '感谢您的建议，我们已采纳。', $adminUid, $adminUid, $id]);
+                    $replyText = $replyContent !== '' ? $replyContent : '感谢您的建议，我们已采纳。';
+                    dbQuery($db, 'UPDATE user_feedback SET status=?, admin_note=?, reply_content=?, replied_by=?, replied_at=CURRENT_TIMESTAMP, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$status, $note, $replyText, $adminUid, $adminUid, $id]);
+                    dbQuery($db, 'INSERT INTO feedback_replies(feedback_id, author_id, author_role, content) VALUES(?,?,?,?)', [$id, $adminUid, 'admin', $replyText]);
+                    notifyUser((int)$feedback['user_id'], 'feedback_reply', '开发者回复了你的反馈', mb_substr($replyText, 0, 80, 'UTF-8'), $id);
                 } elseif ($actionName === 'ignore') {
                     $status = 'closed';
                     dbQuery($db, 'UPDATE user_feedback SET status=?, admin_note=?, reply_content=NULL, replied_by=NULL, replied_at=NULL, handled_by=?, handled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?', [$status, $note, $adminUid, $id]);
@@ -897,6 +978,95 @@ if ($action) {
                     $cnt = dbQuery($db, 'DELETE FROM notifications WHERE user_id=? AND type <> ?', [$uid, 'announcement']);
                     jsonOut(true, '通知已清空', ['deleted' => $cnt ?: 0]);
                 }
+                break;
+
+            // ==================== 用户个性化设置（壁纸 / 引导） ====================
+            case 'user_settings_get':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $row = dbFetchOne($db, 'SELECT wallpaper, guide_seen FROM user_settings WHERE user_id=?', [$uid]);
+                jsonOut(true, '', [
+                    'wallpaper'  => (string)($row['wallpaper'] ?? ''),
+                    'guide_seen' => (int)($row['guide_seen'] ?? 0),
+                ]);
+                break;
+
+            case 'user_settings_save':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $wallpaper = (string)($_POST['wallpaper'] ?? '');
+                $allowedWallpapers = ['', 'wallpaper-1', 'wallpaper-2', 'wallpaper-3', 'wallpaper-4'];
+                if (!in_array($wallpaper, $allowedWallpapers, true)) jsonOut(false, '壁纸参数无效');
+                dbQuery($db, "INSERT INTO user_settings(user_id, wallpaper, updated_at) VALUES(?,?,CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE SET wallpaper=excluded.wallpaper, updated_at=CURRENT_TIMESTAMP", [$uid, $wallpaper]);
+                jsonOut(true, '壁纸已保存', ['wallpaper' => $wallpaper]);
+                break;
+
+            // ---------- 首次登录引导（读配置 + 标记已看） ----------
+            case 'user_guide_state':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $row = dbFetchOne($db, 'SELECT guide_seen FROM user_settings WHERE user_id=?', [$uid]);
+                $steps = json_decode(appSettingGet('guide_steps', '[]'), true);
+                if (!is_array($steps) || !$steps) {
+                    $steps = [
+                        ['title' => '在线刷题', 'content' => '按学科和学段选择题目，提交后自动判分，错题可回看解析。'],
+                        ['title' => '资料中心', 'content' => '下载的 PDF 会自动带上「学境」水印与官网二维码，方便转发给同学。'],
+                        ['title' => '开发者反馈', 'content' => '遇到题目错误或功能建议，直接在这里留言，开发者会回复你。'],
+                    ];
+                }
+                jsonOut(true, '', [
+                    'enabled'    => appSettingGet('guide_enabled', '1') === '1',
+                    'steps'      => $steps,
+                    'video_url'  => appSettingGet('guide_video_url', ''),
+                    'seen'       => (int)($row['guide_seen'] ?? 0) === 1,
+                ]);
+                break;
+
+            case 'user_guide_done':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                dbQuery($db, "INSERT INTO user_settings(user_id, guide_seen, updated_at) VALUES(?,1,CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE SET guide_seen=1, updated_at=CURRENT_TIMESTAMP", [$uid]);
+                jsonOut(true, '已记录引导完成');
+                break;
+
+            // ---------- 引导配置（仅 root） ----------
+            case 'admin_guide_get':
+                requireRoot();
+                $steps = json_decode(appSettingGet('guide_steps', '[]'), true);
+                jsonOut(true, '', [
+                    'enabled'   => appSettingGet('guide_enabled', '1') === '1',
+                    'steps'     => is_array($steps) ? $steps : [],
+                    'video_url' => appSettingGet('guide_video_url', ''),
+                ]);
+                break;
+
+            case 'admin_guide_save':
+                requireRoot();
+                $enabled = ((string)($_POST['enabled'] ?? '1')) === '1' ? '1' : '0';
+                $videoUrl = trim((string)($_POST['video_url'] ?? ''));
+                if ($videoUrl !== '' && (!filter_var($videoUrl, FILTER_VALIDATE_URL) || !preg_match('#^https?://#i', $videoUrl))) {
+                    jsonOut(false, '引导视频链接必须是 http/https 地址');
+                }
+                $rawSteps = $_POST['steps'] ?? '[]';
+                $steps = is_array($rawSteps) ? $rawSteps : json_decode((string)$rawSteps, true);
+                $clean = [];
+                if (is_array($steps)) {
+                    foreach ($steps as $step) {
+                        $title = trim(strip_tags((string)($step['title'] ?? '')));
+                        $content = trim(strip_tags((string)($step['content'] ?? '')));
+                        if ($title === '' && $content === '') continue;
+                        if (mb_strlen($title, 'UTF-8') > 40 || mb_strlen($content, 'UTF-8') > 200) jsonOut(false, '引导步骤标题最多 40 字、内容最多 200 字');
+                        $clean[] = ['title' => $title, 'content' => $content];
+                        if (count($clean) >= 5) break;
+                    }
+                }
+                appSettingSet('guide_enabled', $enabled);
+                appSettingSet('guide_steps', json_encode($clean, JSON_UNESCAPED_UNICODE));
+                appSettingSet('guide_video_url', $videoUrl);
+                log_admin_action('save_guide_config');
+                jsonOut(true, '引导配置已保存');
                 break;
 
             // ---------- 公告管理（仅 root） ----------
@@ -1580,6 +1750,9 @@ if ($action) {
                 }
                 unset($q);
                 dbQuery($db, 'UPDATE ocr_import_batches SET status=\'committed\', result_json=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?', [json_encode(['questions' => $questions], JSON_UNESCAPED_UNICODE), $id]);
+                if ($inserted > 0) {
+                    notifyRootsOnContentUpload('内容管理员完成 OCR 入库', "OCR 批次 #{$id} 本次入库 {$inserted} 道题目，请抽空确认。", $id);
+                }
                 jsonOut(true, '审核题目已入库', ['inserted' => $inserted, 'skipped' => $skipped, 'total' => count($kept)]);
                 break;
 
@@ -1724,6 +1897,28 @@ if ($action) {
                 createAuthorizationNotification($newRootId, 'root', '已创建为 root');
                 log_admin_action('create_root', $newRootId);
                 jsonOut(true, 'root 创建成功');
+                break;
+
+            // ==================== root 后台直接创建账号（普通用户/内容管理员/root） ====================
+            case 'admin_create_user':
+                $operator = requireRoot();
+                $username = validateUsername((string)($_POST['username'] ?? ''));
+                $email = sanitizeInput($_POST['email'] ?? '');
+                $password = (string)($_POST['password'] ?? '');
+                $role = (string)($_POST['role'] ?? 'user');
+                if ($username === '' || $email === '' || $password === '') jsonOut(false, '请完整填写用户名、邮箱和初始密码');
+                if (!validateEmail($email)) jsonOut(false, '邮箱格式不正确');
+                if (strlen($password) < 6) jsonOut(false, '初始密码至少 6 位');
+                if (!in_array($role, ['user', 'content_admin', 'root'], true)) jsonOut(false, '角色无效');
+                if ($role === 'root' && !isInitialRoot()) jsonOut(false, '仅初始 lian 可以创建 root 账号');
+                if (dbFetchOne($db, "SELECT id FROM users WHERE username=? OR email=?", [$username, $email])) jsonOut(false, '用户名或邮箱已存在');
+                $isAdmin = $role === 'user' ? 0 : 1;
+                dbQuery($db, "INSERT INTO users(username,email,password,role,is_initial_root,is_admin,is_approved,is_active) VALUES(?,?,?,?,0,?,1,1)",
+                    [$username, $email, encryptPassword($password), $role, $isAdmin]);
+                $newId = (int)$db->lastInsertRowID();
+                notifyUser($newId, 'account_created', '账号已创建', '管理员为你创建了学境账号，用户名为 ' . $username . '，请使用初始密码登录后及时修改。', $newId);
+                log_admin_action('admin_create_user_' . $role, $newId);
+                jsonOut(true, '账号创建成功', ['user_id' => $newId, 'username' => $username, 'role' => $role]);
                 break;
 
             // ==================== 授权/撤销角色 ====================
@@ -2337,6 +2532,9 @@ if ($action) {
                     $skipDetail .= "（{$stats['skip_dup']}条已有答案，重复跳过）";
                 }
                 $msg = "导入完成: 新增 {$stats['inserted']} / 更新 {$stats['updated']} / 跳过 {$stats['skipped']} / 失败 {$stats['errors']}{$skipDetail}";
+                if (($stats['inserted'] + $stats['updated']) > 0) {
+                    notifyRootsOnContentUpload('内容管理员导入了题目', "本次导入新增 {$stats['inserted']} 道、更新 {$stats['updated']} 道（{$detectedSubject}），请抽空确认。", 0);
+                }
                 jsonOut(true, $msg, [
                     'stats' => $stats,
                     'subject' => $detectedSubject,
@@ -3184,6 +3382,7 @@ if ($action) {
                     [$origName, $stored, '', $fileSize, $mime, $subject, $desc, getUid(), $educationLevel, $categoryId > 0 ? $categoryId : null, $clientSha, 'home']
                 );
                 $newId = (int)$db->lastInsertRowID();
+                notifyRootsOnContentUpload('内容管理员上传了新资料', '「' . $origName . '」已上传，请抽空确认内容与分类。', $newId);
                 jsonOut(true, "上传成功（家里云存储）", [
                     'material_id' => $newId,
                     'filename'    => $origName,
@@ -3272,6 +3471,9 @@ if ($action) {
                     }
                 }
 
+                if ($successCount > 0) {
+                    notifyRootsOnContentUpload('内容管理员批量上传了资料', "本次批量入库 $successCount 个文件，请抽空确认。", 0);
+                }
                 jsonOut(true, "批量入库完成：成功 $successCount 个" . ($errors ? '，' . count($errors) . ' 个跳过' : ''), [
                     'success_count' => $successCount,
                     'errors' => $errors,

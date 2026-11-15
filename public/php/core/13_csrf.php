@@ -22,6 +22,10 @@ $csrfBypass = [
     'practice_subjects',
     'practice_result',
     'feedback_list_mine',
+    'feedback_thread',        // 只读：用户看自己的、root 看全部，内部已校验归属
+    'user_settings_get',      // 只读：当前用户壁纸/引导状态
+    'user_guide_state',       // 只读：引导弹窗配置与是否已看
+    'admin_guide_get',        // 只读：引导配置，内部 requireRoot
     'notification_list',
     'notification_unread_count',
     // C：资料读接口

@@ -32,6 +32,62 @@ function createAuthorizationNotification(int $targetUid, string $type, string $l
     }
 }
 
+// 个人通知（站内通知，不写公告表）
+function notifyUser(int $targetUid, string $type, string $title, string $body, int $relatedId = 0): void {
+    global $db;
+    if ($targetUid <= 0) return;
+    try {
+        dbQuery($db, "INSERT INTO notifications(user_id,type,title,body,related_id) VALUES(?,?,?,?,?)",
+            [$targetUid, $type, $title, $body, $relatedId > 0 ? $relatedId : null]);
+    } catch (Throwable $e) {
+        error_log('notifyUser failed: ' . $e->getMessage());
+    }
+}
+
+// 通知所有 root（内容管理员上传后提醒审核用）
+function notifyRoots(string $type, string $title, string $body, int $relatedId = 0): int {
+    global $db;
+    $count = 0;
+    try {
+        $rows = dbFetchAll($db, "SELECT id FROM users WHERE role='root' AND is_active=1");
+        foreach ($rows as $row) {
+            notifyUser((int)$row['id'], $type, $title, $body, $relatedId);
+            $count++;
+        }
+    } catch (Throwable $e) {
+        error_log('notifyRoots failed: ' . $e->getMessage());
+    }
+    return $count;
+}
+
+// 内容管理员上传内容后提醒 root（站内通知，不写公告）
+function notifyRootsOnContentUpload(string $title, string $body, int $relatedId = 0): void {
+    $me = currentUser();
+    if (!is_array($me) || ($me['role'] ?? '') !== 'content_admin') return;
+    notifyRoots('content_upload', $title, $body, $relatedId);
+}
+
+// app_settings 键值读写（引导弹窗等站点级配置）
+function appSettingGet(string $key, string $default = ''): string {
+    global $db;
+    try {
+        $row = dbFetchOne($db, "SELECT v FROM app_settings WHERE k=?", [$key]);
+        return $row ? (string)$row['v'] : $default;
+    } catch (Throwable $_) {
+        return $default;
+    }
+}
+
+function appSettingSet(string $key, string $value): void {
+    global $db;
+    try {
+        dbQuery($db, "INSERT INTO app_settings(k,v,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)
+            ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=CURRENT_TIMESTAMP", [$key, $value]);
+    } catch (Throwable $e) {
+        error_log('appSettingSet failed: ' . $e->getMessage());
+    }
+}
+
 function invalidateSession() {
     $_SESSION = [];
     if (ini_get('session.use_cookies')) {

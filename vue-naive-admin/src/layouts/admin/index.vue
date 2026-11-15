@@ -36,6 +36,9 @@
         <RouterLink v-if="session.isContentAdmin" to="/StudyScape/ocr" @click="closeOnMobile">
           <span class="menu-icon">🔍</span><span class="menu-text">智能 OCR 审核</span>
         </RouterLink>
+        <RouterLink v-if="session.isRoot" to="/StudyScape/settings" @click="closeOnMobile">
+          <span class="menu-icon">🧭</span><span class="menu-text">引导设置</span>
+        </RouterLink>
       </nav>
       <RouterLink class="back-user" to="/app" @click="closeOnMobile">
         <span class="menu-icon">←</span><span class="menu-text">返回用户端</span>

@@ -85,8 +85,8 @@ export const phpMaterialsApi = {
   categoryAdd: data => phpAction('material_category_add', data),
   categoryUpdate: data => phpAction('material_category_update', data),
   categoryRemove: id => phpAction('material_category_delete', { id }),
-  extract: data => phpAction('material_extract', data, { timeout: 60000 }),        // zip → 清单
-  batchConfirm: data => phpAction('material_batch_confirm', data, { timeout: 120000 }),  // 批量入库
+  extract: data => phpAction('material_extract', data, { timeout: 60000 }), // zip → 清单
+  batchConfirm: data => phpAction('material_batch_confirm', data, { timeout: 120000 }), // 批量入库
 }
 
 // 资料需求反馈
@@ -107,11 +107,11 @@ export const phpOcrApi = {
   commit: data => phpAction('ocr_batch_commit', data),
   setMeta: data => phpAction('ocr_batch_set_meta', data),
   // 下载 AI 提示词纯文本 (返回文件下载, 不走 phpAction JSON 封装)
-  export: batch_id => {
+  export: (batch_id) => {
     const token = localStorage.getItem('token') || ''
-    const baseURL = (import.meta.env.VITE_API_BASE || '/api.php') + '?action=ocr_batch_export'
+    const baseURL = `${import.meta.env.VITE_API_BASE || '/api.php'}?action=ocr_batch_export`
     const url = `${baseURL}&batch_id=${batch_id}&token=${encodeURIComponent(token)}&t=${Date.now()}`
-    window.location.href = url  // 直接触发浏览器下载
+    window.location.href = url // 直接触发浏览器下载
     return Promise.resolve()
   },
 }
@@ -119,6 +119,22 @@ export const phpOcrApi = {
 export const phpFeedbackApi = {
   submit: data => phpAction('feedback_submit', data),
   mine: data => phpAction('feedback_list_mine', data, { bypassCsrf: true }),
+  reply: data => phpAction('feedback_reply', data),
+  thread: id => phpAction('feedback_thread', { id }, { bypassCsrf: true }),
+}
+
+// 用户个性化设置：壁纸 / 首次引导
+export const phpSettingsApi = {
+  get: () => phpAction('user_settings_get', {}, { bypassCsrf: true }),
+  save: data => phpAction('user_settings_save', data),
+  guideState: () => phpAction('user_guide_state', {}, { bypassCsrf: true }),
+  guideDone: () => phpAction('user_guide_done'),
+}
+
+// 站点引导配置（仅 root）
+export const phpAdminGuideApi = {
+  get: () => phpAction('admin_guide_get', {}, { bypassCsrf: true }),
+  save: data => phpAction('admin_guide_save', data),
 }
 
 export const phpNotificationApi = {
@@ -126,13 +142,15 @@ export const phpNotificationApi = {
   unreadCount: () => phpAction('notification_unread_count', {}, { bypassCsrf: true }),
   markRead: (id, relatedId) => phpAction('notification_mark_read', id ? { id, related_id: relatedId || 0 } : {}),
   // 单条删除传 id，全部清空不传
-  clear: (id) => phpAction('notification_clear', id ? { id } : {}),
+  clear: id => phpAction('notification_clear', id ? { id } : {}),
 }
 
 export const phpAdminFeedbackApi = {
   list: data => phpAction('admin_feedback_list', data),
   update: data => phpAction('admin_feedback_update', data),
-  adopt: id => phpAction('admin_feedback_update', { id, feedback_action: 'adopt' }),
+  thread: id => phpAction('feedback_thread', { id }, { bypassCsrf: true }),
+  reply: data => phpAction('feedback_reply', data),
+  adopt: (id, replyContent) => phpAction('admin_feedback_update', { id, feedback_action: 'adopt', reply_content: replyContent || '' }),
   ignore: id => phpAction('admin_feedback_update', { id, feedback_action: 'ignore' }),
   reopen: id => phpAction('admin_feedback_update', { id, feedback_action: 'reopen' }),
 }
@@ -160,6 +178,9 @@ export const phpAdminApi = {
   feedbackList: data => phpAction('admin_feedback_list', data),
   feedbackUpdate: data => phpAction('admin_feedback_update', data),
   createAdmin: data => phpAction('create_root', data),
+  createUser: data => phpAction('admin_create_user', data),
+  guideGet: () => phpAction('admin_guide_get', {}, { bypassCsrf: true }),
+  guideSave: data => phpAction('admin_guide_save', data),
   toggleUser: user_id => phpAction('toggle_user', { user_id }),
   grantRoot: user_id => phpAction('grant_root', { user_id }),
   revokeRoot: user_id => phpAction('revoke_root', { user_id }),
