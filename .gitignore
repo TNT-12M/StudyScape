@@ -124,3 +124,7 @@ data/ocr_batches/
 public/api.php.bak_split
 security.env
 *.service
+
+# ===== 本地部署临时文件 =====
+_*
+*.bak_*
