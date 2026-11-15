@@ -207,15 +207,24 @@ CREATE INDEX IF NOT EXISTS qdb.idx_pq_question ON paper_questions(question_id);
 $MIGRATION_VERSION = 7;
 
 function _runOnce($db, int $version, string $label, callable $fn): void {
+    // static 数组: 同一 worker 进程内第一次查完 DB 就记住了, 后续请求 0 DB 查询
+    static $done = [];
+    if (isset($done[$version])) return;
+
     // 精确查本版本号是否存在即可 — version 列是 TEXT, 不能 ORDER BY 数值排序
     try {
-        if ($db->querySingle("SELECT 1 FROM schema_migrations WHERE version = '$version'")) return;
-    } catch (Exception $e) { /* schema_migrations 表可能还没 */ }
+        if ($db->querySingle("SELECT 1 FROM schema_migrations WHERE version = '$version'")) {
+            $done[$version] = true;
+            return;
+        }
+    } catch (\Throwable $_) { /* schema_migrations 表可能还没, 继续跑 */ }
+
     try {
         $fn();
         $db->exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES ('$version')");
+        $done[$version] = true;
         error_log("✅ Migration v$version: $label");
-    } catch (Exception $e) {
+    } catch (\Throwable $e) {
         error_log("⚠️ Migration v$version 失败: " . $e->getMessage());
     }
 }
