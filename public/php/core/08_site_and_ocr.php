@@ -95,35 +95,59 @@ function ocrBridgeCall(string $method, string $path, array $data = null): array 
 
 function ocrRefreshBatch(array $batch): array {
     global $db;
+    $bid = (int)($batch['id'] ?? 0);
+    if ($bid <= 0) return $batch;
+
+    // ★ 进程内节流: 同一批次 8 秒内只刷新一次 bridge 状态
+    // 前端 3s 轮询 + bridge 15s 超时, 不加节流会导致批量超时堆积
+    static $lastRefresh = [];
+    $now = time();
+    if (isset($lastRefresh[$bid]) && $now - $lastRefresh[$bid] < 8) {
+        return $batch;
+    }
+
     $curStatus = (string)($batch['status'] ?? '');
     $jobId = trim((string)($batch['bridge_job_id'] ?? ''));
+
+    // 终态直接 return (不做任何 bridge 调用)
+    if ($curStatus === 'review' || $curStatus === 'committed' || $curStatus === 'failed') {
+        return $batch;
+    }
 
     // ★ 僵尸自愈: queued 但没有 bridge_job_id (startOcrWorker 崩溃跳过了)
     if ($jobId === '' && ($curStatus === 'queued' || $curStatus === 'running')) {
         $age = time() - strtotime($batch['created_at'] ?? 'now');
         if ($age > 3600) {
             // 超过 1 小时还没入队 → startOcrWorker 当时炸了, 标记失败让用户重试
-            dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message='OCR 入队超时 (可能当时 bridge_server 不在线), 请点删除后重新上传', updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$batch['id']]);
+            dbQuery($db, "UPDATE ocr_import_batches SET status='failed', error_message='OCR 入队超时 (可能当时 bridge_server 不在线), 请点删除后重新上传', updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?", [$bid]);
             $batch['status'] = 'failed';
             $batch['error_message'] = 'OCR 入队超时, 请重新上传';
+            $lastRefresh[$bid] = $now;
             return $batch;
         }
-        // 还没超时 → 自动 retry startOcrWorker
-        if ($age > 30) {
+        // 还没超时 → 自动 retry startOcrWorker (1 分钟节流)
+        if ($age > 60 && (!isset($lastRefresh["zombie_$bid"]) || $now - $lastRefresh["zombie_$bid"] > 60)) {
+            $lastRefresh["zombie_$bid"] = $now;
             startOcrWorker($batch);
             // retry 后重查 DB 状态
-            $batch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [(int)$batch['id']]) ?: $batch;
+            $batch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [$bid]) ?: $batch;
             $jobId = trim((string)($batch['bridge_job_id'] ?? ''));
             $curStatus = (string)($batch['status'] ?? '');
+            // retry 后也可能变成终态了
+            if ($curStatus === 'review' || $curStatus === 'committed' || $curStatus === 'failed') {
+                $lastRefresh[$bid] = $now;
+                return $batch;
+            }
+        } else {
+            // 60 秒内已经重试过 → 跳过这次 bridge 调用
+            return $batch;
         }
-    }
-
-    if ($curStatus === 'review' || $curStatus === 'committed' || $curStatus === 'failed') {
-        return $batch;  // 终态不刷新
     }
 
     if ($jobId === '') return $batch;
 
+    // 记录这次刷新时间, curl 调完才算
+    $lastRefresh[$bid] = $now;
     $resp = ocrBridgeCall('GET', '/status/' . urlencode($jobId));
 
     // ① bridge 连不上（curl 超时/拒绝）
@@ -241,4 +265,44 @@ function startOcrWorker(array $batch): void {
         return;
     }
     dbQuery($db, "UPDATE ocr_import_batches SET status='queued', bridge_job_id=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?", [$jobId, (int)$batch['id']]);
+}
+
+/**
+ * 自动清理 ocr_import_batches:
+ *   - committed 超过 24h → 删除记录 + 物理文件
+ *   - failed 超过 72h → 删除记录 + 物理文件
+ * 幂等安全: 每次被调用时先检查上次运行时间, 同一 worker 10 分钟内只清一次
+ */
+function ocrCleanupBatches(): void {
+    global $db;
+    static $lastRun = 0;
+    $now = time();
+    if ($now - $lastRun < 600) return;  // 10 分钟节流
+    $lastRun = $now;
+
+    try {
+        // ① committed 超过 24h → 彻底清理
+        $rows = dbFetchAll($db, "SELECT id, stored_name FROM ocr_import_batches WHERE status='committed' AND finished_at < datetime('now','-24 hours')");
+        foreach ($rows as $r) {
+            @unlink(__DIR__ . '/../../../data/ocr_batches/' . basename((string)$r['stored_name']));
+        }
+        $cnt1 = dbQuery($db, "DELETE FROM ocr_import_batches WHERE status='committed' AND finished_at < datetime('now','-24 hours')");
+
+        // ② failed 超过 72h → 也清理 (避免失败记录越积越多)
+        $rows = dbFetchAll($db, "SELECT id, stored_name FROM ocr_import_batches WHERE status='failed' AND finished_at < datetime('now','-72 hours')");
+        foreach ($rows as $r) {
+            @unlink(__DIR__ . '/../../../data/ocr_batches/' . basename((string)$r['stored_name']));
+        }
+        $cnt2 = dbQuery($db, "DELETE FROM ocr_import_batches WHERE status='failed' AND finished_at < datetime('now','-72 hours')");
+
+        // ③ review 状态 (待审核) 也加个上限: 60 天前创建的 → 清理 (没人会存一个月的待审核)
+        $cnt3 = dbQuery($db, "DELETE FROM ocr_import_batches WHERE status='review' AND created_at < datetime('now','-60 days')");
+
+        $total = ($cnt1 ?: 0) + ($cnt2 ?: 0) + ($cnt3 ?: 0);
+        if ($total > 0) {
+            error_log("🧹 OCR 清理: committed=$cnt1, failed=$cnt2, review(60d)=$cnt3");
+        }
+    } catch (\Throwable $e) {
+        error_log('ocrCleanupBatches error: ' . $e->getMessage());
+    }
 }

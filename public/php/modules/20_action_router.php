@@ -1436,18 +1436,32 @@ if ($action) {
 
             case 'ocr_batch_list':
                 requireContentPermission('question_import');
+                // ★ 自动清理 committed/failed 旧记录 (10 分钟节流, 同一 worker 内)
+                ocrCleanupBatches();
+
                 $page = max(1, (int)($_POST['page'] ?? $_GET['page'] ?? 1));
                 $size = max(1, min(50, (int)($_POST['page_size'] ?? $_GET['page_size'] ?? 20)));
                 $total = (int)(dbFetchOne($db, 'SELECT COUNT(*) AS c FROM ocr_import_batches')['c'] ?? 0);
-                $items = dbFetchAll($db, 'SELECT id, file_name, stored_name, status, subject, education_level, bridge_job_id, error_message, retry_count, created_at, updated_at, finished_at, json_extract(result_json, "$.questions") AS questions_json FROM ocr_import_batches ORDER BY id DESC LIMIT ? OFFSET ?', [$size, ($page - 1) * $size]);
+                // ★ 去掉 json_extract(result_json) — 对大 result_json (可能含 base64 图片) 很慢
+                //    改用轻量的长度估算来算 question_count (list 只需个大概)
+                $items = dbFetchAll($db, 'SELECT id, file_name, stored_name, status, subject, education_level, bridge_job_id, error_message, retry_count, created_at, updated_at, finished_at, result_json FROM ocr_import_batches ORDER BY id DESC LIMIT ? OFFSET ?', [$size, ($page - 1) * $size]);
                 foreach ($items as &$item) {
                     $item = ocrRefreshBatch($item);
-                    $raw = (string)($item['result_json'] ?? $item['questions_json'] ?? '');
-                    $decoded = json_decode($raw, true);
-                    // result_json 是完整对象 {"questions":[...]}；questions_json 是 json_extract 出的数组
-                    $qs = isset($item['result_json']) ? ($decoded['questions'] ?? []) : $decoded;
-                    $item['question_count'] = is_array($qs) ? count($qs) : 0;
-                    unset($item['questions_json'], $item['result_json'], $item['stored_name']);
+                    // 轻量算 question_count: 从 result_json 里快速 count questions 数组长度
+                    $raw = (string)($item['result_json'] ?? '');
+                    $item['question_count'] = 0;
+                    if ($raw !== '' && $raw !== 'null') {
+                        $decoded = json_decode($raw, true);
+                        if (is_array($decoded)) {
+                            // 兼容两种格式: {"questions":[...]} 或 直接数组
+                            if (isset($decoded['questions']) && is_array($decoded['questions'])) {
+                                $item['question_count'] = count($decoded['questions']);
+                            } else {
+                                $item['question_count'] = count($decoded);
+                            }
+                        }
+                    }
+                    unset($item['result_json'], $item['stored_name']);
                 }
                 unset($item);
                 jsonOut(true, '', ['items' => $items, 'pagination' => ['page' => $page, 'page_size' => $size, 'total' => $total]]);
@@ -1506,6 +1520,9 @@ if ($action) {
 
             case 'ocr_batch_commit':
                 requireContentPermission('question_import');
+                // ★ 入库后顺便清理旧 committed 记录
+                ocrCleanupBatches();
+
                 $id = (int)($_POST['batch_id'] ?? 0);
                 $json = (string)($_POST['result_json'] ?? '');
                 $batch = dbFetchOne($db, 'SELECT * FROM ocr_import_batches WHERE id=?', [$id]);

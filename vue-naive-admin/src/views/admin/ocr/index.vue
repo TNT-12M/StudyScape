@@ -448,20 +448,30 @@ async function commit() {
 }
 async function removeBatch(id) { try { await phpOcrApi.remove(id); message.success('批次已删除'); await loadBatches() } catch (error) { message.error(error.message) } }
 
-// 自动轮询: 有 queued/processing 状态的批次时, 每 3s 刷新列表
+// 自动轮询: 有 queued/processing 状态的批次时, 每 5s 刷新列表
+// (后端 ocrRefreshBatch 有 8s 节流, 前端 5s 足够, 不会漏状态变化)
 let pollTimer = null
 onMounted(async () => {
   await loadBatches()
   pollTimer = setInterval(async () => {
     const needRefresh = batches.value.some(b => b.status === 'queued' || b.status === 'processing' || b.status === 'running')
     if (needRefresh) {
-      await loadBatches()
+      // 静默刷新列表 (不显示 loading 遮挡用户正在看的审核页)
+      const result = await phpOcrApi.list({ page: page.value, page_size: pageSize.value })
+      batches.value = result.data?.items || []
+      totalCount.value = result.data?.pagination?.total || 0
       // 如果正在查看的 current 也在处理, 顺便刷新详情卡片
       if (current.value && (current.value.status === 'queued' || current.value.status === 'processing')) {
-        try { await loadBatch(current.value.id) } catch {}
+        try {
+          const r = await phpOcrApi.get(current.value.id)
+          if (r.data?.batch) {
+            current.value = r.data.batch
+            questions.value = (current.value?.result?.questions || []).map(normalizeQuestion)
+          }
+        } catch {}
       }
     }
-  }, 3000)
+  }, 5000)
 })
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 </script>
