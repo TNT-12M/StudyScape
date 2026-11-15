@@ -608,7 +608,15 @@ if ($action) {
                     imagedestroy($canvasImg);
                     jsonOut(false, '头像目录创建失败，请检查 data 目录权限');
                 }
-                $avatarPath = $avatarDir . '/' . $uid . '.jpg';
+                // 清理旧头像文件（随机文件名，避免在 URL 中暴露用户 ID）
+                $oldAvatarRow = dbFetchOne($db, 'SELECT avatar FROM users WHERE id=?', [$uid]);
+                $oldAvatarValue = (string)($oldAvatarRow['avatar'] ?? '');
+                if (preg_match('#avatar_image&f=([0-9a-f]{32})#', $oldAvatarValue, $mOld)) {
+                    @unlink($avatarDir . '/' . $mOld[1] . '.jpg');
+                }
+                @unlink($avatarDir . '/' . $uid . '.jpg');
+                $avatarToken = bin2hex(random_bytes(16));
+                $avatarPath = $avatarDir . '/' . $avatarToken . '.jpg';
                 $savedOk = @imagejpeg($canvasImg, $avatarPath, 82);
                 imagedestroy($canvasImg);
                 if (!$savedOk) jsonOut(false, '头像保存失败，请检查服务器目录权限');
@@ -619,8 +627,7 @@ if ($action) {
                     @unlink($avatarPath);
                     jsonOut(false, '头像保存校验失败，请重试');
                 }
-                // v 用毫秒时间戳，确保同一秒内重复上传也能立即刷新缓存
-                $avatarUrl = '/api.php?action=avatar_image&uid=' . $uid . '&v=' . (int)(microtime(true) * 1000);
+                $avatarUrl = '/api.php?action=avatar_image&f=' . $avatarToken;
                 dbQuery($db, 'UPDATE users SET avatar=? WHERE id=?', [$avatarUrl, $uid]);
                 jsonOut(true, '头像已上传', ['avatar' => $avatarUrl]);
                 break;
@@ -637,7 +644,7 @@ if ($action) {
 
                 // 用户名修改（可选）
                 $newUsername = trim((string)($_POST['username'] ?? ''));
-                $currentUser = dbFetchOne($db, 'SELECT username FROM users WHERE id=?', [$uid]);
+                $currentUser = dbFetchOne($db, 'SELECT username, avatar FROM users WHERE id=?', [$uid]);
                 $usernameChanged = false;
                 if ($newUsername !== '' && $currentUser && $newUsername !== $currentUser['username']) {
                     // root 账号用户名不可修改
@@ -680,8 +687,14 @@ if ($action) {
                 $params[] = $uid;
                 dbQuery($db, 'UPDATE users SET ' . implode(', ', $setParts) . ' WHERE id=?', $params);
                 // 改为外链头像时清理服务器上的本地上传文件，避免闲置占用空间
-                if (!preg_match('#^/api\\.php\\?action=avatar_image&uid=\\d+&v=\\d+$#', (string)$avatar)) {
-                    @unlink(dirname(dirname(dirname(__DIR__))) . '/data/avatars/' . $uid . '.jpg');
+                $avatarIsLocal = preg_match('#^/api\\.php\\?action=avatar_image&(?:f=[0-9a-f]{32}|uid=\\d+&v=\\d+)$#', (string)$avatar);
+                if (!$avatarIsLocal) {
+                    $avatarDirCleanup = dirname(dirname(dirname(__DIR__))) . '/data/avatars';
+                    $oldAvatarValue = (string)($currentUser['avatar'] ?? '');
+                    if (preg_match('#avatar_image&f=([0-9a-f]{32})#', $oldAvatarValue, $mOld)) {
+                        @unlink($avatarDirCleanup . '/' . $mOld[1] . '.jpg');
+                    }
+                    @unlink($avatarDirCleanup . '/' . $uid . '.jpg');
                 }
                 $updated = dbFetchOne($db, "SELECT id, username, email, nickname, avatar, gender, grade, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [$uid]);
                 if (!$updated || !(int)$updated['is_active']) jsonOut(false, '用户资料更新失败');

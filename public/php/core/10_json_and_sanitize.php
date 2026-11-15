@@ -212,7 +212,7 @@ function profileAvatar(string $value): ?string {
         jsonOut(false, '头像链接格式不正确或长度过长');
     }
     // 站内上传的头像（固定接口格式，不接受任意相对路径）
-    if (preg_match('#^/api\\.php\\?action=avatar_image&uid=(\\d+)&v=(\\d+)$#', $value, $m) && (int)$m[1] > 0) {
+    if (preg_match('#^/api\\.php\\?action=avatar_image&(?:f=[0-9a-f]{32}|uid=(\\d+)&v=(\\d+))$#', $value)) {
         return $value;
     }
     $parts = parse_url($value);

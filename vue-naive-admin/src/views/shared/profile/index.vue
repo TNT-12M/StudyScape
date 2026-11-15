@@ -19,17 +19,21 @@
                 </n-avatar>
                 <div class="avatar-controls">
                   <n-input
-                    v-model:value="form.avatar"
+                    v-model:value="avatarInput"
                     clearable
                     maxlength="512"
                     show-count
-                    placeholder="可粘贴图片 URL，或点击右侧「上传图片」"
+                    :placeholder="localAvatar ? '已使用上传的头像；如需改用外链，请粘贴图片 URL' : '可粘贴图片 URL，或点击「上传图片」'"
                     style="width: min(520px, 100%)"
+                    @update:value="onAvatarInput"
                   />
                   <n-space align="center">
                     <n-button size="small" :loading="uploadingAvatar" @click="pickAvatarFile">
                       上传图片
                     </n-button>
+                    <n-tag v-if="localAvatar" size="small" type="success">
+                      已使用上传的头像
+                    </n-tag>
                     <span class="avatar-tip">支持 JPG / PNG / WEBP，≤2MB，自动压缩为 256×256</span>
                   </n-space>
                   <input
@@ -282,6 +286,9 @@ function isImageUrl(value) {
   }
 }
 
+const avatarInput = ref('')
+const localAvatar = ref('')
+
 const rules = {
   username: {
     validator: (_, value) => {
@@ -299,7 +306,7 @@ const rules = {
     trigger: ['blur', 'input'],
   },
   avatar: {
-    validator: (_, value) => isImageUrl(value) || new Error('请输入有效的 http/https 图片链接'),
+    validator: () => isImageUrl(avatarInput.value) || new Error('请输入有效的 http/https 图片链接'),
     trigger: ['blur', 'change'],
   },
 }
@@ -308,6 +315,25 @@ const displayName = computed(() => form.username.trim() || session.user?.usernam
 const initial = computed(() => displayName.value.slice(0, 1).toUpperCase())
 const avatarPreview = ref('')
 const uploadingAvatar = ref(false)
+
+function isInternalAvatar(value) {
+  return /^\/api\.php\?action=avatar_image&(?:f=[0-9a-f]{32}|uid=\d+&v=\d+)$/.test(String(value || ''))
+}
+function applyAvatar(value) {
+  const url = String(value || '').trim()
+  form.avatar = url
+  const isLocal = isInternalAvatar(url)
+  localAvatar.value = isLocal ? url : ''
+  avatarInput.value = isLocal ? '' : url
+  avatarPreview.value = url
+  if (!url)
+    avatarPreview.value = ''
+}
+function onAvatarInput(value) {
+  const url = String(value || '').trim()
+  form.avatar = url || localAvatar.value
+  avatarPreview.value = form.avatar
+}
 function pickAvatarFile() {
   document.getElementById('avatar-file-input')?.click()
 }
@@ -328,7 +354,7 @@ async function onAvatarFileChange(event) {
   uploadingAvatar.value = true
   try {
     const result = await phpProfileApi.uploadAvatar({ file })
-    form.avatar = String(result.data?.avatar || '')
+    applyAvatar(result.data?.avatar || '')
     $message.success('头像已上传，请点击保存以同步到账号')
   }
   catch (error) {
@@ -338,22 +364,21 @@ async function onAvatarFileChange(event) {
     uploadingAvatar.value = false
   }
 }
-watch(() => form.avatar, (value) => {
-  avatarPreview.value = String(value || '').trim()
-}, { immediate: true })
 watch(() => session.user, (user) => {
   if (!user)
     return
   Object.assign(form, {
     username: user.username || '',
-    avatar: user.avatar || '',
     gender: user.gender || 'secret',
     grade: user.grade || null,
   })
+  applyAvatar(user.avatar || '')
 }, { immediate: true })
 
 async function save() {
   try {
+    // 输入框为空时沿用已上传的站内头像
+    form.avatar = avatarInput.value.trim() || localAvatar.value
     await formRef.value?.validate()
     const oldGrade = session.user?.grade || null
     const newGrade = form.grade || null
