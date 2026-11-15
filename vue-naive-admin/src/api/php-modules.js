@@ -181,6 +181,7 @@ export const phpAdminApi = {
   createUser: data => phpAction('admin_create_user', data),
   guideGet: () => phpAction('admin_guide_get', {}, { bypassCsrf: true }),
   guideSave: data => phpAction('admin_guide_save', data),
+  uploadQr: data => phpAction('admin_qr_upload', data),
   toggleUser: user_id => phpAction('toggle_user', { user_id }),
   grantRoot: user_id => phpAction('grant_root', { user_id }),
   revokeRoot: user_id => phpAction('revoke_root', { user_id }),

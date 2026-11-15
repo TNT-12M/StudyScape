@@ -21,6 +21,22 @@
           <p class="muted">
             {{ item.desc }}
           </p>
+          <n-button
+            v-if="session.isRoot"
+            size="tiny"
+            class="upload-btn"
+            :loading="uploadingKey === item.key"
+            @click.stop="pickFile(item.key)"
+          >
+            {{ failed[item.key] ? '上传二维码' : '更换二维码' }}
+          </n-button>
+          <input
+            :id="`qr-file-${item.key}`"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            hidden
+            @change="onFileChange(item.key, $event)"
+          >
         </div>
       </div>
 
@@ -43,8 +59,13 @@
 
 <script setup>
 import { reactive, ref } from 'vue'
+import { phpAdminApi } from '@/api/php-modules'
+import { useSessionStore } from '@/store'
 
+const session = useSessionStore()
 const failed = reactive({ 'wechat-group': false, 'official-account': false })
+const versions = reactive({ 'wechat-group': 0, 'official-account': 0 })
+const uploadingKey = ref('')
 const showPreview = ref(false)
 const previewKey = ref('wechat-group')
 
@@ -57,7 +78,9 @@ const previewTitle = computed(() => (previewKey.value === 'wechat-group' ? '学�
 const previewSrc = computed(() => (failed[previewKey.value] ? '' : qrSrc(previewKey.value)))
 
 function qrSrc(name) {
-  return `${import.meta.env.BASE_URL}assets/qr/${name}.png`
+  const base = `${import.meta.env.VITE_PHP_API_URL || '/api.php'}?action=qr_image&key=${name}`
+  const version = versions[name]
+  return version ? `${base}&v=${version}` : base
 }
 function onImgError(key) {
   failed[key] = true
@@ -65,6 +88,39 @@ function onImgError(key) {
 function openPreview(item) {
   previewKey.value = item.key
   showPreview.value = true
+}
+function pickFile(key) {
+  const input = document.getElementById(`qr-file-${key}`)
+  if (input)
+    input.click()
+}
+async function onFileChange(key, event) {
+  const input = event.target
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file)
+    return
+  if (!/^image\/(?:png|jpeg|webp)$/.test(file.type)) {
+    window.$message?.warning('仅支持 PNG / JPG / WEBP 图片')
+    return
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    window.$message?.warning('二维码图片不能超过 2MB')
+    return
+  }
+  uploadingKey.value = key
+  try {
+    const result = await phpAdminApi.uploadQr({ key, file })
+    failed[key] = false
+    versions[key] = Number(result.data?.version || Date.now())
+    window.$message?.success('二维码已更新')
+  }
+  catch (error) {
+    window.$message?.error(error.message || '二维码上传失败')
+  }
+  finally {
+    uploadingKey.value = ''
+  }
 }
 </script>
 
@@ -138,6 +194,9 @@ function openPreview(item) {
 .qr-card p {
   margin: 0;
   line-height: 1.7;
+}
+.upload-btn {
+  margin-top: 12px;
 }
 .domain-tip {
   margin-top: 22px;

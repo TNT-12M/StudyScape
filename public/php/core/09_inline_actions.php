@@ -29,6 +29,29 @@ if ($action === 'record_visit') {
     jsonOut(true, '', ['recorded' => true, 'stat_date' => siteStatDate()]);
 }
 
+// 群聊/公众号二维码图片（存放在项目 data/qr 目录，仅允许固定 key）
+if ($action === 'qr_image') {
+    $key = (string)($_GET['key'] ?? '');
+    if (!in_array($key, ['wechat-group', 'official-account'], true)) {
+        http_response_code(404);
+        exit;
+    }
+    $qrDir = dirname(dirname(dirname(__DIR__))) . '/data/qr';
+    $matches = glob($qrDir . '/' . $key . '.*') ?: [];
+    $path = $matches[0] ?? '';
+    $info = $path !== '' ? @getimagesize($path) : false;
+    if (!$info) {
+        http_response_code(404);
+        exit;
+    }
+    header('Content-Type: ' . $info['mime']);
+    header('Content-Length: ' . (int)filesize($path));
+    header('Cache-Control: no-cache, max-age=0, must-revalidate');
+    header('X-Content-Type-Options: nosniff');
+    readfile($path);
+    exit;
+}
+
 if ($action === 'captcha') {
     try {
         $builder = createCaptcha();

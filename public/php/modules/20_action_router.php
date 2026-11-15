@@ -1069,6 +1069,33 @@ if ($action) {
                 jsonOut(true, '引导配置已保存');
                 break;
 
+            // ---------- 群聊/公众号二维码上传（仅 root，存服务器 data/qr 目录） ----------
+            case 'admin_qr_upload':
+                requireRoot();
+                $qrKey = (string)($_POST['key'] ?? '');
+                if (!in_array($qrKey, ['wechat-group', 'official-account'], true)) jsonOut(false, '二维码类型无效');
+                $qrFile = $_FILES['file'] ?? null;
+                if (!is_array($qrFile) || ($qrFile['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) jsonOut(false, '请选择要上传的二维码图片');
+                if ((int)($qrFile['size'] ?? 0) <= 0 || (int)$qrFile['size'] > 2 * 1024 * 1024) jsonOut(false, '二维码图片不能为空且不能超过 2MB');
+                $qrInfo = @getimagesize($qrFile['tmp_name']);
+                $qrMimeMap = ['image/png' => 'png', 'image/jpeg' => 'jpg', 'image/webp' => 'webp'];
+                $qrMime = $qrInfo['mime'] ?? '';
+                if (!$qrInfo || !isset($qrMimeMap[$qrMime])) jsonOut(false, '仅支持 PNG / JPG / WEBP 图片');
+                if (($qrInfo[0] ?? 0) < 200 || ($qrInfo[1] ?? 0) < 200) jsonOut(false, '二维码图片尺寸过小，建议 600×600 以上');
+                $qrDir = dirname(dirname(dirname(__DIR__))) . '/data/qr';
+                if (!is_dir($qrDir) && !@mkdir($qrDir, 0750, true) && !is_dir($qrDir)) jsonOut(false, '二维码目录创建失败，请检查 data 目录权限');
+                foreach (glob($qrDir . '/' . $qrKey . '.*') ?: [] as $qrOld) @unlink($qrOld);
+                $qrPath = $qrDir . '/' . $qrKey . '.' . $qrMimeMap[$qrMime];
+                if (!move_uploaded_file($qrFile['tmp_name'], $qrPath)) jsonOut(false, '二维码保存失败，请检查服务器目录权限');
+                @chmod($qrPath, 0644);
+                log_admin_action('upload_qr_' . $qrKey);
+                jsonOut(true, '二维码已上传', [
+                    'key' => $qrKey,
+                    'url' => '/api.php?action=qr_image&key=' . $qrKey,
+                    'version' => (int)filemtime($qrPath),
+                ]);
+                break;
+
             // ---------- 公告管理（仅 root） ----------
             case 'admin_announcement_list':
                 $adminUid = requireRoot();
