@@ -1,18 +1,33 @@
 <?php
 
 // ===================== SQLite 初始化 =====================
+// 带重试: new SQLite3() 打开时就要拿锁, busy_timeout 必须在构造前设置
+// 所以用环境变量 SQLITE_BUSY_TIMEOUT 让 sqlite3 驱动在打开时就带 30s 等待
 $dbFile = __DIR__ . '/../../../exam.db';
-try {
-    $db = new SQLite3($dbFile);
-    $db->enableExceptions(true);
-    // SQLite 并发优化: WAL 模式 + busy_timeout 30s (PHP-FPM 多进程时必加)
-    $db->exec('PRAGMA journal_mode=WAL;');
-    $db->exec('PRAGMA busy_timeout=30000;');
-    $db->exec('PRAGMA synchronous=NORMAL;');
-    $db->exec('PRAGMA cache_size=-64000;');  // 64MB 缓存
-} catch (Exception $e) {
-    die(json_encode(['success' => false, 'message' => '数据库连接失败: ' . $e->getMessage()]));
+$_ENV['SQLITE_BUSY_TIMEOUT'] = 30000;
+putenv('SQLITE_BUSY_TIMEOUT=30000');
+
+// 重试打开: 最多等 30s, 每次 sleep 0.5s
+$db = null;
+$lastError = '';
+for ($tries = 0; $tries < 60; $tries++) {
+    try {
+        $db = new SQLite3($dbFile, SQLITE3_OPEN_READWRITE);
+        $db->enableExceptions(true);
+        break;
+    } catch (Exception $e) {
+        $lastError = $e->getMessage();
+        usleep(500000); // 0.5s
+    }
 }
+if (!$db) {
+    die(json_encode(['success' => false, 'message' => '数据库连接失败 (等待30s): ' . $lastError]));
+}
+
+// SQLite 并发优化: WAL 模式 + 缓存
+$db->exec('PRAGMA journal_mode=WAL;');
+$db->exec('PRAGMA synchronous=NORMAL;');
+$db->exec('PRAGMA cache_size=-64000;');  // 64MB 缓存
 
 try {
     $passwordKey = loadPasswordKey();
