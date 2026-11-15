@@ -167,7 +167,7 @@
 </template>
 
 <script setup>
-import { NButton, NSelect, NSpace } from 'naive-ui'
+import { NButton, NSelect, NSpace, NTag } from 'naive-ui'
 import { phpQuestionsApi } from '@/api/php-modules'
 import { renderRichText } from '@/views/user/components/question-utils'
 
