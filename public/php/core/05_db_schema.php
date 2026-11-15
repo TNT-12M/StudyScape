@@ -13,7 +13,7 @@ try {
             $db = new SQLite3($dbFile, SQLITE3_OPEN_READWRITE);
             $db->enableExceptions(true);
             break;
-        } catch {}
+        } catch (\Throwable $_) {}
     }
     if (!$db) {
         die(json_encode(['success' => false, 'message' => '数据库连接失败: ' . $e->getMessage()]));
@@ -66,11 +66,11 @@ if (!isset($GLOBALS['_ss_main_schema_done'])) {
 if (!$GLOBALS['_ss_main_schema_done']) {
     try {
         $db->exec("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
-    } catch {}
+    } catch (\Throwable $_) {}
 
     // 只有还没完成过的进程才跑 CREATE TABLE/INDEX (SQLite IF NOT EXISTS 也快, 但少跑一次少一次)
     $mainSchemaDone = false;
-    try { $mainSchemaDone = (bool)$db->querySingle("SELECT 1 FROM schema_migrations WHERE version = 'main_schema_v1'"); } catch {}
+    try { $mainSchemaDone = (bool)$db->querySingle("SELECT 1 FROM schema_migrations WHERE version = 'main_schema_v1'"); } catch (\Throwable $_) {}
 
     if (!$mainSchemaDone) {
         $createMainSql = "
@@ -152,7 +152,7 @@ CREATE INDEX IF NOT EXISTS idx_materials_subject ON materials(subject);
 
     // ===== QDB SCHEMA =====
     $qdbSchemaDone = false;
-    try { $qdbSchemaDone = (bool)$db->querySingle("SELECT 1 FROM schema_migrations WHERE version = 'qdb_schema_v1'"); } catch {}
+    try { $qdbSchemaDone = (bool)$db->querySingle("SELECT 1 FROM schema_migrations WHERE version = 'qdb_schema_v1'"); } catch (\Throwable $_) {}
     if (!$qdbSchemaDone) {
         $createQSql = "
 CREATE TABLE IF NOT EXISTS qdb.questions (
