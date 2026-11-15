@@ -195,13 +195,13 @@ try {
 $MIGRATION_VERSION = 7;
 
 function _runOnce($db, int $version, string $label, callable $fn): void {
+    // 精确查本版本号是否存在即可 — version 列是 TEXT, 不能 ORDER BY 数值排序
     try {
-        $current = (int)$db->querySingle("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1");
-        if ($current >= $version) return;
+        if ($db->querySingle("SELECT 1 FROM schema_migrations WHERE version = '$version'")) return;
     } catch (Exception $e) { /* schema_migrations 表可能还没 */ }
     try {
         $fn();
-        $db->exec("INSERT INTO schema_migrations (version, description) VALUES ($version, '" . SQLite3::escapeString($label) . "')");
+        $db->exec("INSERT OR IGNORE INTO schema_migrations (version) VALUES ('$version')");
         error_log("✅ Migration v$version: $label");
     } catch (Exception $e) {
         error_log("⚠️ Migration v$version 失败: " . $e->getMessage());
