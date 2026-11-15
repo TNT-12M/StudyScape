@@ -30,7 +30,7 @@
                     <n-button size="small" :loading="uploadingAvatar" @click="pickAvatarFile">
                       上传图片
                     </n-button>
-                    <span class="avatar-tip">支持 JPG / PNG / WEBP，≤5MB，自动压缩为 256×256</span>
+                    <span class="avatar-tip">支持 JPG / PNG / WEBP，≤2MB，自动压缩为 256×256</span>
                   </n-space>
                   <input
                     id="avatar-file-input"
@@ -321,8 +321,8 @@ async function onAvatarFileChange(event) {
     $message.warning('仅支持 JPG / PNG / WEBP 格式的头像')
     return
   }
-  if (file.size > 5 * 1024 * 1024) {
-    $message.warning('头像图片不能超过 5MB')
+  if (file.size > 2 * 1024 * 1024) {
+    $message.warning('头像图片不能超过 2MB，请压缩后重试')
     return
   }
   uploadingAvatar.value = true

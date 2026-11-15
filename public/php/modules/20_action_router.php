@@ -553,10 +553,22 @@ if ($action) {
                 if (!isLoggedIn()) jsonOut(false, '请先登录');
                 $uid = (int)getUid();
                 $file = $_FILES['file'] ?? null;
-                if (!is_array($file) || ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) jsonOut(false, '请选择要上传的头像图片');
+                if (!is_array($file)) {
+                    jsonOut(false, '图片超过服务器允许的上传大小（' . ini_get('upload_max_filesize') . '），请压缩后重试');
+                }
+                $uploadErr = (int)($file['error'] ?? UPLOAD_ERR_NO_FILE);
+                if ($uploadErr !== UPLOAD_ERR_OK) {
+                    $uploadErrMessages = [
+                        UPLOAD_ERR_INI_SIZE => '图片超过服务器允许的上传大小（' . ini_get('upload_max_filesize') . '），请压缩后重试',
+                        UPLOAD_ERR_FORM_SIZE => '图片超过允许的上传大小，请压缩后重试',
+                        UPLOAD_ERR_PARTIAL => '图片上传不完整，请重试',
+                        UPLOAD_ERR_NO_FILE => '请选择要上传的头像图片',
+                    ];
+                    jsonOut(false, $uploadErrMessages[$uploadErr] ?? '图片上传失败，请重试');
+                }
                 $fileSize = (int)($file['size'] ?? 0);
                 if ($fileSize <= 0) jsonOut(false, '头像文件为空');
-                if ($fileSize > 5 * 1024 * 1024) jsonOut(false, '头像图片不能超过 5MB');
+                if ($fileSize > 2 * 1024 * 1024) jsonOut(false, '头像图片不能超过 2MB');
                 $tmp = (string)($file['tmp_name'] ?? '');
                 if ($tmp === '' || !is_uploaded_file($tmp)) jsonOut(false, '上传文件无效');
                 $info = @getimagesize($tmp);
@@ -1144,7 +1156,12 @@ if ($action) {
                 $qrKey = (string)($_POST['key'] ?? '');
                 if (!in_array($qrKey, ['wechat-group', 'official-account'], true)) jsonOut(false, '二维码类型无效');
                 $qrFile = $_FILES['file'] ?? null;
-                if (!is_array($qrFile) || ($qrFile['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) jsonOut(false, '请选择要上传的二维码图片');
+                if (!is_array($qrFile)) jsonOut(false, '图片超过服务器允许的上传大小（' . ini_get('upload_max_filesize') . '），请压缩后重试');
+                $qrErr = (int)($qrFile['error'] ?? UPLOAD_ERR_NO_FILE);
+                if ($qrErr === UPLOAD_ERR_INI_SIZE || $qrErr === UPLOAD_ERR_FORM_SIZE) {
+                    jsonOut(false, '图片超过服务器允许的上传大小（' . ini_get('upload_max_filesize') . '），请压缩后重试');
+                }
+                if ($qrErr !== UPLOAD_ERR_OK) jsonOut(false, '请选择要上传的二维码图片');
                 if ((int)($qrFile['size'] ?? 0) <= 0 || (int)$qrFile['size'] > 2 * 1024 * 1024) jsonOut(false, '二维码图片不能为空且不能超过 2MB');
                 $qrInfo = @getimagesize($qrFile['tmp_name']);
                 $qrMimeMap = ['image/png' => 'png', 'image/jpeg' => 'jpg', 'image/webp' => 'webp'];
