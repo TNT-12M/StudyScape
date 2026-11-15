@@ -13,18 +13,33 @@
         <n-grid :cols="1" :y-gap="18">
           <n-gi>
             <n-form-item label="头像" path="avatar">
-              <n-space align="center">
+              <n-space align="center" :wrap="true">
                 <n-avatar round :size="72" :src="avatarPreview" @error="avatarPreview = ''">
                   {{ initial }}
                 </n-avatar>
-                <n-input
-                  v-model:value="form.avatar"
-                  clearable
-                  maxlength="512"
-                  show-count
-                  placeholder="请输入图片 URL，例如 https://example.com/avatar.png"
-                  style="width: min(520px, 100%)"
-                />
+                <div class="avatar-controls">
+                  <n-input
+                    v-model:value="form.avatar"
+                    clearable
+                    maxlength="512"
+                    show-count
+                    placeholder="可粘贴图片 URL，或点击右侧「上传图片」"
+                    style="width: min(520px, 100%)"
+                  />
+                  <n-space align="center">
+                    <n-button size="small" :loading="uploadingAvatar" @click="pickAvatarFile">
+                      上传图片
+                    </n-button>
+                    <span class="avatar-tip">支持 JPG / PNG / WEBP，≤5MB，自动压缩为 256×256</span>
+                  </n-space>
+                  <input
+                    id="avatar-file-input"
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    hidden
+                    @change="onAvatarFileChange"
+                  >
+                </div>
               </n-space>
             </n-form-item>
           </n-gi>
@@ -143,7 +158,9 @@ async function saveWallpaper() {
   catch (error) { $message.error(error.message || '壁纸保存失败') }
   finally { wpSaving.value = false }
 }
-watch(() => prefs.wallpaper, (value) => { wpDraft.value = value || '' }, { immediate: true })
+watch(() => prefs.wallpaper, (value) => {
+  wpDraft.value = value || ''
+}, { immediate: true })
 const formRef = ref(null)
 const saving = ref(false)
 const form = reactive({
@@ -247,15 +264,18 @@ function isImageUrl(value) {
   const url = String(value || '').trim()
   if (!url)
     return true
-  if (url.length > 512 || /[\u0000- <>\u007f]/.test(url))
+  if (url.length > 512 || /[<>"]/.test(url) || Array.from(url).some(ch => ch.charCodeAt(0) <= 0x20 || ch.charCodeAt(0) === 0x7F))
     return false
+  // 站内上传的头像（固定接口格式）
+  if (/^\/api\.php\?action=avatar_image&uid=\d+&v=\d+$/.test(url))
+    return true
   try {
     const parsed = new URL(url)
     return ['http:', 'https:'].includes(parsed.protocol)
       && Boolean(parsed.hostname)
       && !parsed.username
       && !parsed.password
-      && /\.(jpe?g|png|gif|webp|avif)$/i.test(parsed.pathname)
+      && /\.(?:jpe?g|png|gif|webp|avif)$/i.test(parsed.pathname)
   }
   catch {
     return false
@@ -287,6 +307,37 @@ const rules = {
 const displayName = computed(() => form.username.trim() || session.user?.username || '用户')
 const initial = computed(() => displayName.value.slice(0, 1).toUpperCase())
 const avatarPreview = ref('')
+const uploadingAvatar = ref(false)
+function pickAvatarFile() {
+  document.getElementById('avatar-file-input')?.click()
+}
+async function onAvatarFileChange(event) {
+  const input = event.target
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file)
+    return
+  if (!/^image\/(?:jpeg|png|webp)$/.test(file.type)) {
+    $message.warning('仅支持 JPG / PNG / WEBP 格式的头像')
+    return
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    $message.warning('头像图片不能超过 5MB')
+    return
+  }
+  uploadingAvatar.value = true
+  try {
+    const result = await phpProfileApi.uploadAvatar({ file })
+    form.avatar = String(result.data?.avatar || '')
+    $message.success('头像已上传，请点击保存以同步到账号')
+  }
+  catch (error) {
+    $message.error(error.message || '头像上传失败')
+  }
+  finally {
+    uploadingAvatar.value = false
+  }
+}
 watch(() => form.avatar, (value) => {
   avatarPreview.value = String(value || '').trim()
 }, { immediate: true })
@@ -366,6 +417,17 @@ async function save() {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+}
+.avatar-controls {
+  flex: 1;
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.avatar-tip {
+  font-size: 12px;
+  color: var(--n-text-color-3);
 }
 .wallpaper-item {
   width: 84px;

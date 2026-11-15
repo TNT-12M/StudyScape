@@ -548,6 +548,71 @@ if ($action) {
                 jsonOut(false, "未登录");
                 break;
 
+            // ==================== 上传头像（所有登录用户；严格校验 + 重编码压缩） ====================
+            case 'avatar_upload':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $file = $_FILES['file'] ?? null;
+                if (!is_array($file) || ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) jsonOut(false, '请选择要上传的头像图片');
+                $fileSize = (int)($file['size'] ?? 0);
+                if ($fileSize <= 0) jsonOut(false, '头像文件为空');
+                if ($fileSize > 5 * 1024 * 1024) jsonOut(false, '头像图片不能超过 5MB');
+                $tmp = (string)($file['tmp_name'] ?? '');
+                if ($tmp === '' || !is_uploaded_file($tmp)) jsonOut(false, '上传文件无效');
+                $info = @getimagesize($tmp);
+                $allowTypes = [IMAGETYPE_JPEG => true, IMAGETYPE_PNG => true, IMAGETYPE_WEBP => true];
+                if (!$info || !isset($allowTypes[$info[2] ?? 0])) jsonOut(false, '仅支持 JPG / PNG / WEBP 格式的头像');
+                $width = (int)($info[0] ?? 0);
+                $height = (int)($info[1] ?? 0);
+                if ($width < 32 || $height < 32) jsonOut(false, '头像尺寸太小，至少 32×32');
+                if ($width > 4096 || $height > 4096 || $width * $height > 16000000) jsonOut(false, '头像尺寸过大，最大 4096×4096');
+                $raw = @file_get_contents($tmp);
+                if ($raw === false || $raw === '') jsonOut(false, '头像读取失败');
+                if (!function_exists('imagecreatefromstring') || !function_exists('imagejpeg')) {
+                    jsonOut(false, '服务器未启用 GD 扩展，暂时无法处理头像，请联系管理员');
+                }
+                // 真实解码校验：伪造扩展名、损坏文件、夹带脚本都会在这里被拒绝
+                $img = @imagecreatefromstring($raw);
+                unset($raw);
+                if (!$img) jsonOut(false, '图片内容无效或已损坏');
+                $decodedW = imagesx($img);
+                $decodedH = imagesy($img);
+                if ($decodedW !== $width || $decodedH !== $height) {
+                    imagedestroy($img);
+                    jsonOut(false, '图片内容校验失败，请更换图片');
+                }
+                // 居中裁成正方形并压缩到 256×256 JPEG（约 10-30KB，显示清晰不糊）
+                $side = min($decodedW, $decodedH);
+                $srcX = (int)(($decodedW - $side) / 2);
+                $srcY = (int)(($decodedH - $side) / 2);
+                $targetSize = 256;
+                $canvasImg = imagecreatetruecolor($targetSize, $targetSize);
+                $whiteBg = imagecolorallocate($canvasImg, 255, 255, 255);
+                imagefilledrectangle($canvasImg, 0, 0, $targetSize, $targetSize, $whiteBg);
+                imagecopyresampled($canvasImg, $img, 0, 0, $srcX, $srcY, $targetSize, $targetSize, $side, $side);
+                imagedestroy($img);
+                $avatarDir = dirname(dirname(dirname(__DIR__))) . '/data/avatars';
+                if (!is_dir($avatarDir) && !@mkdir($avatarDir, 0750, true) && !is_dir($avatarDir)) {
+                    imagedestroy($canvasImg);
+                    jsonOut(false, '头像目录创建失败，请检查 data 目录权限');
+                }
+                $avatarPath = $avatarDir . '/' . $uid . '.jpg';
+                $savedOk = @imagejpeg($canvasImg, $avatarPath, 82);
+                imagedestroy($canvasImg);
+                if (!$savedOk) jsonOut(false, '头像保存失败，请检查服务器目录权限');
+                @chmod($avatarPath, 0644);
+                // 重新编码后再读取一次尺寸，确保落盘文件确实是图片
+                $savedInfo = @getimagesize($avatarPath);
+                if (!$savedInfo || ($savedInfo['mime'] ?? '') !== 'image/jpeg') {
+                    @unlink($avatarPath);
+                    jsonOut(false, '头像保存校验失败，请重试');
+                }
+                // v 用毫秒时间戳，确保同一秒内重复上传也能立即刷新缓存
+                $avatarUrl = '/api.php?action=avatar_image&uid=' . $uid . '&v=' . (int)(microtime(true) * 1000);
+                dbQuery($db, 'UPDATE users SET avatar=? WHERE id=?', [$avatarUrl, $uid]);
+                jsonOut(true, '头像已上传', ['avatar' => $avatarUrl]);
+                break;
+
             // ==================== 更新当前用户资料 ====================
             case 'update_profile':
                 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') jsonOut(false, '请使用 POST 更新资料');
@@ -602,6 +667,10 @@ if ($action) {
                 }
                 $params[] = $uid;
                 dbQuery($db, 'UPDATE users SET ' . implode(', ', $setParts) . ' WHERE id=?', $params);
+                // 改为外链头像时清理服务器上的本地上传文件，避免闲置占用空间
+                if (!preg_match('#^/api\\.php\\?action=avatar_image&uid=\\d+&v=\\d+$#', (string)$avatar)) {
+                    @unlink(dirname(dirname(dirname(__DIR__))) . '/data/avatars/' . $uid . '.jpg');
+                }
                 $updated = dbFetchOne($db, "SELECT id, username, email, nickname, avatar, gender, grade, role, is_initial_root, is_admin, is_approved, is_active, created_at, last_login FROM users WHERE id=?", [$uid]);
                 if (!$updated || !(int)$updated['is_active']) jsonOut(false, '用户资料更新失败');
                 $updated['role'] = $updated['username'] === 'lian' ? 'root' : ($updated['role'] ?? ((int)$updated['is_admin'] ? 'root' : 'user'));

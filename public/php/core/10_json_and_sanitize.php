@@ -211,6 +211,10 @@ function profileAvatar(string $value): ?string {
     if (strlen($value) > 512 || preg_match('/[\\x00-\\x20<>"\\x7F]/', $value)) {
         jsonOut(false, '头像链接格式不正确或长度过长');
     }
+    // 站内上传的头像（固定接口格式，不接受任意相对路径）
+    if (preg_match('#^/api\\.php\\?action=avatar_image&uid=(\\d+)&v=(\\d+)$#', $value, $m) && (int)$m[1] > 0) {
+        return $value;
+    }
     $parts = parse_url($value);
     $scheme = strtolower((string)($parts['scheme'] ?? ''));
     $host = (string)($parts['host'] ?? '');

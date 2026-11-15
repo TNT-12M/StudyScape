@@ -21,6 +21,7 @@ export const phpPublicApi = {
 
 export const phpProfileApi = {
   update: data => phpAction('update_profile', data),
+  uploadAvatar: data => phpAction('avatar_upload', data),
   changePassword: data => phpAction('change_password', data),
 }
 

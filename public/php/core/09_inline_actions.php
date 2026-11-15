@@ -52,6 +52,26 @@ if ($action === 'qr_image') {
     exit;
 }
 
+// 用户头像（上传后由 GD 重新编码为 256×256 JPEG，存放于 data/avatars）
+if ($action === 'avatar_image') {
+    $uid = (int)($_GET['uid'] ?? 0);
+    if ($uid <= 0) {
+        http_response_code(404);
+        exit;
+    }
+    $avatarPath = dirname(dirname(dirname(__DIR__))) . '/data/avatars/' . $uid . '.jpg';
+    if (!is_file($avatarPath)) {
+        http_response_code(404);
+        exit;
+    }
+    header('Content-Type: image/jpeg');
+    header('Content-Length: ' . (int)filesize($avatarPath));
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: public, max-age=86400');
+    readfile($avatarPath);
+    exit;
+}
+
 if ($action === 'captcha') {
     try {
         $builder = createCaptcha();
