@@ -354,8 +354,12 @@ async function onAvatarFileChange(event) {
   uploadingAvatar.value = true
   try {
     const result = await phpProfileApi.uploadAvatar({ file })
-    applyAvatar(result.data?.avatar || '')
-    $message.success('头像已上传，请点击保存以同步到账号')
+    const avatarUrl = String(result.data?.avatar || '')
+    applyAvatar(avatarUrl)
+    // 上传已直接写库，立即同步到会话，顶部头像无需再点保存即可生效
+    if (avatarUrl && session.user)
+      session.setUser({ ...session.user, avatar: avatarUrl })
+    $message.success('头像已更新')
   }
   catch (error) {
     $message.error(error.message || '头像上传失败')
