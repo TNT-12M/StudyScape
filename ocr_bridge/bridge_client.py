@@ -61,6 +61,8 @@ MINERU_COLD_START_WAIT = 15
 IDLE_SUSPEND_SECONDS = 300
 WS_IDLE_TIMEOUT = 10  # 帧读取时相邻数据块的最大间隔（同时用于驱动心跳）
 
+_SEND_LOCK = asyncio.Lock()  # 心跳与任务进度并发写帧时防止交错
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -198,12 +200,27 @@ async def _ws_send_frame(writer, opcode, payload, masked=True):
         payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
 
     frame.extend(payload)
-    writer.write(bytes(frame))
-    await writer.drain()
+    async with _SEND_LOCK:
+        writer.write(bytes(frame))
+        await writer.drain()
 
 
 class _FrameIdleTimeout(asyncio.TimeoutError):
     """完全空闲（帧还没开始读），可安全 continue"""
+
+
+async def _ping_loop(writer, interval=10):
+    """独立心跳任务：即使主循环被阻塞，也保证 PING 不断"""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await FrameProto.send(writer, {"type": "PING"})
+        except Exception:
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return
 
 
 async def _read_exact(reader, n):
@@ -318,18 +335,11 @@ async def run_worker():
             backoff = 2
 
             loop_lock = asyncio.Lock()
-            last_ping = 0
             last_idle_check = 0
+            asyncio.create_task(_ping_loop(writer))
 
             while True:
                 now = time.time()
-
-                if now - last_ping > 10:
-                    try:
-                        await FrameProto.send(writer, {"type": "PING"})
-                    except Exception:
-                        break
-                    last_ping = now
 
                 if now - last_idle_check > 60:
                     _check_idle_suspend()

@@ -47,7 +47,7 @@ from config import (
 WS_HOST = BRIDGE_LISTEN_HOST  # 兼容旧代码变量名
 WS_PORT = BRIDGE_LISTEN_PORT
 HTTP_PORT = PHP_BRIDGE_HTTP_PORT
-WORKER_TIMEOUT = 30      # Worker 心跳超时 (秒)
+WORKER_TIMEOUT = 60      # Worker 心跳超时 (秒)
 WS_IDLE_TIMEOUT = 25     # 帧内相邻数据块最大间隔（大帧不再被总时长超时截断）
 RESULT_TTL = 14400       # done/failed 结果保留 4h 后清
 QUEUED_TIMEOUT = 600     # queued 10min 没被 worker 取 → failed
@@ -409,17 +409,28 @@ class BridgeState:
                     self.queue[jid]["progress"] = progress
                 self._persist(jid, self.queue[jid])
 
-    async def fail_active_jobs(self, reason):
-        """worker 断开时，正在处理的任务不会再回传结果，直接标记失败"""
+    async def requeue_active_jobs(self, reason):
+        """worker 断开时，processing 任务重新排队，等 worker 重连后自动补推"""
         async with self.lock:
             for jid, job in self.queue.items():
                 if job.get("status") == "processing":
-                    job["status"] = "failed"
-                    job["stage"] = "failed"
-                    job["error"] = reason
-                    job["finished_at"] = time.time()
+                    job["status"] = "queued"
+                    job["stage"] = "queued"
+                    job["started_at"] = None
+                    job["updated_at"] = time.time()
+                    job["last_error"] = reason
                     self._persist(jid, job)
-                    log.warning(f"⚠️ {jid} 因 worker 断开标记 failed")
+                    log.warning(f"♻️ {jid} worker 断开，已重新排队等待重试")
+
+    async def flush_queue(self):
+        """worker 认证通过后立即补推所有排队任务"""
+        async with self.lock:
+            ids = [jid for jid, j in self.queue.items() if j.get("status") == "queued"]
+        for jid in ids:
+            try:
+                await self.push_task(jid)
+            except Exception as e:
+                log.warning(f"补推任务失败 {jid}: {e}")
 
     async def get_status(self, jid):
         async with self.lock:
@@ -628,6 +639,7 @@ async def handle_worker(reader, writer):
         # --- 认证成功 ---
         await FrameProto.send(writer, {"type": "OK"})
         log.info(f"  ✅ Worker {addr} 认证通过")
+        asyncio.create_task(STATE.flush_queue())
 
         async with STATE.worker_lock:
             if STATE.worker_writer:
@@ -690,7 +702,7 @@ async def handle_worker(reader, writer):
                 if STATE.worker_writer is writer:
                     STATE.worker_reader = None
                     STATE.worker_writer = None
-                    await STATE.fail_active_jobs("worker 连接断开，任务中断，请重新上传")
+                    await STATE.requeue_active_jobs("worker 连接断开，任务已自动重新排队")
 
         await worker_loop()
 
