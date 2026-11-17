@@ -254,19 +254,26 @@ class BridgeState:
         fp = self._job_file(jid)
 
         if status in ("queued", "processing"):
+            # 二进制数据统一外置为独立 .b64 文件，job JSON 只保留路径引用
+            file_b64 = None
             data_val = job.get("data")
-            if data_val and isinstance(data_val, dict) and data_val.get("file_b64"):
+            if isinstance(data_val, dict) and data_val.get("file_b64"):
+                file_b64 = data_val["file_b64"]
+            elif job.get("file_b64"):
+                file_b64 = job["file_b64"]
+            if file_b64:
                 data_fp = self._data_file(jid)
                 if not os.path.exists(data_fp):
                     try:
                         with open(data_fp, "w", encoding="utf-8") as f:
-                            f.write(data_val["file_b64"])
+                            f.write(file_b64)
                     except Exception as e:
                         log.warning(f"data 抽取失败 {jid}: {e}")
                 slim = dict(job)
                 slim["data"] = None
+                slim["file_b64"] = None
                 slim["data_path"] = data_fp
-                slim["data_size"] = len(data_val["file_b64"])
+                slim["data_size"] = len(file_b64)
             else:
                 slim = job
         else:
@@ -292,6 +299,8 @@ class BridgeState:
         try:
             with open(data_path, "r", encoding="utf-8") as f:
                 file_b64 = f.read()
+            # 客户端 _handle_ocr 从 data 顶层读取 file_b64，这里按原结构还原
+            job["file_b64"] = file_b64
             job["data"] = {"file_b64": file_b64}
         except Exception as e:
             log.warning(f"data 读取失败 {jid}: {e}")
@@ -379,6 +388,18 @@ class BridgeState:
                 if progress:
                     self.queue[jid]["progress"] = progress
                 self._persist(jid, self.queue[jid])
+
+    async def fail_active_jobs(self, reason):
+        """worker 断开时，正在处理的任务不会再回传结果，直接标记失败"""
+        async with self.lock:
+            for jid, job in self.queue.items():
+                if job.get("status") == "processing":
+                    job["status"] = "failed"
+                    job["stage"] = "failed"
+                    job["error"] = reason
+                    job["finished_at"] = time.time()
+                    self._persist(jid, job)
+                    log.warning(f"⚠️ {jid} 因 worker 断开标记 failed")
 
     async def get_status(self, jid):
         async with self.lock:
@@ -649,6 +670,7 @@ async def handle_worker(reader, writer):
                 if STATE.worker_writer is writer:
                     STATE.worker_reader = None
                     STATE.worker_writer = None
+                    await STATE.fail_active_jobs("worker 连接断开，任务中断，请重新上传")
 
         await worker_loop()
 
