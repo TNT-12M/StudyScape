@@ -48,10 +48,13 @@ WS_HOST = BRIDGE_LISTEN_HOST  # 兼容旧代码变量名
 WS_PORT = BRIDGE_LISTEN_PORT
 HTTP_PORT = PHP_BRIDGE_HTTP_PORT
 WORKER_TIMEOUT = 30      # Worker 心跳超时 (秒)
+WS_IDLE_TIMEOUT = 25     # 帧内相邻数据块最大间隔（大帧不再被总时长超时截断）
 RESULT_TTL = 14400       # done/failed 结果保留 4h 后清
 QUEUED_TIMEOUT = 600     # queued 10min 没被 worker 取 → failed
 PROCESSING_TIMEOUT = 600 # processing 10min 无进度更新 → failed（worker 断线/冷启动卡死兜底）
 QUEUED_MAX_HOURS = 2     # queued 超过 2h 直接清
+
+_SEND_LOCK = asyncio.Lock()  # 防止 PONG / TASK / RESULT 并发写导致帧交错
 PDF_CACHE_TTL = 3600     # _pdf_cache 1h 没被访问就删
 MAX_QUEUED = 50          # 队列上限
 
@@ -135,23 +138,39 @@ async def ws_handshake(reader, writer):
     return "ws"
 
 
+async def _read_exact(reader, n):
+    """分块读取，只对块间空闲计时，避免大帧被总时长超时截断"""
+    buf = b""
+    while len(buf) < n:
+        try:
+            chunk = await asyncio.wait_for(reader.read(min(n - len(buf), 65536)), timeout=WS_IDLE_TIMEOUT)
+        except asyncio.TimeoutError:
+            if not buf:
+                raise
+            raise ConnectionError("帧读取中断（连接可能已失效）")
+        if not chunk:
+            raise ConnectionError("连接关闭")
+        buf += chunk
+    return buf
+
+
 async def ws_read_frame(reader):
     """读一个 WebSocket 帧, 返回 (opcode, payload_bytes)
     自动处理 MASK (客户端发来的帧必带 MASK)"""
-    hdr = await reader.readexactly(2)
+    hdr = await _read_exact(reader, 2)
     opcode = hdr[0] & 0x0F
     masked = (hdr[1] & 0x80) != 0
     length = hdr[1] & 0x7F
 
     if length == 126:
-        length_bytes = await reader.readexactly(2)
+        length_bytes = await _read_exact(reader, 2)
         length = struct.unpack(">H", length_bytes)[0]
     elif length == 127:
-        length_bytes = await reader.readexactly(8)
+        length_bytes = await _read_exact(reader, 8)
         length = struct.unpack(">Q", length_bytes)[0]
 
-    mask_key = await reader.readexactly(4) if masked else b""
-    payload = await reader.readexactly(length) if length > 0 else b""
+    mask_key = await _read_exact(reader, 4) if masked else b""
+    payload = await _read_exact(reader, length) if length > 0 else b""
 
     if masked and payload:
         payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
@@ -173,8 +192,9 @@ async def ws_write_frame(writer, opcode, payload_bytes):
         frame.append(127)
         frame.extend(struct.pack(">Q", length))
     frame.extend(payload_bytes)
-    writer.write(bytes(frame))
-    await writer.drain()
+    async with _SEND_LOCK:
+        writer.write(bytes(frame))
+        await writer.drain()
 
 
 async def ws_text_recv(reader):
@@ -621,7 +641,7 @@ async def handle_worker(reader, writer):
         async def worker_loop():
             while True:
                 try:
-                    msg = await asyncio.wait_for(FrameProto.recv(reader), timeout=20)
+                    msg = await FrameProto.recv(reader)
                     if msg is None:
                         break
 

@@ -59,7 +59,7 @@ OPCODE_PONG = 0x0A
 MINERU_SERVICE = "mineru-flash"
 MINERU_COLD_START_WAIT = 15
 IDLE_SUSPEND_SECONDS = 300
-WS_IDLE_TIMEOUT = 30  # 帧读取时相邻数据块的最大间隔（大文件传输不会被总时长超时截断）
+WS_IDLE_TIMEOUT = 10  # 帧读取时相邻数据块的最大间隔（同时用于驱动心跳）
 
 logging.basicConfig(
     level=logging.INFO,
@@ -202,11 +202,20 @@ async def _ws_send_frame(writer, opcode, payload, masked=True):
     await writer.drain()
 
 
+class _FrameIdleTimeout(asyncio.TimeoutError):
+    """完全空闲（帧还没开始读），可安全 continue"""
+
+
 async def _read_exact(reader, n):
     """分块读取 n 字节，只对「块间空闲」计时，避免大帧被总时长超时中断"""
     buf = b""
     while len(buf) < n:
-        chunk = await asyncio.wait_for(reader.read(min(n - len(buf), 65536)), timeout=WS_IDLE_TIMEOUT)
+        try:
+            chunk = await asyncio.wait_for(reader.read(min(n - len(buf), 65536)), timeout=WS_IDLE_TIMEOUT)
+        except asyncio.TimeoutError:
+            if not buf:
+                raise _FrameIdleTimeout()
+            raise ConnectionError("帧读取中断（连接可能已失效）")
         if not chunk:
             raise ConnectionError("连接关闭")
         buf += chunk
