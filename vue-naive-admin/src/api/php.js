@@ -6,6 +6,23 @@ const api = axios.create({
   withCredentials: true,
 })
 
+// 大文件入口：与普通接口分离，Nginx 单独放宽到 50MB
+const bigApi = axios.create({
+  baseURL: import.meta.env.VITE_UPLOAD_URL || '/upload.php',
+  timeout: 180000,
+  withCredentials: true,
+})
+
+// 只有这些 action 走大文件入口
+const BIG_UPLOAD_ACTIONS = new Set([
+  'ocr_batch_create',
+  'ocr_batch_import_json',
+  'ocr_batch_commit',
+  'import_questions_json',
+  'material_upload',
+  'material_extract',
+])
+
 let csrfToken = ''
 
 function appendValue(form, key, value) {
@@ -29,33 +46,50 @@ function toFormData(action, payload = {}, includeCsrf = true) {
   return form
 }
 
-api.interceptors.response.use((response) => {
-  const body = response.data
-  if (body && typeof body === 'object' && body.csrf_token) csrfToken = body.csrf_token
-  if (body && typeof body === 'object' && 'success' in body) {
-    if (!body.success) {
-      const error = new Error(body.message || '请求失败')
-      error.response = response
-      error.legacy = body
-      throw error
-    }
-    return body
-  }
-  return body
-})
+function installResponseInterceptors(client) {
+  client.interceptors.response.use(
+    (response) => {
+      const body = response.data
+      if (body && typeof body === 'object' && body.csrf_token) csrfToken = body.csrf_token
+      if (body && typeof body === 'object' && 'success' in body) {
+        if (!body.success) {
+          const error = new Error(body.message || '请求失败')
+          error.response = response
+          error.legacy = body
+          throw error
+        }
+        return body
+      }
+      return body
+    },
+    (error) => {
+      if (error.response?.status === 413) {
+        const data = error.response.data
+        error.message = (data && typeof data === 'object' && data.message)
+          ? data.message
+          : '文件超过服务器上传上限（普通接口 2MB，题库/资料/OCR 为 50MB），请压缩或分批提交'
+      }
+      return Promise.reject(error)
+    },
+  )
+}
+installResponseInterceptors(api)
+installResponseInterceptors(bigApi)
 
 export async function phpAction(action, payload = {}, options = {}) {
   const method = (options.method || 'POST').toUpperCase()
   const bypassCsrf = options.bypassCsrf === true
-  const timeout = options.timeout || 30000
+  const timeout = options.timeout || (BIG_UPLOAD_ACTIONS.has(action) ? 180000 : 30000)
+  // 大文件类 action 走 /upload.php，其余仍走 /api.php
+  const client = BIG_UPLOAD_ACTIONS.has(action) ? bigApi : api
   if (method === 'GET') {
-    const response = await api.get('', {
+    const response = await client.get('', {
       params: { action, ...payload },
       timeout,
     })
     return response
   }
-  return api.post('', toFormData(action, payload, !bypassCsrf), { timeout })
+  return client.post('', toFormData(action, payload, !bypassCsrf), { timeout })
 }
 
 export function getCaptchaUrl() {
