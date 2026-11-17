@@ -50,6 +50,7 @@ HTTP_PORT = PHP_BRIDGE_HTTP_PORT
 WORKER_TIMEOUT = 30      # Worker 心跳超时 (秒)
 RESULT_TTL = 14400       # done/failed 结果保留 4h 后清
 QUEUED_TIMEOUT = 600     # queued 10min 没被 worker 取 → failed
+PROCESSING_TIMEOUT = 600 # processing 10min 无进度更新 → failed（worker 断线/冷启动卡死兜底）
 QUEUED_MAX_HOURS = 2     # queued 超过 2h 直接清
 PDF_CACHE_TTL = 3600     # _pdf_cache 1h 没被访问就删
 MAX_QUEUED = 50          # 队列上限
@@ -356,6 +357,7 @@ class BridgeState:
             job["status"] = "processing"
             job["started_at"] = time.time()
             job["stage"] = "mineru_starting"
+            job["updated_at"] = time.time()
             self._persist(jid, job)
             return jid, job
 
@@ -373,6 +375,7 @@ class BridgeState:
         async with self.lock:
             if jid in self.queue:
                 self.queue[jid]["stage"] = stage
+                self.queue[jid]["updated_at"] = time.time()
                 if progress:
                     self.queue[jid]["progress"] = progress
                 self._persist(jid, self.queue[jid])
@@ -418,6 +421,18 @@ class BridgeState:
                         job["error"] = "timeout: worker unavailable"
                         job["finished_at"] = now
                         self._persist(jid, job)
+                elif status == "processing":
+                    # worker 断线、冷启动失败等场景不会再回写进度，超过阈值直接回收
+                    last_seen = max(job.get("updated_at", 0), job.get("started_at", 0))
+                    if now - last_seen > PROCESSING_TIMEOUT:
+                        job["status"] = "failed"
+                        job["stage"] = "failed"
+                        job["error"] = (
+                            f"worker 连接中断或处理超时（{PROCESSING_TIMEOUT // 60} 分钟无进度），请重新上传"
+                        )
+                        job["finished_at"] = now
+                        self._persist(jid, job)
+                        log.warning(f"⏱️ {jid} processing 超过 {PROCESSING_TIMEOUT}s 无进度，已标记 failed")
             for jid in to_delete:
                 del self.queue[jid]
                 self._delete_persist(jid)
@@ -450,6 +465,7 @@ class BridgeState:
                 job["status"] = "processing"
                 job["started_at"] = time.time()
                 job["stage"] = "mineru_starting"
+                job["updated_at"] = time.time()
                 self._persist(jid, job)
             job_to_send = self._load_data(jid, dict(job))
             await FrameProto.send(self.worker_writer, {
