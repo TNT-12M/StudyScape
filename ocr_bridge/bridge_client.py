@@ -59,6 +59,7 @@ OPCODE_PONG = 0x0A
 MINERU_SERVICE = "mineru-flash"
 MINERU_COLD_START_WAIT = 15
 IDLE_SUSPEND_SECONDS = 300
+WS_IDLE_TIMEOUT = 30  # 帧读取时相邻数据块的最大间隔（大文件传输不会被总时长超时截断）
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,7 +69,7 @@ logging.basicConfig(
 log = logging.getLogger("bridge-client")
 
 # ======================= MinerU 挂起/拉起 =======================
-_mineru_last_task = 0
+_mineru_last_task = time.time()
 
 
 def _mineru_active():
@@ -201,20 +202,31 @@ async def _ws_send_frame(writer, opcode, payload, masked=True):
     await writer.drain()
 
 
+async def _read_exact(reader, n):
+    """分块读取 n 字节，只对「块间空闲」计时，避免大帧被总时长超时中断"""
+    buf = b""
+    while len(buf) < n:
+        chunk = await asyncio.wait_for(reader.read(min(n - len(buf), 65536)), timeout=WS_IDLE_TIMEOUT)
+        if not chunk:
+            raise ConnectionError("连接关闭")
+        buf += chunk
+    return buf
+
+
 async def _ws_read_frame(reader):
     """读一个 WebSocket 帧 (服务端发来的 → 不带 MASK)"""
-    hdr = await reader.readexactly(2)
+    hdr = await _read_exact(reader, 2)
     opcode = hdr[0] & 0x0F
     masked = (hdr[1] & 0x80) != 0
     length = hdr[1] & 0x7F
 
     if length == 126:
-        length = struct.unpack(">H", await reader.readexactly(2))[0]
+        length = struct.unpack(">H", await _read_exact(reader, 2))[0]
     elif length == 127:
-        length = struct.unpack(">Q", await reader.readexactly(8))[0]
+        length = struct.unpack(">Q", await _read_exact(reader, 8))[0]
 
-    mask_key = await reader.readexactly(4) if masked else b""
-    payload = await reader.readexactly(length) if length > 0 else b""
+    mask_key = await _read_exact(reader, 4) if masked else b""
+    payload = await _read_exact(reader, length) if length > 0 else b""
 
     if masked and payload:
         payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
@@ -315,7 +327,7 @@ async def run_worker():
                     last_idle_check = now
 
                 try:
-                    msg = await asyncio.wait_for(FrameProto.recv(reader, writer), timeout=20)
+                    msg = await FrameProto.recv(reader, writer)
                 except asyncio.TimeoutError:
                     continue
 
