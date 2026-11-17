@@ -3924,8 +3924,9 @@ if ($action) {
                 $mid = (int)($info['material_id'] ?? 0);
                 $storedName = (string)($info['stored_name'] ?? '');
                 $expectedSha = '';
+                $node = '';
                 if ($mid > 0) {
-                    $row = dbQuery($db, "SELECT stored_name, sha256, storage_node FROM materials WHERE id=?", [$mid])->fetch(PDO::FETCH_ASSOC);
+                    $row = dbFetchOne($db, "SELECT stored_name, sha256, storage_node FROM materials WHERE id=?", [$mid]);
                     if ($row) {
                         $storedName = $row['stored_name'];
                         $expectedSha = $row['sha256'] ?? '';

@@ -286,19 +286,23 @@ function ocrCleanupBatches(): void {
         foreach ($rows as $r) {
             @unlink(__DIR__ . '/../../../data/ocr_batches/' . basename((string)$r['stored_name']));
         }
-        $cnt1 = dbQuery($db, "DELETE FROM ocr_import_batches WHERE status='committed' AND finished_at < datetime('now','-24 hours')");
+        dbQuery($db, "DELETE FROM ocr_import_batches WHERE status='committed' AND finished_at < datetime('now','-24 hours')");
+        // dbQuery 返回 SQLite3Result，影响行数需通过连接对象的 changes() 获取
+        $cnt1 = $db->changes();
 
         // ② failed 超过 72h → 也清理 (避免失败记录越积越多)
         $rows = dbFetchAll($db, "SELECT id, stored_name FROM ocr_import_batches WHERE status='failed' AND finished_at < datetime('now','-72 hours')");
         foreach ($rows as $r) {
             @unlink(__DIR__ . '/../../../data/ocr_batches/' . basename((string)$r['stored_name']));
         }
-        $cnt2 = dbQuery($db, "DELETE FROM ocr_import_batches WHERE status='failed' AND finished_at < datetime('now','-72 hours')");
+        dbQuery($db, "DELETE FROM ocr_import_batches WHERE status='failed' AND finished_at < datetime('now','-72 hours')");
+        $cnt2 = $db->changes();
 
         // ③ review 状态 (待审核) 也加个上限: 60 天前创建的 → 清理 (没人会存一个月的待审核)
-        $cnt3 = dbQuery($db, "DELETE FROM ocr_import_batches WHERE status='review' AND created_at < datetime('now','-60 days')");
+        dbQuery($db, "DELETE FROM ocr_import_batches WHERE status='review' AND created_at < datetime('now','-60 days')");
+        $cnt3 = $db->changes();
 
-        $total = ($cnt1 ?: 0) + ($cnt2 ?: 0) + ($cnt3 ?: 0);
+        $total = (int)$cnt1 + (int)$cnt2 + (int)$cnt3;
         if ($total > 0) {
             error_log("🧹 OCR 清理: committed=$cnt1, failed=$cnt2, review(60d)=$cnt3");
         }
