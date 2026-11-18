@@ -644,7 +644,7 @@ if ($action) {
                 // 随机横线
                 for ($i = 0; $i < 5; $i++) {
                     $ly = random_int(5, $bgH - 5);
-                    $alpha = imagecolorallocatealpha($bg, random_int(180, 255), random_int(180, 255), random_int(180, 255), random_int(90, 140));
+                    $alpha = imagecolorallocatealpha($bg, random_int(180, 255), random_int(180, 255), random_int(180, 255), random_int(90, 127));
                     imageline($bg, random_int(0, 40), $ly, $bgW - random_int(0, 40), $ly, $alpha);
                 }
 
