@@ -14,8 +14,10 @@
           <n-gi>
             <n-form-item label="头像" path="avatar">
               <n-space align="center" :wrap="true">
-                <n-avatar round :size="72" :src="avatarPreview" @error="avatarPreview = ''">
-                  {{ initial }}
+                <n-avatar round :size="72" :src="avatarPreview" @error="onAvatarPreviewError">
+                  <template v-if="!avatarPreview">
+                    {{ initial }}
+                  </template>
                 </n-avatar>
                 <div class="avatar-controls">
                   <n-input
@@ -36,6 +38,7 @@
                     </n-tag>
                     <span class="avatar-tip">支持 JPG / PNG / WEBP，≤2MB，自动压缩为 256×256</span>
                   </n-space>
+                  <span v-if="avatarLoadFailed" class="avatar-error">头像加载失败，请检查网络后重新上传，或保存后重试</span>
                   <input
                     id="avatar-file-input"
                     type="file"
@@ -314,7 +317,13 @@ const rules = {
 const displayName = computed(() => form.username.trim() || session.user?.username || '用户')
 const initial = computed(() => displayName.value.slice(0, 1).toUpperCase())
 const avatarPreview = ref('')
+const avatarLoadFailed = ref(false)
 const uploadingAvatar = ref(false)
+
+function onAvatarPreviewError() {
+  avatarPreview.value = ''
+  avatarLoadFailed.value = true
+}
 
 function isInternalAvatar(value) {
   return /^\/api\.php\?action=avatar_image&(?:f=[0-9a-f]{32}|uid=\d+&v=\d+)$/.test(String(value || ''))
@@ -326,6 +335,7 @@ function applyAvatar(value) {
   localAvatar.value = isLocal ? url : ''
   avatarInput.value = isLocal ? '' : url
   avatarPreview.value = url
+  avatarLoadFailed.value = false
   if (!url)
     avatarPreview.value = ''
 }
@@ -333,6 +343,7 @@ function onAvatarInput(value) {
   const url = String(value || '').trim()
   form.avatar = url || localAvatar.value
   avatarPreview.value = form.avatar
+  avatarLoadFailed.value = false
 }
 function pickAvatarFile() {
   document.getElementById('avatar-file-input')?.click()
@@ -457,6 +468,10 @@ async function save() {
 .avatar-tip {
   font-size: 12px;
   color: var(--n-text-color-3);
+}
+.avatar-error {
+  font-size: 12px;
+  color: var(--n-color-target);
 }
 .wallpaper-item {
   width: 84px;

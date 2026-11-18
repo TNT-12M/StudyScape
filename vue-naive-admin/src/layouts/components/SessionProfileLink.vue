@@ -4,10 +4,11 @@
       round
       :size="36"
       :src="avatarSrc"
-      :fallback-src="fallbackAvatar"
       @error="avatarSrc = ''"
     >
-      {{ initial }}
+      <template v-if="!avatarSrc">
+        {{ initial }}
+      </template>
     </n-avatar>
     <span class="profile-link__name">{{ displayName }}</span>
   </button>
@@ -29,7 +30,6 @@ const avatarSrc = ref('')
 
 const displayName = computed(() => session.user?.nickname?.trim() || session.user?.username || '用户')
 const initial = computed(() => displayName.value.slice(0, 1).toUpperCase())
-const fallbackAvatar = computed(() => `https://api.dicebear.com/9.x/initials/svg?seed=${encodeURIComponent(displayName.value)}`)
 
 watch(() => session.user?.avatar, (value) => {
   avatarSrc.value = value || ''
