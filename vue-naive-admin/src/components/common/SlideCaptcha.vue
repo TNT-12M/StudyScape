@@ -177,6 +177,7 @@ function onHandleEnd() {
   if (pieceX.value >= 5 && trackPoints.length >= 3) {
     emit('submit', {
       captcha_r: pieceX.value,
+      captcha_y: props.trackY,
       slide_track: trackPoints,
     })
   }

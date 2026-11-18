@@ -135,7 +135,7 @@ async function loadCaptcha() {
     captchaBgHeight.value = result.data.bg_height || 150
     captchaMarkWidth.value = result.data.mark_width || 44
     captchaMarkHeight.value = result.data.mark_height || 44
-    captchaPosY.value = 50
+    captchaPosY.value = result.data.pos_y ?? 50
     captchaHint.value = ''
     captchaReady.value = true
     await nextTick()

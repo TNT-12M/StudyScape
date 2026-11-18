@@ -245,12 +245,13 @@ if ($action) {
 
                 jsonOut(true, '', [
                     'purpose'    => $purpose,
-                    'bg_image'   => $arr['masterImage'],   // 完整背景图（拼图缺口已由 GD 挖好）
-                    'tile_image' => $arr['tileImage'],     // 拼图块（PNG，带 mask）
+                    'bg_image'   => $arr['masterImage'],
+                    'tile_image' => $arr['tileImage'],
                     'bg_width'   => 310,
                     'bg_height'  => 150,
                     'mark_width' => $block->getWidth(),
                     'mark_height'=> $block->getHeight(),
+                    'pos_y'      => $block->getY(),
                     'expires_in' => 600,
                 ]);
                 break;
@@ -721,6 +722,7 @@ if ($action) {
                     'bg_height'   => 150,
                     'mark_width'  => $block->getWidth(),
                     'mark_height' => $block->getHeight(),
+                    'pos_y'       => $block->getY(),
                     'expires_in'  => 600,
                 ]);
                 break;
