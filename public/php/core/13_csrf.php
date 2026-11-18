@@ -38,6 +38,9 @@ $csrfBypass = [
     'public_overview',
     'record_visit',
     'admin_access_stats',
+    // 签到（读状态 + 获取验证码；提交端在 checkin_submit 里走 CSRF）
+    'checkin_status',
+    'checkin_captcha',
     // 安全监控读接口
     'security_scan_status',
     'security_ip_list',

@@ -627,3 +627,38 @@ function applyAnswersToQuestions(array $questions, array $answers): array {
     unset($q);
     return ['questions' => $result, 'filled_count' => $filled];
 }
+
+// ==========================================================
+// 每日签到：users.points 积分字段 + checkin_records 签到记录表
+// ==========================================================
+try {
+    $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='checkin_v1'");
+    if (!$migration) {
+        $db->exec('BEGIN');
+
+        // users 表加 points 积分字段
+        if (!tableHasColumn($db, 'users', 'points')) {
+            $db->exec("ALTER TABLE users ADD COLUMN points INTEGER NOT NULL DEFAULT 0");
+        }
+
+        // 签到记录表：每人每天一条，UNIQUE(user_id, checkin_date) 保证幂等
+        $db->exec("CREATE TABLE IF NOT EXISTS checkin_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            checkin_date DATE NOT NULL,
+            points_awarded INTEGER NOT NULL,
+            streak_days INTEGER NOT NULL DEFAULT 1,
+            captcha_token TEXT NOT NULL DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, checkin_date)
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_checkin_records_user_date ON checkin_records(user_id, checkin_date DESC)");
+
+        $db->exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES('checkin_v1')");
+        $db->exec('COMMIT');
+    }
+} catch (Throwable $e) {
+    try { $db->exec('ROLLBACK'); } catch (Throwable $_) {}
+    error_log('checkin migration failed: ' . $e->getMessage());
+    die(json_encode(['success' => false, 'message' => '签到功能数据库迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
+}

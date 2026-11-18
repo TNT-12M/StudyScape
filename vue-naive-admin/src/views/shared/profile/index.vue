@@ -79,6 +79,8 @@
       </n-form>
     </n-card>
 
+    <CheckinCard style="margin-top: 16px; max-width: 520px;" />
+
     <n-card title="学境壁纸" :bordered="false" style="margin-top: 16px;">
       <n-alert type="info" :show-icon="false" style="margin-bottom: 14px;">
         壁纸会显示在学习中心左侧导航栏。图片由管理员放入 <code>assets/wallpapers/</code> 目录，缺失时显示占位色块。
@@ -144,6 +146,7 @@
 
 <script setup>
 import { phpProfileApi } from '@/api/php-modules'
+import CheckinCard from '@/components/common/CheckinCard.vue'
 import { usePrefsStore, useSessionStore } from '@/store'
 
 const session = useSessionStore()

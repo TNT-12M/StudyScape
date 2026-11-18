@@ -548,6 +548,233 @@ if ($action) {
                 jsonOut(false, "未登录");
                 break;
 
+            // ============================================================
+            // 每日签到 —— 读状态（登录即可）
+            // ============================================================
+            case 'checkin_status':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $tz = new DateTimeZone('Asia/Shanghai');
+                $today = new DateTimeImmutable('today', $tz);
+                $todayStr = $today->format('Y-m-d');
+                $prevDay = $today->modify('-1 day')->format('Y-m-d');
+
+                $user = dbFetchOne($db, 'SELECT points FROM users WHERE id=?', [$uid]);
+                $points = (int)($user['points'] ?? 0);
+
+                $todayRecord = dbFetchOne($db, 'SELECT id, points_awarded, streak_days FROM checkin_records WHERE user_id=? AND checkin_date=?', [$uid, $todayStr]);
+                $yesterdayRecord = dbFetchOne($db, 'SELECT streak_days FROM checkin_records WHERE user_id=? AND checkin_date=?', [$uid, $prevDay]);
+
+                $checkedInToday = !!$todayRecord;
+                $streak = $checkedInToday
+                    ? (int)($todayRecord['streak_days'] ?? 1)
+                    : (!!$yesterdayRecord ? (int)($yesterdayRecord['streak_days'] ?? 1) : 0);
+
+                $totalCheckins = (int)dbFetchOne($db, 'SELECT COUNT(*) AS c FROM checkin_records WHERE user_id=?', [$uid])['c'];
+                $lastRow = dbFetchOne($db, 'SELECT checkin_date FROM checkin_records WHERE user_id=? ORDER BY checkin_date DESC LIMIT 1', [$uid]);
+
+                // 下一次签到可用时间（明天 00:00 Asia/Shanghai）
+                $availableAt = null;
+                if ($checkedInToday) {
+                    $next = new DateTimeImmutable('tomorrow midnight', $tz);
+                    $availableAt = $next->getTimestamp();
+                }
+
+                jsonOut(true, '', [
+                    'checked_in_today'    => $checkedInToday,
+                    'points'              => $points,
+                    'streak'              => $streak,
+                    'total_checkins'      => $totalCheckins,
+                    'last_checkin_date'   => $lastRow['checkin_date'] ?? null,
+                    'available_at'        => $availableAt,
+                    'points_awarded_today' => $checkedInToday ? (int)($todayRecord['points_awarded'] ?? 0) : 0,
+                    'next_bonus'          => $checkedInToday ? min($streak + 1, 7) : min($streak + 1, 7), // 下一天预期连胜（封顶 7）
+                ]);
+                break;
+
+            // ============================================================
+            // 每日签到 —— 生成滑动拼图验证码（仅登录用户，IP 限流）
+            // ============================================================
+            case 'checkin_captcha':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $ip = getClientIp();
+                if (!siteRateAllowed('checkin_captcha_ip_' . $ip, 8, 300)) jsonOut(false, '验证码获取过于频繁，请稍后再试');
+                $uid = (int)getUid();
+                if (!siteRateAllowed('checkin_captcha_user_' . $uid, 10, 300)) jsonOut(false, '验证码获取过于频繁，请稍后再试');
+
+                if (!function_exists('imagecreatetruecolor') || !function_exists('imagepng')) {
+                    jsonOut(false, '服务器未启用 GD 扩展，暂时无法使用验证码');
+                }
+
+                // 尺寸（水平滑动拼图：只校验 X，Y 固定）
+                $bgW = 310;
+                $bgH = 150;
+                $pieceSize = 44;
+                $trackY = 50; // 拼图块在追踪区域的固定 Y 坐标
+                $gapX = random_int(55, $bgW - $pieceSize - 25);
+
+                // 1) 生成带渐变 + 装饰的背景
+                $bg = imagecreatetruecolor($bgW, $bgH);
+                imagealphablending($bg, false);
+                imagesavealpha($bg, true);
+                // 渐变起止 RGB
+                $topR = 56; $topG = 128; $topB = 180;
+                $midR = 28; $midG = 66; $midB = 120;
+                $botR = 12; $botG = 30; $botB = 70;
+                for ($y = 0; $y < $bgH; $y++) {
+                    $t = $y / $bgH;
+                    $half = $t < 0.5 ? $t * 2 : 1.0;
+                    $other = $t < 0.5 ? 0.0 : ($t - 0.5) * 2;
+                    $r = (int)($topR * (1 - $half) + $midR * $half);
+                    $g = (int)($topG * (1 - $half) + $midG * $half);
+                    $b = (int)($topB * (1 - $half) + $midB * $half);
+                    $r = (int)($r * (1 - $other) + $botR * $other);
+                    $g = (int)($g * (1 - $other) + $botG * $other);
+                    $b = (int)($b * (1 - $other) + $botB * $other);
+                    imageline($bg, 0, $y, $bgW - 1, $y, imagecolorallocate($bg, max(0, min(255, $r)), max(0, min(255, $g)), max(0, min(255, $b))));
+                }
+                // 随机装饰圆圈（增加视觉干扰 + 防 OCR）
+                for ($i = 0; $i < 6; $i++) {
+                    $cx = random_int(10, $bgW - 10);
+                    $cy = random_int(10, $bgH - 10);
+                    $rad = random_int(8, 28);
+                    $alpha = imagecolorallocatealpha($bg, random_int(200, 255), random_int(200, 255), random_int(200, 255), random_int(80, 120));
+                    imagefilledellipse($bg, $cx, $cy, $rad * 2, $rad * 2, $alpha);
+                }
+                // 随机横线
+                for ($i = 0; $i < 5; $i++) {
+                    $ly = random_int(5, $bgH - 5);
+                    $alpha = imagecolorallocatealpha($bg, random_int(180, 255), random_int(180, 255), random_int(180, 255), random_int(90, 140));
+                    imageline($bg, random_int(0, 40), $ly, $bgW - random_int(0, 40), $ly, $alpha);
+                }
+
+                // 2) 从背景裁出拼图块（水平位置随机，Y 固定）
+                $piece = imagecreatetruecolor($pieceSize, $pieceSize);
+                imagealphablending($piece, false);
+                imagesavealpha($piece, true);
+                imagecopy($piece, $bg, 0, 0, $gapX, $trackY, $pieceSize, $pieceSize);
+
+                // 3) 在背景上挖洞（深灰 + 阴影）
+                $holeFill = imagecolorallocate($bg, 20, 30, 50);
+                imagefilledrectangle($bg, $gapX, $trackY, $gapX + $pieceSize - 1, $trackY + $pieceSize - 1, $holeFill);
+                $holeBorder = imagecolorallocate($bg, 120, 160, 200);
+                imagerectangle($bg, $gapX, $trackY, $gapX + $pieceSize - 1, $trackY + $pieceSize - 1, $holeBorder);
+
+                // 4) 给拼图块加外框，让用户知道目标尺寸
+                $pieceBorder = imagecolorallocate($piece, 220, 235, 255);
+                imagerectangle($piece, 0, 0, $pieceSize - 1, $pieceSize - 1, $pieceBorder);
+
+                // 5) 输出 PNG 到内存（no temp file）
+                $bgBlob = capturePng($bg);
+                $pieceBlob = capturePng($piece);
+                imagedestroy($bg);
+                imagedestroy($piece);
+                if ($bgBlob === '' || $pieceBlob === '') jsonOut(false, '验证码生成失败，请重试');
+
+                // 6) 存 session + token（一次性，10 分钟过期）
+                $captchaToken = bin2hex(random_bytes(16));
+                $_SESSION['checkin_captcha'] = [
+                    'token'      => $captchaToken,
+                    'gap_x'      => $gapX,
+                    'track_y'    => $trackY,
+                    'piece_size' => $pieceSize,
+                    'bg_width'   => $bgW,
+                    'expires_at' => time() + 600,
+                    'consumed'   => false,
+                ];
+
+                jsonOut(true, '', [
+                    'bg_image'   => 'data:image/png;base64,' . base64_encode($bgBlob),
+                    'piece_image'=> 'data:image/png;base64,' . base64_encode($pieceBlob),
+                    'token'      => $captchaToken,
+                    'bg_width'   => $bgW,
+                    'piece_size' => $pieceSize,
+                    'expires_in' => 600,
+                ]);
+                break;
+
+            // ============================================================
+            // 每日签到 —— 提交滑动验证码 + 发放积分
+            // ============================================================
+            case 'checkin_submit':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = (int)getUid();
+                $ip = getClientIp();
+
+                // 限流：单用户 3 次/5 分钟，单 IP 10 次/5 分钟
+                if (!siteRateAllowed('checkin_submit_user_' . $uid, 3, 300)) jsonOut(false, '签到尝试过于频繁，请稍后再试');
+                if (!siteRateAllowed('checkin_submit_ip_' . $ip, 10, 300)) jsonOut(false, '签到尝试过于频繁，请稍后再试');
+
+                $token = trim((string)($_POST['captcha_token'] ?? ''));
+                $submittedX = (int)($_POST['piece_x'] ?? -9999);
+                if ($token === '' || $submittedX < -1) jsonOut(false, '参数不完整，请刷新验证码重试');
+
+                $stored = $_SESSION['checkin_captcha'] ?? null;
+                if (!$stored || $stored['token'] !== $token) jsonOut(false, '验证码已失效，请重新获取');
+                if ($stored['consumed']) jsonOut(false, '验证码已使用过，请重新获取');
+                if (time() > (int)($stored['expires_at'] ?? 0)) {
+                    unset($_SESSION['checkin_captcha']);
+                    jsonOut(false, '验证码已过期，请重新获取');
+                }
+
+                // 校验水平滑动位置（水平 ±6px 容差）
+                $tolerance = 6;
+                $deltaX = abs($submittedX - (int)$stored['gap_x']);
+                if ($deltaX > $tolerance) {
+                    $stored['consumed'] = true;
+                    $_SESSION['checkin_captcha'] = $stored; // 已用但不清，让前端知道失败原因
+                    jsonOut(false, '滑动验证未通过，请重试');
+                }
+
+                // 标记 token 一次性消费
+                unset($_SESSION['checkin_captcha']);
+
+                // 幂等签到（UNIQUE 约束兜底）
+                $tz = new DateTimeZone('Asia/Shanghai');
+                $todayStr = (new DateTimeImmutable('today', $tz))->format('Y-m-d');
+                $prevDay = (new DateTimeImmutable('yesterday', $tz))->format('Y-m-d');
+
+                // 今天是否已签到
+                $todayExists = dbFetchOne($db, 'SELECT id FROM checkin_records WHERE user_id=? AND checkin_date=?', [$uid, $todayStr]);
+                if ($todayExists) jsonOut(false, '今天已经签到过了，明天再来吧');
+
+                // 连胜：昨天是否签到
+                $yesterdayRow = dbFetchOne($db, 'SELECT streak_days FROM checkin_records WHERE user_id=? AND checkin_date=?', [$uid, $prevDay]);
+                $streak = $yesterdayRow ? (int)($yesterdayRow['streak_days'] ?? 0) + 1 : 1;
+                // 防止长时间断签后补签仍显示连胜（每天一查，自然归零）
+                // 封顶 7 天为一个奖励周期，之后重新计数（或保持 7，此处保持 7 并给满额奖励）
+                $effectiveStreak = min($streak, 7);
+                // 积分公式：基础 5 + 连胜奖励 (streak-1)*3，封顶 5 + 18 = 23
+                $basePoints = 5;
+                $streakBonus = ($effectiveStreak - 1) * 3;
+                $award = $basePoints + $streakBonus;
+
+                try {
+                    $db->exec('BEGIN IMMEDIATE');
+                    dbQuery($db, 'INSERT INTO checkin_records(user_id, checkin_date, points_awarded, streak_days, captcha_token) VALUES(?,?,?,?,?)', [
+                        $uid, $todayStr, $award, $streak, $token,
+                    ]);
+                    dbQuery($db, 'UPDATE users SET points = points + ? WHERE id=?', [$award, $uid]);
+                    $db->exec('COMMIT');
+                } catch (Throwable $e) {
+                    try { $db->exec('ROLLBACK'); } catch (Throwable $_) {}
+                    // UNIQUE 冲突 → 已签到
+                    if (str_contains($e->getMessage(), 'UNIQUE')) {
+                        jsonOut(false, '今天已经签到过了，明天再来吧');
+                    }
+                    error_log('checkin_submit failed: ' . $e->getMessage());
+                    jsonOut(false, '签到失败，请稍后重试');
+                }
+
+                $user = dbFetchOne($db, 'SELECT points FROM users WHERE id=?', [$uid]);
+                jsonOut(true, '签到成功，获得 ' . $award . ' 积分！', [
+                    'awarded'      => $award,
+                    'streak'       => $streak,
+                    'total_points' => (int)($user['points'] ?? 0),
+                    'next_bonus'   => min($streak + 1, 7),
+                ]);
+                break;
+
             // ==================== 上传头像（所有登录用户；严格校验 + 重编码压缩） ====================
             case 'avatar_upload':
                 if (!isLoggedIn()) jsonOut(false, '请先登录');

@@ -19,3 +19,17 @@ function createCaptcha(): \Gregwar\Captcha\CaptchaBuilder {
     $_SESSION['captcha_expires'] = time() + 300; // 5 分钟过期
     return $builder;
 }
+
+// 将 GD 图像资源以 PNG 格式输出到内存字符串（不产生临时文件）
+function capturePng($img, int $quality = 6): string {
+    if (!is_resource($img) && !($img instanceof \GdImage)) return '';
+    ob_start();
+    try {
+        imagepng($img, null, $quality);
+    } catch (\Throwable $_) {
+        ob_end_clean();
+        return '';
+    }
+    $blob = ob_get_clean();
+    return $blob === false ? '' : $blob;
+}

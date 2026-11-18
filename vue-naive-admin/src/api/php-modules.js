@@ -29,6 +29,12 @@ export const phpDashboardApi = {
   get: () => phpAction('get_dashboard'),
 }
 
+export const phpCheckinApi = {
+  status: () => phpAction('checkin_status', {}, { bypassCsrf: true }),
+  captcha: () => phpAction('checkin_captcha', {}, { bypassCsrf: true }),
+  submit: data => phpAction('checkin_submit', data),
+}
+
 export const phpQuestionsApi = {
   stats: () => phpAction('question_stats'),
   subjects: data => phpAction('get_subjects', data, { bypassCsrf: true }),
