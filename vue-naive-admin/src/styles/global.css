@@ -89,3 +89,116 @@ body {
 .dark::view-transition-old(root) {
   z-index: 9999;
 }
+
+/* ============================================
+ * 全局移动端响应式（< 768px）
+ * 统一处理筛选区堆叠、表格紧凑、卡片缩小
+ * 逐页面的 .n-grid responsive="screen" 单独生效
+ * ============================================ */
+@media (max-width: 768px) {
+  /* 所有筛选/工具栏区域 → 堆叠 */
+  .filters,
+  .filter-row,
+  .search-bar,
+  .toolbar,
+  [class*='filter'],
+  [class*='Filter'] {
+    flex-wrap: wrap !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+
+  /* 筛选区内的 n-select / n-input → 占满宽 */
+  .filters .n-select,
+  .filters .n-input,
+  .filter-row .n-select,
+  .filter-row .n-input,
+  .search-bar .n-select,
+  .search-bar .n-input {
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
+  }
+
+  /* form inline 堆叠 */
+  .n-form-inline .n-form-item,
+  .n-form-item {
+    display: block !important;
+    width: 100% !important;
+    margin-right: 0 !important;
+    margin-bottom: 8px !important;
+  }
+  .n-form-inline .n-form-item-label,
+  .n-form-item-label {
+    padding-bottom: 4px !important;
+  }
+
+  /* 数据表格容器 → 横向滚动 */
+  .n-data-table-wrapper {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+  .n-data-table {
+    font-size: 12px !important;
+    min-width: 600px;
+  }
+
+  /* card 缩小内边距 */
+  .n-card,
+  .n-card .n-card-header,
+  .n-card .n-card-content {
+    padding: 12px !important;
+  }
+  .n-card-header__main {
+    font-size: 15px !important;
+  }
+
+  /* 按钮组堆叠 */
+  .n-space {
+    flex-wrap: wrap;
+  }
+
+  /* 页面间距缩小 */
+  .mt-16 {
+    margin-top: 12px !important;
+  }
+  .mt-24 {
+    margin-top: 16px !important;
+  }
+  .mb-16 {
+    margin-bottom: 12px !important;
+  }
+
+  /* hero 横幅堆叠 */
+  .hero {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    padding: 20px !important;
+    gap: 12px !important;
+  }
+  .hero h1 {
+    font-size: 20px !important;
+  }
+
+  /* 列表项内堆叠 */
+  .preview-row {
+    flex-direction: column !important;
+    gap: 4px !important;
+  }
+
+  /* n-tabs 容器缩小 */
+  .n-tabs-tab {
+    padding: 0 10px !important;
+    font-size: 13px !important;
+  }
+}
+
+/* 平板（768–1024px）：适度缩小 */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .n-card,
+  .n-card .n-card-header,
+  .n-card .n-card-content {
+    padding: 16px !important;
+  }
+}
