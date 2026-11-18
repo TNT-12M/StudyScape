@@ -1,57 +1,54 @@
 <template>
-  <div class="slide-captcha" :class="{ 'is-success': success }">
+  <div class="slide-captcha" :class="{ 'is-success': success, 'is-disabled': disabled }">
+    <!-- 图片区域：背景 + 拼图块 -->
     <div
       ref="trackRef"
       class="slide-track"
       :style="{ width: `${bgWidth}px`, height: `${bgHeight}px`, backgroundImage: `url(${bgImage})` }"
-      @mousedown="startDrag"
-      @touchstart.prevent="startDragTouch"
     >
-      <!-- 拼图块：gocaptcha 返回真实 tileImage（PNG 带 mask），不再用 CSS -->
+      <!-- 拼图块：用后端 gocaptcha 返回的 tileImage（PNG 带 mask） -->
       <div
-        v-if="tileImage"
         class="slide-piece"
-        :style="{ left: `${pieceX}px`, top: `${trackY}px`, width: `${markWidth}px`, height: `${markHeight}px`, backgroundImage: `url(${tileImage})` }"
-        @mousedown.stop
-        @touchstart.stop
-      />
-      <div
-        v-else
-        class="slide-piece"
-        :style="{ left: `${pieceX}px`, top: `${trackY}px`, width: `${markWidth}px`, height: `${markHeight}px` }"
-        @mousedown.stop
-        @touchstart.stop
+        :style="{
+          left: `${pieceX}px`,
+          top: `${trackY}px`,
+          width: `${markWidth}px`,
+          height: `${markHeight}px`,
+          backgroundImage: tileImage ? `url(${tileImage})` : 'none',
+        }"
       >
-        <div class="piece-inner" />
+        <div v-if="!tileImage" class="piece-inner" />
       </div>
-      <button
-        class="slide-refresh"
-        title="换一张验证码"
-        type="button"
-        @click.stop="$emit('refresh')"
-      >
+      <button class="slide-refresh" title="换一张验证码" type="button" @click.stop="onRefresh">
         ↻
       </button>
     </div>
+
+    <!-- 底部滑轨 + 滑块手柄（经典样式） -->
     <div class="slide-bar" :style="{ width: `${bgWidth}px` }">
-      <template v-if="success">
-        <span class="slide-hint slide-success">✓ 验证通过</span>
-      </template>
-      <template v-else-if="!dragging && pieceX === 0">
-        <span class="slide-hint">← 按住鼠标把滑块拖到缺口处 →</span>
-      </template>
-      <template v-else-if="dragging">
-        <span class="slide-hint">继续拖动…</span>
-      </template>
-      <template v-else>
-        <span class="slide-hint">松开后自动提交</span>
-      </template>
+      <div class="slide-bar-track">
+        <div class="slide-bar-fill" :style="{ width: `${Math.min(handleX + handleWidth, bgWidth)}px` }" />
+        <span class="slide-bar-hint" :class="{ 'slide-bar-hint--hidden': handleX > 0 }">
+          ← 按住滑块拖到缺口处 →
+        </span>
+        <div
+          class="slide-handle"
+          :style="{ left: `${handleX}px` }"
+          @mousedown.prevent.stop="startHandleDrag"
+          @touchstart.prevent.stop="startHandleDragTouch"
+        >
+          <svg class="handle-icon" viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 4l4 6-4 6" />
+            <path d="M12 4l4 6-4 6" />
+          </svg>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 
 const props = defineProps({
   bgImage: { type: String, default: '' },
@@ -61,120 +58,161 @@ const props = defineProps({
   markWidth: { type: Number, default: 44 },
   markHeight: { type: Number, default: 44 },
   trackY: { type: Number, default: 50 },
+  // 拖完是否禁止再拖（等后端返回结果）；默认 true 防重复提交
+  disabled: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['submit', 'refresh'])
 
 const trackRef = ref(null)
+// handleX = 滑块手柄左边缘位置；拼图块 pieceX = handleX（1:1 映射）
+const handleX = ref(0)
 const pieceX = ref(0)
 const dragging = ref(false)
 const success = ref(false)
+
+const handleWidth = 40 // 滑块手柄宽度 px
 let startClientX = 0
-let dragStartTs = 0
-let trackPoints = [] // [{x, y, t}] 轨迹数组
+let trackPoints = [] // [{x, y, t}] 轨迹
+
+function onRefresh() {
+  reset()
+  emit('refresh')
+}
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v))
 }
 
-function recordTrack(x, y) {
-  // 只在拖动过程中采样轨迹（节流 ~每 20ms 一个点）
-  const now = performance.now()
-  if (now - (dragStartTs || now) < 15)
-    return
-  // x, y 为轨道坐标系内的像素（滑块中心偏移）
-  trackPoints.push({ x: Math.round(x), y: Math.round(y), t: Math.round(now - dragStartTs) })
+function pieceFromHandle(hx) {
+  const maxPiece = props.bgWidth - props.markWidth
+  const ratio = props.bgWidth > handleWidth ? hx / (props.bgWidth - handleWidth) : 0
+  return Math.round(ratio * maxPiece)
 }
 
-function startDrag(e) {
-  if (success.value)
+function reset() {
+  success.value = false
+  handleX.value = 0
+  pieceX.value = 0
+  dragging.value = false
+  trackPoints = []
+}
+
+function startHandleDrag(e) {
+  if (success.value || props.disabled)
     return
   if (e.button !== undefined && e.button !== 0)
     return
   dragging.value = true
-  startClientX = e.clientX - pieceX.value
-  dragStartTs = performance.now()
+  startClientX = e.clientX - handleX.value
   trackPoints = []
-  recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
-  window.addEventListener('mousemove', onDrag)
-  window.addEventListener('mouseup', onEnd)
+  window.addEventListener('mousemove', onHandleDrag)
+  window.addEventListener('mouseup', onHandleEnd)
 }
 
-function startDragTouch(e) {
-  if (success.value)
+function startHandleDragTouch(e) {
+  if (success.value || props.disabled)
     return
   const t = e.touches[0]
   if (!t)
     return
   dragging.value = true
-  startClientX = t.clientX - pieceX.value
-  dragStartTs = performance.now()
+  startClientX = t.clientX - handleX.value
   trackPoints = []
-  recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
-  window.addEventListener('touchmove', onDragTouch, { passive: false })
-  window.addEventListener('touchend', onEnd)
-  window.addEventListener('touchcancel', onEnd)
+  window.addEventListener('touchmove', onHandleDragTouch, { passive: false })
+  window.addEventListener('touchend', onHandleEnd)
+  window.addEventListener('touchcancel', onHandleEnd)
 }
 
-function onDrag(e) {
+function onHandleDrag(e) {
   if (!dragging.value)
     return
-  const prevX = pieceX.value
-  pieceX.value = clamp(e.clientX - startClientX, 0, props.bgWidth - props.markWidth)
-  if (pieceX.value !== prevX)
-    recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
+  e.preventDefault()
+  handleX.value = clamp(e.clientX - startClientX, 0, props.bgWidth - handleWidth)
+  pieceX.value = pieceFromHandle(handleX.value)
+  // 轨迹采样（节流 ~15ms）
+  const now = performance.now()
+  if (trackPoints.length === 0 || now - (trackPoints[trackPoints.length - 1].t_ref ?? 0) > 15) {
+    trackPoints.push({
+      x: pieceX.value + props.markWidth / 2,
+      y: props.trackY + props.markHeight / 2,
+      t: Math.round(now),
+      t_ref: now,
+    })
+  }
 }
 
-function onDragTouch(e) {
+function onHandleDragTouch(e) {
   if (!dragging.value)
     return
   e.preventDefault()
   const t = e.touches[0]
   if (!t)
     return
-  const prevX = pieceX.value
-  pieceX.value = clamp(t.clientX - startClientX, 0, props.bgWidth - props.markWidth)
-  if (pieceX.value !== prevX)
-    recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
+  handleX.value = clamp(t.clientX - startClientX, 0, props.bgWidth - handleWidth)
+  pieceX.value = pieceFromHandle(handleX.value)
+  const now = performance.now()
+  if (trackPoints.length === 0 || now - (trackPoints[trackPoints.length - 1].t_ref ?? 0) > 15) {
+    trackPoints.push({
+      x: pieceX.value + props.markWidth / 2,
+      y: props.trackY + props.markHeight / 2,
+      t: Math.round(now),
+      t_ref: now,
+    })
+  }
 }
 
-function onEnd() {
+function onHandleEnd() {
   if (!dragging.value)
     return
   dragging.value = false
-  window.removeEventListener('mousemove', onDrag)
-  window.removeEventListener('mouseup', onEnd)
-  window.removeEventListener('touchmove', onDragTouch)
-  window.removeEventListener('touchend', onEnd)
-  window.removeEventListener('touchcancel', onEnd)
-  recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
-  // 必须真的拖过（轨迹点 > 3 且偏移 >= 5）才 emit submit，
-  // 防止 mousedown 后未移动就松开的误触发（此时 pieceX=0 但仍可能满足条件）
+  window.removeEventListener('mousemove', onHandleDrag)
+  window.removeEventListener('mouseup', onHandleEnd)
+  window.removeEventListener('touchmove', onHandleDragTouch)
+  window.removeEventListener('touchend', onHandleEnd)
+  window.removeEventListener('touchcancel', onHandleEnd)
+  // 清理 t_ref（内部用，不提交）
+  trackPoints = trackPoints.map(p => ({ x: p.x, y: p.y, t: p.t }))
+  // 必须真的拖过才 emit
   if (pieceX.value >= 5 && trackPoints.length >= 3) {
     emit('submit', {
       captcha_r: pieceX.value,
       slide_track: trackPoints,
     })
   }
+  else {
+    // 没真拖就弹回原位
+    handleX.value = 0
+    pieceX.value = 0
+    trackPoints = []
+  }
 }
 
-onMounted(() => {
-  if (trackRef.value)
-    trackRef.value.addEventListener('dragstart', e => e.preventDefault())
+// 监听 bgImage 变化（父组件 load 新图），自动 reset 状态
+watch(() => props.bgImage, (newVal, oldVal) => {
+  if (newVal && newVal !== oldVal)
+    reset()
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('mousemove', onDrag)
-  window.removeEventListener('mouseup', onEnd)
-  window.removeEventListener('touchmove', onDragTouch)
-  window.removeEventListener('touchend', onEnd)
-  window.removeEventListener('touchcancel', onEnd)
+  window.removeEventListener('mousemove', onHandleDrag)
+  window.removeEventListener('mouseup', onHandleEnd)
+  window.removeEventListener('touchmove', onHandleDragTouch)
+  window.removeEventListener('touchend', onHandleEnd)
+  window.removeEventListener('touchcancel', onHandleEnd)
 })
 
 defineExpose({
-  markSuccess() { success.value = true },
+  // 后端返回"验证通过"后调
+  markSuccess() {
+    success.value = true
+    handleX.value = props.bgWidth - handleWidth
+    pieceX.value = props.bgWidth - props.markWidth
+  },
+  // 换图 / 后端返回失败时调
   reset() {
     success.value = false
+    handleX.value = 0
     pieceX.value = 0
     dragging.value = false
     trackPoints = []
@@ -186,37 +224,35 @@ defineExpose({
 .slide-captcha {
   user-select: none;
   -webkit-user-select: none;
+  display: inline-block;
 }
+.slide-captcha.is-disabled .slide-handle {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 图片区 */
 .slide-track {
   position: relative;
-  cursor: grab;
   background-repeat: no-repeat;
   background-size: 100% 100%;
   border-radius: 8px;
   overflow: hidden;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-}
-.slide-track:active {
-  cursor: grabbing;
+  background-color: #e5e7eb;
 }
 .slide-piece {
   position: absolute;
-  pointer-events: auto;
-  /* 用 zxf/captcha 包提供的滑块形状图 */
-  background-image: url('/StudyScape/vendor/zxf/captcha/resources/assets/images/mark_02.png');
   background-size: 100% 100%;
   background-repeat: no-repeat;
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
-  cursor: grab;
-}
-.slide-piece:active {
-  cursor: grabbing;
+  transition: none;
 }
 .piece-inner {
   width: 100%;
   height: 100%;
+  background: rgba(30, 64, 175, 0.75);
+  border-radius: 4px;
 }
 .slide-refresh {
   position: absolute;
@@ -231,28 +267,100 @@ defineExpose({
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
-  transition:
-    background 0.15s,
-    transform 0.3s;
+  transition: background 0.15s;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .slide-refresh:hover {
   background: rgba(0, 0, 0, 0.55);
-  transform: rotate(-45deg);
 }
+
+/* 底部滑轨 */
 .slide-bar {
   margin-top: 8px;
-  padding: 6px 12px;
-  background: var(--n-color-target-transparent, rgba(0, 0, 0, 0.05));
-  border-radius: 6px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--n-text-color-3);
+  height: 40px;
 }
-.slide-success {
-  color: var(--n-color-success, #18a058);
+.slide-bar-track {
+  position: relative;
+  width: 100%;
+  height: 40px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.slide-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  border-radius: 6px 0 0 6px;
+  transition: width 0.05s linear;
+}
+.slide-bar-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: #64748b;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.slide-bar-hint--hidden {
+  opacity: 0;
+}
+
+/* 滑块手柄 */
+.slide-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40px;
+  height: 40px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #3b82f6;
+  transition: box-shadow 0.15s;
+  z-index: 2;
+}
+.slide-handle:hover {
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
+}
+.slide-handle:active {
+  cursor: grabbing;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.45);
+}
+.handle-icon {
+  color: #94a3b8;
+  transition: color 0.15s;
+}
+.slide-handle:hover .handle-icon,
+.slide-handle:active .handle-icon {
+  color: #3b82f6;
+}
+
+/* 成功态 */
+.slide-captcha.is-success .slide-bar-fill {
+  background: linear-gradient(90deg, #18a058, #34d399);
+}
+.slide-captcha.is-success .slide-handle {
+  border-color: #18a058;
+  color: #18a058;
+}
+.slide-captcha.is-success .slide-bar-hint {
+  opacity: 1;
+  color: #18a058;
   font-weight: 500;
+  content: '✓ 验证通过';
 }
 </style>

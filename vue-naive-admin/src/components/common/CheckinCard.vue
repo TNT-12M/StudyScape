@@ -129,7 +129,6 @@ async function loadCaptcha() {
       $message.error(result.message || '验证码加载失败')
       return
     }
-    // phgors/gocaptcha 返回 masterImage(完整背景) + tileImage(拼图块)
     captchaBg.value = result.data.bg_image
     captchaTile.value = result.data.tile_image
     captchaBgWidth.value = result.data.bg_width || 310
@@ -139,6 +138,8 @@ async function loadCaptcha() {
     captchaPosY.value = 50
     captchaHint.value = ''
     captchaReady.value = true
+    await nextTick()
+    captchaRef.value?.reset?.()
   }
   catch {
     $message.error('验证码加载失败，请检查网络')

@@ -244,18 +244,25 @@ async function loadRegCaptcha() {
   regCaptchaPayload.value = null
   try {
     const result = await phpAuthApi.authCaptcha('register')
-    if (result.success)
+    if (result.success) {
       regCaptchaData.value = result.data
-    else
+      // 换图后强制 reset：清 handleX/pieceX/success
+      // 虽然 watch(bgImage) 也会自动 reset，但手动调更稳
+      await nextTick()
+      regCaptchaRef.value?.reset?.()
+    }
+    else {
       $message.error(result.message || '验证码加载失败')
+    }
   }
   catch { $message.error('验证码加载失败') }
 }
 
+// SlideCaptcha 松手 emit submit 时，只存 payload + 启倒计时
+// 不再 markSuccess——后端校验后才真通过
 function onRegCaptchaSubmit(payload) {
   regCaptchaPayload.value = payload
   regCaptchaVerified.value = true
-  regCaptchaRef.value?.markSuccess?.()
 }
 
 function startEmailCountdown() {
