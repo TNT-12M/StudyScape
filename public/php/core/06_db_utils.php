@@ -662,3 +662,29 @@ try {
     error_log('checkin migration failed: ' . $e->getMessage());
     die(json_encode(['success' => false, 'message' => '签到功能数据库迁移失败: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE));
 }
+
+// ==========================================================
+// 管理员壁纸上传：site_wallpapers（管理员可上传/删除，普通用户可选）
+// ==========================================================
+try {
+    $migration = dbFetchOne($db, "SELECT version FROM schema_migrations WHERE version='wallpapers_v1'");
+    if (!$migration) {
+        $db->exec('BEGIN');
+        $db->exec("CREATE TABLE IF NOT EXISTS site_wallpapers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL DEFAULT '',
+            uploader_id INTEGER NOT NULL,
+            file_size INTEGER NOT NULL DEFAULT 0,
+            width INTEGER DEFAULT NULL,
+            height INTEGER DEFAULT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_site_wallpapers_filename ON site_wallpapers(filename)");
+        $db->exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES('wallpapers_v1')");
+        $db->exec('COMMIT');
+    }
+} catch (Throwable $e) {
+    try { $db->exec('ROLLBACK'); } catch (Throwable $_) {}
+    error_log('wallpapers migration failed: ' . $e->getMessage());
+}

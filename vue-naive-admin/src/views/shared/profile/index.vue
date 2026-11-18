@@ -83,21 +83,71 @@
 
     <n-card title="学境壁纸" :bordered="false" style="margin-top: 16px;">
       <n-alert type="info" :show-icon="false" style="margin-bottom: 14px;">
-        壁纸会显示在学习中心左侧导航栏。图片由管理员放入 <code>assets/wallpapers/</code> 目录，缺失时显示占位色块。
+        壁纸会显示在学习中心左侧导航栏。
       </n-alert>
+      <!-- 管理员上传区（仅管理员可见按钮） -->
+      <div v-if="session.isAdmin" class="wp-admin-bar">
+        <span class="wp-admin-hint">管理员可上传自定义壁纸：</span>
+        <n-button size="small" :loading="wpUploading" @click="pickWallpaperFile">
+          上传壁纸
+        </n-button>
+        <input
+          id="wallpaper-file-input"
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          hidden
+          @change="onWallpaperFileChange"
+        >
+      </div>
+      <!-- 壁纸列表：内置 + 管理员上传的 -->
       <div class="wallpaper-grid">
+        <!-- 默认深色 -->
         <div class="wallpaper-item" :class="{ active: wpDraft === '' }" @click="wpDraft = ''">
           <div class="wp-thumb wp-default">
             默认
           </div>
           <span>默认深色</span>
         </div>
-        <div v-for="i in 4" :key="i" class="wallpaper-item" :class="{ active: wpDraft === `wallpaper-${i}` }" @click="wpDraft = `wallpaper-${i}`">
+        <!-- 内置壁纸 -->
+        <div
+          v-for="bw in wpBuiltIn" :key="`bi-${bw.id}`" class="wallpaper-item"
+          :class="{ active: wpDraft === bw.filename }"
+          @click="wpDraft = bw.filename"
+        >
           <div class="wp-thumb">
-            <img v-if="!wpFailed[`wallpaper-${i}`]" :src="wallpaperSrc(`wallpaper-${i}`)" alt="" @error="wpFailed[`wallpaper-${i}`] = true">
-            <span v-else>{{ i }}</span>
+            <img
+              v-if="bw.filename && !wpFailed[bw.filename]"
+              :src="wallpaperSrc(bw.filename)" alt=""
+              @error="wpFailed[bw.filename] = true"
+            >
+            <span v-else>{{ bw.filename ? bw.filename.replace('wallpaper-', '') : '默认' }}</span>
           </div>
-          <span>壁纸 {{ i }}</span>
+          <span>{{ bw.display_name }}</span>
+        </div>
+        <!-- 管理员上传的壁纸 -->
+        <div
+          v-for="uw in wpUploads" :key="`up-${uw.id}`"
+          class="wallpaper-item upload-item"
+          :class="{ active: wpDraft === uw.filename }"
+          @click="wpDraft = uw.filename"
+        >
+          <div class="wp-thumb">
+            <img
+              v-if="!wpFailed[uw.filename]"
+              :src="wallpaperSrc(uw.filename)" alt=""
+              @error="wpFailed[uw.filename] = true"
+            >
+            <span v-else>?</span>
+            <button
+              v-if="session.isAdmin"
+              class="wp-delete-btn"
+              title="删除此壁纸"
+              @click.stop="deleteWallpaper(uw)"
+            >
+              ×
+            </button>
+          </div>
+          <span :title="uw.filename">{{ uw.display_name || '上传壁纸' }}</span>
         </div>
       </div>
       <n-space justify="end" style="margin-top: 14px;">
@@ -145,7 +195,7 @@
 </template>
 
 <script setup>
-import { phpProfileApi } from '@/api/php-modules'
+import { phpProfileApi, phpSettingsApi } from '@/api/php-modules'
 import CheckinCard from '@/components/common/CheckinCard.vue'
 import { usePrefsStore, useSessionStore } from '@/store'
 
@@ -155,10 +205,108 @@ const router = useRouter()
 const wpDraft = ref('')
 const wpSaving = ref(false)
 const wpFailed = reactive({})
+const wpBuiltIn = ref([])
+const wpUploads = ref([])
+const wpUploading = ref(false)
 
 function wallpaperSrc(name) {
   return `${import.meta.env.BASE_URL}assets/wallpapers/${name}.jpg`
 }
+
+// 加载完整壁纸列表（内置 + 管理员上传）
+async function loadWallpaperList() {
+  try {
+    const result = await phpSettingsApi.wallpaperList()
+    if (result.success) {
+      // 内置壁纸去掉默认（默认已经在模板里单独处理）
+      wpBuiltIn.value = (result.data?.built_in || []).filter(b => b.filename)
+      wpUploads.value = result.data?.uploads || []
+    }
+  }
+  catch {
+    // 静默：列表加载失败不阻塞页面
+  }
+}
+
+// 管理员上传壁纸
+function pickWallpaperFile() {
+  if (!session.isAdmin) {
+    $message.warning('仅管理员可上传壁纸')
+    return
+  }
+  document.getElementById('wallpaper-file-input')?.click()
+}
+async function onWallpaperFileChange(event) {
+  const input = event.target
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file)
+    return
+  if (!/^image\/(?:jpeg|png|webp)$/.test(file.type)) {
+    $message.warning('仅支持 JPG / PNG / WEBP 格式')
+    return
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    $message.warning('图片不能超过 5MB')
+    return
+  }
+  wpUploading.value = true
+  try {
+    const result = await phpSettingsApi.wallpaperUpload({ file, display_name: '' })
+    if (result.success) {
+      $message.success('壁纸上传成功')
+      await loadWallpaperList()
+    }
+    else {
+      $message.error(result.message || '上传失败')
+    }
+  }
+  catch (error) {
+    $message.error(error.message || '网络异常')
+  }
+  finally {
+    wpUploading.value = false
+  }
+}
+
+// 管理员删除壁纸
+async function deleteWallpaper(wallpaper) {
+  if (!session.isAdmin) {
+    $message.warning('仅管理员可删除壁纸')
+    return
+  }
+  try {
+    await new Promise((resolve, reject) => {
+      $dialog.warning({
+        title: '确认删除壁纸',
+        content: `确定要删除壁纸「${wallpaper.display_name || wallpaper.filename}」吗？删除后不可恢复。`,
+        positiveText: '删除',
+        negativeText: '取消',
+        onPositiveClick: () => resolve(),
+        onNegativeClick: () => reject(new Error('cancel')),
+        onClose: () => reject(new Error('cancel')),
+      })
+    })
+  }
+  catch { return }
+  try {
+    const result = await phpSettingsApi.wallpaperDelete(wallpaper.id)
+    if (result.success) {
+      $message.success('壁纸已删除')
+      // 如果当前选中的是这张，清空
+      if (wpDraft.value === wallpaper.filename)
+        wpDraft.value = ''
+      await loadWallpaperList()
+    }
+    else {
+      $message.error(result.message || '删除失败')
+    }
+  }
+  catch (error) {
+    $message.error(error.message || '网络异常')
+  }
+}
+
 async function saveWallpaper() {
   wpSaving.value = true
   try {
@@ -171,6 +319,10 @@ async function saveWallpaper() {
 watch(() => prefs.wallpaper, (value) => {
   wpDraft.value = value || ''
 }, { immediate: true })
+
+onMounted(() => {
+  loadWallpaperList()
+})
 const formRef = ref(null)
 const saving = ref(false)
 const form = reactive({
@@ -516,5 +668,50 @@ async function save() {
 .wallpaper-item.active span {
   color: #316c72;
   font-weight: 600;
+}
+.wp-admin-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--n-color-target-transparent, rgba(0, 0, 0, 0.03));
+  border-radius: 6px;
+}
+.wp-admin-hint {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+}
+.wp-thumb {
+  position: relative;
+}
+.wp-delete-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(224, 63, 63, 0.85);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+  padding: 0;
+}
+.wp-thumb:hover .wp-delete-btn {
+  opacity: 1;
+}
+.wp-delete-btn:hover {
+  background: rgba(224, 63, 63, 1);
+}
+.wallpaper-item.upload-item .wp-thumb {
+  box-shadow: inset 0 0 0 1px rgba(49, 108, 114, 0.35);
 }
 </style>

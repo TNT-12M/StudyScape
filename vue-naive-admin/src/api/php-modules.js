@@ -136,6 +136,10 @@ export const phpSettingsApi = {
   save: data => phpAction('user_settings_save', data),
   guideState: () => phpAction('user_guide_state', {}, { bypassCsrf: true }),
   guideDone: () => phpAction('user_guide_done'),
+  // 壁纸管理（列表登录可读，上传/删除管理员）
+  wallpaperList: () => phpAction('admin_wallpaper_list', {}, { bypassCsrf: true }),
+  wallpaperUpload: data => phpAction('admin_wallpaper_upload', data, { timeout: 60000 }),
+  wallpaperDelete: id => phpAction('admin_wallpaper_delete', { id }),
 }
 
 // 站点引导配置（仅 root）

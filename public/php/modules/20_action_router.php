@@ -1316,8 +1316,21 @@ if ($action) {
                 if (!isLoggedIn()) jsonOut(false, '请先登录');
                 $uid = (int)getUid();
                 $wallpaper = (string)($_POST['wallpaper'] ?? '');
-                $allowedWallpapers = ['', 'wallpaper-1', 'wallpaper-2', 'wallpaper-3', 'wallpaper-4'];
-                if (!in_array($wallpaper, $allowedWallpapers, true)) jsonOut(false, '壁纸参数无效');
+                // 允许空（默认）+ 内置 wallpaper-N + 管理员上传的 user_xxx
+                if ($wallpaper !== '') {
+                    if (!preg_match('/^(wallpaper-[1-9][0-9]*|user_[a-f0-9]{8,})$/', $wallpaper)) {
+                        jsonOut(false, '壁纸参数无效');
+                    }
+                    // 双保险：检查文件真实存在于 wallpapers 目录
+                    $wallpaperDir = dirname(dirname(dirname(__DIR__))) . '/public/admin/assets/wallpapers';
+                    $targetFile = $wallpaperDir . '/' . $wallpaper . '.jpg';
+                    if (!is_file($targetFile)) jsonOut(false, '壁纸文件不存在，请刷新列表后重试');
+                    // 防路径穿越双保险
+                    $rp = realpath($targetFile);
+                    if ($rp === false || !str_starts_with($rp, realpath($wallpaperDir) . DIRECTORY_SEPARATOR)) {
+                        jsonOut(false, '非法路径');
+                    }
+                }
                 dbQuery($db, "INSERT INTO user_settings(user_id, wallpaper, updated_at) VALUES(?,?,CURRENT_TIMESTAMP)
                     ON CONFLICT(user_id) DO UPDATE SET wallpaper=excluded.wallpaper, updated_at=CURRENT_TIMESTAMP", [$uid, $wallpaper]);
                 jsonOut(true, '壁纸已保存', ['wallpaper' => $wallpaper]);
@@ -1482,6 +1495,140 @@ if ($action) {
                     'url' => '/api.php?action=site_icon',
                     'version' => (int)filemtime($iconPath),
                 ]);
+                break;
+
+            // ---------- 壁纸：列出（登录即可，用于个人资料页选壁纸） ----------
+            case 'admin_wallpaper_list':
+                // 登录即可看列表（用户选自己壁纸需要）；上传/删除才需要管理员
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+
+                // 内置壁纸（静态文件，文件名不带扩展名，前端拼接 .jpg）
+                $builtIn = [
+                    ['id' => 'builtin-0', 'filename' => '', 'display_name' => '默认深色', 'is_builtin' => true],
+                    ['id' => 'builtin-1', 'filename' => 'wallpaper-1', 'display_name' => '壁纸 1', 'is_builtin' => true],
+                    ['id' => 'builtin-2', 'filename' => 'wallpaper-2', 'display_name' => '壁纸 2', 'is_builtin' => true],
+                    ['id' => 'builtin-3', 'filename' => 'wallpaper-3', 'display_name' => '壁纸 3', 'is_builtin' => true],
+                    ['id' => 'builtin-4', 'filename' => 'wallpaper-4', 'display_name' => '壁纸 4', 'is_builtin' => true],
+                ];
+
+                // 管理员上传的壁纸（DB）
+                $rows = dbFetchAll($db, 'SELECT id, filename, display_name, file_size, width, height, created_at FROM site_wallpapers ORDER BY id DESC');
+                $uploads = [];
+                foreach ($rows as $r) {
+                    $uploads[] = [
+                        'id' => (int)$r['id'],
+                        'filename' => (string)$r['filename'],
+                        'display_name' => (string)($r['display_name'] ?: $r['filename']),
+                        'file_size' => (int)$r['file_size'],
+                        'width' => $r['width'] !== null ? (int)$r['width'] : null,
+                        'height' => $r['height'] !== null ? (int)$r['height'] : null,
+                        'created_at' => formatDbUtcTimestamp($r['created_at'] ?? ''),
+                        'is_builtin' => false,
+                    ];
+                }
+
+                jsonOut(true, '', [
+                    'built_in' => $builtIn,
+                    'uploads'  => $uploads,
+                    'wallpapers_dir' => 'assets/wallpapers',
+                ]);
+                break;
+
+            // ---------- 壁纸：管理员上传（服务端硬拦截 requireAdmin） ----------
+            case 'admin_wallpaper_upload':
+                requireAdmin(); // 硬校验：非管理员直接 jsonOut 退出，前端隐藏也没用
+
+                $displayName = trim((string)($_POST['display_name'] ?? ''));
+                if (mb_strlen($displayName, 'UTF-8') > 60) jsonOut(false, '壁纸名称不能超过 60 字');
+                $file = $_FILES['file'] ?? null;
+                if (!is_array($file)) jsonOut(false, '图片超过服务器允许的上传大小（' . ini_get('upload_max_filesize') . '），请压缩后重试');
+                $err = (int)($file['error'] ?? UPLOAD_ERR_NO_FILE);
+                if ($err === UPLOAD_ERR_INI_SIZE || $err === UPLOAD_ERR_FORM_SIZE) {
+                    jsonOut(false, '图片超过服务器允许的上传大小（' . ini_get('upload_max_filesize') . '），请压缩后重试');
+                }
+                if ($err !== UPLOAD_ERR_OK) jsonOut(false, '请选择要上传的图片');
+                if (!is_uploaded_file($file['tmp_name'])) jsonOut(false, '非法的上传请求');
+                $size = (int)($file['size'] ?? 0);
+                if ($size <= 0 || $size > 5 * 1024 * 1024) jsonOut(false, '图片不能为空且不能超过 5MB');
+
+                // 真实解码校验（防止伪造扩展名）
+                if (!function_exists('imagecreatefromstring')) jsonOut(false, '服务器未启用 GD 扩展');
+                $raw = @file_get_contents($file['tmp_name']);
+                if ($raw === false || $raw === '') jsonOut(false, '图片读取失败');
+                $img = @imagecreatefromstring($raw);
+                unset($raw);
+                if (!$img) jsonOut(false, '图片内容无效或已损坏（仅支持 JPG/PNG/WEBP）');
+
+                $w = imagesx($img);
+                $h = imagesy($img);
+                if ($w < 200 || $h < 100) { imagedestroy($img); jsonOut(false, '壁纸尺寸过小，至少 200×100'); }
+                if ($w > 4096 || $h > 4096 || $w * $h > 16000000) {
+                    imagedestroy($img); jsonOut(false, '壁纸尺寸过大，请控制在 4096×4096 以内');
+                }
+
+                // 重新编码为 JPEG（丢弃 EXIF/元数据，防路径穿越+安全）
+                $wallpaperDir = dirname(dirname(dirname(__DIR__))) . '/public/admin/assets/wallpapers';
+                if (!is_dir($wallpaperDir) && !@mkdir($wallpaperDir, 0750, true)) {
+                    imagedestroy($img); jsonOut(false, '壁纸目录创建失败');
+                }
+                // 随机文件名，不带扩展名（前端拼接 .jpg）
+                $baseName = 'user_' . bin2hex(random_bytes(8));
+                $targetPath = $wallpaperDir . '/' . $baseName . '.jpg';
+                $canvas = imagecreatetruecolor($w, $h);
+                $white = imagecolorallocate($canvas, 255, 255, 255);
+                imagefilledrectangle($canvas, 0, 0, $w - 1, $h - 1, $white);
+                imagecopy($canvas, $img, 0, 0, 0, 0, $w, $h);
+                imagedestroy($img);
+                $saved = @imagejpeg($canvas, $targetPath, 85);
+                imagedestroy($canvas);
+                if (!$saved) jsonOut(false, '壁纸保存失败，请检查服务器目录权限');
+                @chmod($targetPath, 0644);
+
+                // 落盘后再校验一次文件真实存在 + 是图片
+                if (!@getimagesize($targetPath)) {
+                    @unlink($targetPath);
+                    jsonOut(false, '壁纸保存校验失败，请重试');
+                }
+                $finalSize = (int)filesize($targetPath);
+
+                dbQuery($db, 'INSERT INTO site_wallpapers(filename, display_name, uploader_id, file_size, width, height) VALUES(?,?,?,?,?,?)', [
+                    $baseName, $displayName, (int)getUid(), $finalSize, $w, $h,
+                ]);
+                $newId = (int)$db->lastInsertRowid();
+                log_admin_action('upload_wallpaper');
+
+                jsonOut(true, '壁纸上传成功', [
+                    'id'   => $newId,
+                    'filename' => $baseName,
+                    'display_name' => $displayName,
+                    'width' => $w,
+                    'height' => $h,
+                    'file_size' => $finalSize,
+                ]);
+                break;
+
+            // ---------- 壁纸：管理员删除（服务端硬拦截 requireAdmin） ----------
+            case 'admin_wallpaper_delete':
+                requireAdmin(); // 硬拦截
+
+                $id = (int)($_POST['id'] ?? 0);
+                if ($id <= 0) jsonOut(false, '参数无效');
+                $row = dbFetchOne($db, 'SELECT id, filename FROM site_wallpapers WHERE id=?', [$id]);
+                if (!$row) jsonOut(false, '壁纸不存在或已删除');
+                $filename = (string)$row['filename'];
+                // 只允许删除 DB 记录对应的（内置的不在 DB 里，删不到）
+                if (!preg_match('/^user_[0-9a-f]+\.jpg$/', $filename)) {
+                    jsonOut(false, '内置壁纸不可删除');
+                }
+                $wallpaperDir = dirname(dirname(dirname(__DIR__))) . '/public/admin/assets/wallpapers';
+                $filePath = $wallpaperDir . '/' . $filename;
+                if (str_contains(realpath($wallpaperDir) . '/', realpath($filePath) ?: '') === false) {
+                    jsonOut(false, '非法路径'); // 防路径穿越双保险
+                }
+                dbQuery($db, 'DELETE FROM site_wallpapers WHERE id=?', [$id]);
+                @unlink($filePath);
+                log_admin_action('delete_wallpaper');
+                jsonOut(true, '壁纸已删除', ['id' => $id]);
                 break;
 
             // ---------- 公告管理（仅 root） ----------
