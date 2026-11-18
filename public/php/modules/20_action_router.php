@@ -128,37 +128,40 @@ if (!function_exists('_material_extract_archive')) {
 
 // ===================== API处理 =====================
 
-// ===== 统一滑动验证码校验辅助函数（auth / register / forgot_email / reset 共用） =====
-// 返回 true=通过，false=未通过（具体错误调用方自行 jsonOut）
-function authSlideVerify(string $purpose): bool {
-    if (!class_exists(\zxf\Captcha\Captcha::class)) return false;
-    $offset = trim((string)($_POST['captcha_r'] ?? ''));
-    $track = $_POST['slide_track'] ?? [];
-    if (is_string($track) && $track !== '') {
-        $decoded = json_decode($track, true);
-        if (is_array($decoded)) $track = $decoded;
-        else $track = [];
-    } elseif (!is_array($track)) {
-        $track = [];
+// ===== 统一滑动验证码校验辅助函数（纯无状态 phgors/gocaptcha）=====
+// 答案存 session['captcha_block_'.$purpose]，成功后清防重放
+function authSlideVerify(string $purpose, bool $clearOnSuccess = true): bool {
+    if (!class_exists(\Phgors\GoCaptcha\Slide\SlideValidator::class)) return false;
+    $sessionKey = 'captcha_block_' . $purpose;
+    $block = $_SESSION[$sessionKey] ?? null;
+    if (!$block) return false;
+    $offsetX = (int)($_POST['captcha_r'] ?? 0);
+    $offsetY = (int)($_POST['captcha_y'] ?? 0);
+    if ($offsetX <= 0) return false;
+    $valid = \Phgors\GoCaptcha\Slide\SlideValidator::validate($block, $offsetX, $offsetY, 6);
+    if ($valid) {
+        if ($clearOnSuccess) unset($_SESSION[$sessionKey]);
+    } else {
+        unset($_SESSION[$sessionKey]);
     }
-    if ($offset === '') return false;
-    $captcha = new \zxf\Captcha\Captcha([
-        'captcha_type'   => \zxf\Captcha\Captcha::TYPE_SLIDE,
-        'verify_mode'    => \zxf\Captcha\Captcha::VERIFY_BACKEND_ONLY,
-        'session_prefix' => 'auth_' . $purpose,
-        'security'       => ['fingerprint_check' => true],
-        'token_expire'   => 600,
-        'captcha_expire' => 600,
-        'max_error_count' => 5,
-        'slide' => ['fault_tolerance' => 6, 'track_verify' => true],
-    ]);
-    try {
-        $r = $captcha->verify($offset, null, [], $track);
-        return (bool)($r['success'] ?? false);
-    } catch (\Throwable $e) {
-        error_log("authSlideVerify($purpose): " . $e->getMessage());
-        return false;
-    }
+    return $valid;
+}
+
+// ===== 构建 phgors/gocaptcha SlideCaptcha =====
+function buildGoSlideCaptcha(int $imgW, int $imgH): \Phgors\GoCaptcha\Slide\SlideCaptcha {
+    $tileSets = array_map(
+        fn($dir) => new \Phgors\GoCaptcha\Slide\GraphImage("$dir/overlay.png", "$dir/mask.png", "$dir/shadow.png"),
+        \Phgors\GoCaptcha\Assets\DefaultAssets::tileSets()
+    );
+    return \Phgors\GoCaptcha\Slide\SlideBuilder::make()
+        ->setBackgrounds(\Phgors\GoCaptcha\Assets\DefaultAssets::backgrounds())
+        ->setGraphs($tileSets)
+        ->setOptions(
+            (new \Phgors\GoCaptcha\Slide\SlideOptions())
+                ->withImageSize(new \Phgors\GoCaptcha\Base\Size($imgW, $imgH))
+                ->withRangeGraphSize(new \Phgors\GoCaptcha\Base\RangeVal(44, 44))
+        )
+        ->build();
 }
 
 // 确保壁纸目录存在且可写，返回绝对路径；失败返回 false
@@ -216,7 +219,7 @@ if ($action) {
     try {
         switch ($action) {
             // ==================== 滑动验证码生成（auth 通用，purpose 区分 session） ====================
-            // purpose: register | forgot_email | reset | login_fallback
+            // purpose: register | forgot_email | reset
             case 'auth_captcha':
                 $purpose = trim((string)($_GET['purpose'] ?? $_POST['purpose'] ?? 'register'));
                 if (!in_array($purpose, ['register', 'forgot_email', 'reset'], true)) $purpose = 'register';
@@ -225,47 +228,28 @@ if ($action) {
                 if (!siteRateAllowed('auth_captcha_ip_' . $ip, 10, 300)) jsonOut(false, '验证码获取过于频繁');
                 if ($uid > 0 && !siteRateAllowed('auth_captcha_user_' . $uid, 15, 300)) jsonOut(false, '验证码获取过于频繁');
 
-                if (!class_exists(\zxf\Captcha\Captcha::class) || !function_exists('imagecreatetruecolor')) {
-                    jsonOut(false, '服务器验证码组件未就绪');
-                }
-                $captcha = new \zxf\Captcha\Captcha([
-                    'captcha_type'   => \zxf\Captcha\Captcha::TYPE_SLIDE,
-                    'bg_width'       => 310,
-                    'bg_height'      => 150,
-                    'mark_width'     => 44,
-                    'mark_height'    => 44,
-                    'verify_mode'    => \zxf\Captcha\Captcha::VERIFY_BACKEND_ONLY,
-                    'session_prefix' => 'auth_' . $purpose, // 按 purpose 隔离 session，register / forgot_email 互不干扰
-                    'security'       => ['fingerprint_check' => true],
-                    'token_expire'   => 600,
-                    'captcha_expire' => 600,
-                    'max_error_count' => 5,
-                    'slide' => ['fault_tolerance' => 6, 'track_verify' => true],
-                ]);
+                if (!class_exists(\Phgors\GoCaptcha\Slide\SlideBuilder::class)) jsonOut(false, '服务器验证码组件未就绪');
+
                 try {
-                    $data = $captcha->makeData();
+                    $captcha = buildGoSlideCaptcha(310, 150);
+                    $data = $captcha->generate();
+                    $block = $data->getBlock();
+                    $_SESSION['captcha_block_' . $purpose] = $block->toArray(); // 存答案
+                    $arr = $data->toArray(); // ['masterImage' => JPEG base64, 'tileImage' => PNG base64]
                 } catch (\Throwable $e) {
-                    error_log('auth_captcha makeData: ' . $e->getMessage());
+                    error_log('auth_captcha gocaptcha generate: ' . $e->getMessage());
                     jsonOut(false, '验证码生成失败');
                 }
-                if (!($data['success'] ?? true)) jsonOut(false, $data['message'] ?? '验证码生成失败');
-
-                // 裁 zxf/captcha 3× 合成图的第一行（带缺口背景）
-                $bgW = (int)$data['bg_width'];
-                $bgH = (int)$data['bg_height'];
-                $cropped = zxfSlideBgCrop((string)$data['image_base64'], $bgW, $bgH);
 
                 jsonOut(true, '', [
-                    'purpose'      => $purpose,
-                    'type'         => $data['type'],
-                    'bg_image'     => $cropped,
-                    'pos_y'        => (int)($data['pos_y'] ?? 0),
-                    'bg_width'     => $bgW,
-                    'bg_height'    => $bgH,
-                    'mark_width'   => (int)$data['mark_width'],
-                    'mark_height'  => (int)$data['mark_height'],
-                    'hint'         => $data['hint'],
-                    'expires_in'   => 600,
+                    'purpose'    => $purpose,
+                    'bg_image'   => $arr['masterImage'],   // 完整背景图（拼图缺口已由 GD 挖好）
+                    'tile_image' => $arr['tileImage'],     // 拼图块（PNG，带 mask）
+                    'bg_width'   => 310,
+                    'bg_height'  => 150,
+                    'mark_width' => $block->getWidth(),
+                    'mark_height'=> $block->getHeight(),
+                    'expires_in' => 600,
                 ]);
                 break;
 
@@ -717,56 +701,24 @@ if ($action) {
                 $uid = (int)getUid();
                 if (!siteRateAllowed('checkin_captcha_user_' . $uid, 10, 300)) jsonOut(false, '验证码获取过于频繁，请稍后再试');
 
-                if (!class_exists(\zxf\Captcha\Captcha::class) || !function_exists('imagecreatetruecolor')) {
-                    jsonOut(false, '服务器验证码组件未就绪，请稍后再试');
-                }
-
-                // 用 zxf/captcha 生成滑动验证码（MIT, zhaoxianfang）
-                // backend_only 模式：verify() 成功后服务端 session 标记 'used'，幂等放行
-                $captcha = new \zxf\Captcha\Captcha([
-                    'captcha_type'   => \zxf\Captcha\Captcha::TYPE_SLIDE,
-                    'bg_width'       => 310,
-                    'bg_height'      => 150,
-                    'mark_width'     => 44,
-                    'mark_height'    => 44,
-                    'verify_mode'    => \zxf\Captcha\Captcha::VERIFY_BACKEND_ONLY,
-                    'session_prefix' => 'checkin',
-                    'security'       => ['fingerprint_check' => true],
-                    'token_expire'   => 600,
-                    'captcha_expire' => 600,
-                    'max_error_count' => 5,
-                    'slide' => [
-                        'fault_tolerance'    => 6,
-                        'track_verify'       => true,
-                        'track_strictness'  => 'normal',
-                    ],
-                ]);
-
                 try {
-                    $data = $captcha->makeData();
+                    $captcha = buildGoSlideCaptcha(310, 150);
+                    $data = $captcha->generate();
+                    $block = $data->getBlock();
+                    $_SESSION['captcha_block_checkin'] = $block->toArray();
+                    $arr = $data->toArray();
                 } catch (\Throwable $e) {
-                    error_log('checkin_captcha makeData: ' . $e->getMessage());
+                    error_log('checkin_captcha gocaptcha generate: ' . $e->getMessage());
                     jsonOut(false, '验证码生成失败，请刷新重试');
                 }
 
-                if (!($data['success'] ?? true)) {
-                    jsonOut(false, $data['message'] ?? '验证码生成失败');
-                }
-
-                // 裁 zxf/captcha 3× 合成图的第一行（带缺口背景）
-                $bgW = (int)$data['bg_width'];
-                $bgH = (int)$data['bg_height'];
-                $cropped = zxfSlideBgCrop((string)$data['image_base64'], $bgW, $bgH);
-
                 jsonOut(true, '', [
-                    'type'        => $data['type'],
-                    'bg_image'    => $cropped,
-                    'pos_y'       => (int)($data['pos_y'] ?? 0),
-                    'bg_width'    => $bgW,
-                    'bg_height'   => $bgH,
-                    'mark_width'  => (int)$data['mark_width'],
-                    'mark_height' => (int)$data['mark_height'],
-                    'hint'        => $data['hint'],
+                    'bg_image'    => $arr['masterImage'],
+                    'tile_image'  => $arr['tileImage'],
+                    'bg_width'    => 310,
+                    'bg_height'   => 150,
+                    'mark_width'  => $block->getWidth(),
+                    'mark_height' => $block->getHeight(),
                     'expires_in'  => 600,
                 ]);
                 break;
@@ -783,41 +735,8 @@ if ($action) {
                 if (!siteRateAllowed('checkin_submit_user_' . $uid, 3, 300)) jsonOut(false, '签到尝试过于频繁，请稍后再试');
                 if (!siteRateAllowed('checkin_submit_ip_' . $ip, 10, 300)) jsonOut(false, '签到尝试过于频繁，请稍后再试');
 
-                // 用 zxf/captcha verify() 做服务端硬校验（MIT, zhaoxianfang）
-                $offset = trim((string)($_POST['captcha_r'] ?? $_POST['piece_x'] ?? ''));
-                $slideTrack = $_POST['slide_track'] ?? $_POST['track'] ?? [];
-                if (is_string($slideTrack) && $slideTrack !== '') {
-                    $decoded = json_decode($slideTrack, true);
-                    if (is_array($decoded)) $slideTrack = $decoded;
-                    else $slideTrack = [];
-                } elseif (!is_array($slideTrack)) {
-                    $slideTrack = [];
-                }
-                if ($offset === '') jsonOut(false, '请完成滑动验证后再提交');
-
-                $captcha = new \zxf\Captcha\Captcha([
-                    'captcha_type'   => \zxf\Captcha\Captcha::TYPE_SLIDE,
-                    'verify_mode'    => \zxf\Captcha\Captcha::VERIFY_BACKEND_ONLY,
-                    'session_prefix' => 'checkin',     // 同 captcha action，共用同一份 session 数据
-                    'security'       => ['fingerprint_check' => true],
-                    'token_expire'   => 600,
-                    'captcha_expire' => 600,
-                    'max_error_count' => 5,
-                    'slide' => [
-                        'fault_tolerance'   => 6,
-                        'track_verify'      => true,
-                        'track_strictness' => 'normal',
-                    ],
-                ]);
-                try {
-                    $verify = $captcha->verify($offset, null, [], $slideTrack);
-                } catch (\Throwable $e) {
-                    error_log('checkin_submit verify: ' . $e->getMessage());
-                    jsonOut(false, '验证码校验服务异常，请刷新重试');
-                }
-                if (!($verify['success'] ?? false)) {
-                    jsonOut(false, $verify['message'] ?? '滑动验证未通过，请重试');
-                }
+                // gocaptcha 纯无状态校验
+                if (!authSlideVerify('checkin')) jsonOut(false, '滑动验证未通过，请重试');
 
                 // 幂等签到（UNIQUE 约束兜底）
                 $tz = new DateTimeZone('Asia/Shanghai');

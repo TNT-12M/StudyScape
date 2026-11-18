@@ -49,6 +49,7 @@
       <SlideCaptcha
         ref="captchaRef"
         :bg-image="captchaBg"
+        :tile-image="captchaTile"
         :bg-width="captchaBgWidth"
         :bg-height="captchaBgHeight"
         :mark-width="captchaMarkWidth"
@@ -86,6 +87,7 @@ import SlideCaptcha from '@/components/common/SlideCaptcha.vue'
 
 const status = ref(null)
 const captchaBg = ref('')
+const captchaTile = ref('')
 const captchaBgWidth = ref(310)
 const captchaBgHeight = ref(150)
 const captchaMarkWidth = ref(44)
@@ -127,14 +129,15 @@ async function loadCaptcha() {
       $message.error(result.message || '验证码加载失败')
       return
     }
-    // zxf/captcha 返回带缺口的完整背景图 + 位置参数（MIT, zhaoxianfang）
+    // phgors/gocaptcha 返回 masterImage(完整背景) + tileImage(拼图块)
     captchaBg.value = result.data.bg_image
+    captchaTile.value = result.data.tile_image
     captchaBgWidth.value = result.data.bg_width || 310
     captchaBgHeight.value = result.data.bg_height || 150
     captchaMarkWidth.value = result.data.mark_width || 44
     captchaMarkHeight.value = result.data.mark_height || 44
-    captchaPosY.value = result.data.pos_y || 50
-    captchaHint.value = result.data.hint || ''
+    captchaPosY.value = 50
+    captchaHint.value = ''
     captchaReady.value = true
   }
   catch {

@@ -45,6 +45,7 @@
               <SlideCaptcha
                 ref="regCaptchaRef"
                 :bg-image="regCaptchaData.bg_image"
+                :tile-image="regCaptchaData.tile_image"
                 :bg-width="regCaptchaData.bg_width"
                 :bg-height="regCaptchaData.bg_height"
                 :mark-width="regCaptchaData.mark_width"
@@ -86,6 +87,7 @@
                 <SlideCaptcha
                   ref="resetCaptchaRef"
                   :bg-image="resetCaptchaData.bg_image"
+                  :tile-image="resetCaptchaData.tile_image"
                   :bg-width="resetCaptchaData.bg_width"
                   :bg-height="resetCaptchaData.bg_height"
                   :mark-width="resetCaptchaData.mark_width"
@@ -121,6 +123,7 @@
                 <SlideCaptcha
                   ref="resetSubmitCaptchaRef"
                   :bg-image="resetSubmitCaptchaData.bg_image"
+                  :tile-image="resetSubmitCaptchaData.tile_image"
                   :bg-width="resetSubmitCaptchaData.bg_width"
                   :bg-height="resetSubmitCaptchaData.bg_height"
                   :mark-width="resetSubmitCaptchaData.mark_width"

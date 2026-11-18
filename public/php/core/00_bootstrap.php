@@ -19,6 +19,18 @@ spl_autoload_register(function ($class) {
     if (is_file($file)) require $file;
 });
 
+// ====== PSR-4 Autoloader for phgors/gocaptcha ======
+// Apache-2.0 (phgors), go-captcha PHP 后端实现；纯无状态 GD 验证码（滑动/点选/旋转）
+// vendor 源码位于 vendor/phgors/gocaptcha/；答案自己存 session/cache
+spl_autoload_register(function ($class) {
+    $prefix = 'Phgors\\GoCaptcha\\';
+    $baseDir = __DIR__ . '/../vendor/phgors/gocaptcha/src/';
+    if (strncmp($prefix, $class, strlen($prefix)) !== 0) return;
+    $relative = substr($class, strlen($prefix));
+    $file = $baseDir . str_replace('\\', '/', $relative) . '.php';
+    if (is_file($file)) require $file;
+});
+
 // ====== PSR-4 Autoloader for zxf/captcha ======
 // MIT License (zhaoxianfang), vendor 源码位于 vendor/zxf/captcha/
 spl_autoload_register(function ($class) {

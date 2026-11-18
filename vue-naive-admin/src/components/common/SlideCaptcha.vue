@@ -7,8 +7,16 @@
       @mousedown="startDrag"
       @touchstart.prevent="startDragTouch"
     >
-      <!-- 滑块：只靠 CSS 画形状，不再依赖后端返回 piece 图 -->
+      <!-- 拼图块：gocaptcha 返回真实 tileImage（PNG 带 mask），不再用 CSS -->
       <div
+        v-if="tileImage"
+        class="slide-piece"
+        :style="{ left: `${pieceX}px`, top: `${trackY}px`, width: `${markWidth}px`, height: `${markHeight}px`, backgroundImage: `url(${tileImage})` }"
+        @mousedown.stop
+        @touchstart.stop
+      />
+      <div
+        v-else
         class="slide-piece"
         :style="{ left: `${pieceX}px`, top: `${trackY}px`, width: `${markWidth}px`, height: `${markHeight}px` }"
         @mousedown.stop
@@ -47,6 +55,7 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 const props = defineProps({
   bgImage: { type: String, default: '' },
+  tileImage: { type: String, default: '' },
   bgWidth: { type: Number, default: 310 },
   bgHeight: { type: Number, default: 150 },
   markWidth: { type: Number, default: 44 },
@@ -139,8 +148,9 @@ function onEnd() {
   window.removeEventListener('touchend', onEnd)
   window.removeEventListener('touchcancel', onEnd)
   recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
-  if (pieceX.value >= 5) {
-    // zxf/captcha 后端用 captcha_r 作为滑动偏移量 + slide_track 轨迹数组
+  // 必须真的拖过（轨迹点 > 3 且偏移 >= 5）才 emit submit，
+  // 防止 mousedown 后未移动就松开的误触发（此时 pieceX=0 但仍可能满足条件）
+  if (pieceX.value >= 5 && trackPoints.length >= 3) {
     emit('submit', {
       captcha_r: pieceX.value,
       slide_track: trackPoints,
