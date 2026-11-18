@@ -37,13 +37,27 @@
             <n-form-item label="邮箱">
               <n-input v-model:value="regForm.email" placeholder="@example.com" />
             </n-form-item>
-            <div class="captcha-row">
-              <n-input v-model:value="regForm.captcha" placeholder="图片验证码" maxlength="5" />
-              <img :src="regCaptchaUrl" alt="验证码" title="点击刷新" @click="refreshRegCaptcha">
+            <!-- 滑动验证码（替代原来的 5 位图片验证码） -->
+            <div class="auth-captcha-row">
+              <div class="captcha-label">
+                安全验证：
+              </div>
+              <SlideCaptcha
+                ref="regCaptchaRef"
+                :bg-image="regCaptchaData.bg_image"
+                :bg-width="regCaptchaData.bg_width"
+                :bg-height="regCaptchaData.bg_height"
+                :mark-width="regCaptchaData.mark_width"
+                :mark-height="regCaptchaData.mark_height"
+                :track-y="regCaptchaData.pos_y"
+                :style="{ display: 'inline-block' }"
+                @submit="onRegCaptchaSubmit"
+                @refresh="loadRegCaptcha"
+              />
             </div>
             <div class="email-code-row">
               <n-input v-model:value="regForm.email_code" placeholder="邮箱验证码" maxlength="6" />
-              <n-button :disabled="emailCountdown > 0 || !canSendEmailCode" :loading="emailSending" @click="sendRegEmailCode">
+              <n-button :disabled="emailCountdown > 0 || !regCaptchaVerified" :loading="emailSending" @click="sendRegEmailCode">
                 {{ emailCountdown > 0 ? `${emailCountdown}s 后重发` : '获取验证码' }}
               </n-button>
             </div>
@@ -60,20 +74,33 @@
         </n-tab-pane>
         <n-tab-pane name="forgot" tab="忘记密码">
           <n-form class="login-form" @submit.prevent="doReset">
-            <!-- 未确认阶段: 邮箱 + 验证码 → 自动匹配用户名 -->
+            <!-- 未确认阶段: 邮箱 + 滑动验证码 → 自动匹配用户名 -->
             <template v-if="!resetConfirmed">
               <n-form-item label="注册邮箱">
                 <n-input v-model:value="resetForm.email" placeholder="请输入注册时使用的邮箱" />
               </n-form-item>
-              <div class="captcha-row">
-                <n-input v-model:value="resetForm.captcha" placeholder="图片验证码" maxlength="5" />
-                <img :src="resetCaptchaUrl" alt="验证码" title="点击刷新" @click="refreshResetCaptcha">
+              <div class="auth-captcha-row">
+                <div class="captcha-label">
+                  安全验证：
+                </div>
+                <SlideCaptcha
+                  ref="resetCaptchaRef"
+                  :bg-image="resetCaptchaData.bg_image"
+                  :bg-width="resetCaptchaData.bg_width"
+                  :bg-height="resetCaptchaData.bg_height"
+                  :mark-width="resetCaptchaData.mark_width"
+                  :mark-height="resetCaptchaData.mark_height"
+                  :track-y="resetCaptchaData.pos_y"
+                  :style="{ display: 'inline-block' }"
+                  @submit="onResetLookupCaptchaSubmit"
+                  @refresh="loadResetCaptcha('forgot_email')"
+                />
               </div>
               <n-button type="primary" block :loading="resetLooking" @click="lookupResetEmail">
                 确认邮箱 → 显示账号
               </n-button>
             </template>
-            <!-- 已确认阶段: 显示匹配结果 + 发验证码 + 重置 -->
+            <!-- 已确认阶段: 显示匹配结果 + 发邮箱验证码 + 新的滑动验证码（reset purpose）+ 重置 -->
             <template v-else>
               <n-alert type="info" :bordered="false" style="margin-bottom: 12px">
                 <template #header>
@@ -86,6 +113,23 @@
                 <n-button :disabled="resetCountdown > 0" :loading="resetEmailSending" @click="sendResetEmailCode">
                   {{ resetCountdown > 0 ? `${resetCountdown}s 后重发` : '获取验证码' }}
                 </n-button>
+              </div>
+              <div class="auth-captcha-row">
+                <div class="captcha-label">
+                  安全验证：
+                </div>
+                <SlideCaptcha
+                  ref="resetSubmitCaptchaRef"
+                  :bg-image="resetSubmitCaptchaData.bg_image"
+                  :bg-width="resetSubmitCaptchaData.bg_width"
+                  :bg-height="resetSubmitCaptchaData.bg_height"
+                  :mark-width="resetSubmitCaptchaData.mark_width"
+                  :mark-height="resetSubmitCaptchaData.mark_height"
+                  :track-y="resetSubmitCaptchaData.pos_y"
+                  :style="{ display: 'inline-block' }"
+                  @submit="onResetSubmitCaptchaSubmit"
+                  @refresh="loadResetCaptcha('reset')"
+                />
               </div>
               <n-form-item label="新密码">
                 <n-input v-model:value="resetForm.new_password" type="password" show-password-on="mousedown" placeholder="至少 6 位" />
@@ -113,6 +157,7 @@
 <script setup>
 import { phpAuthApi } from '@/api/php-modules'
 import SiteIcon from '@/components/common/SiteIcon.vue'
+import SlideCaptcha from '@/components/common/SlideCaptcha.vue'
 import { useSessionStore } from '@/store'
 
 const router = useRouter()
@@ -142,14 +187,12 @@ async function login() {
       ? route.query.redirect
       : null
     const target = redirect || (user.is_admin ? '/StudyScape' : '/app')
-    // 确保 DOM 更新后再跳转，避免路由守卫读取到旧状态
     await nextTick()
-    // 多级兜底：replace → push → setTimeout 硬跳转，确保一定能跳过去
     try {
       await router.replace(target)
     }
     catch (e) {
-      console.warn('[登录] replace 失败，尝试 push:', e)
+      console.warn('[登录] replace 失败:', e)
     }
     if (!isOnTarget(target)) {
       try {
@@ -159,12 +202,9 @@ async function login() {
         console.warn('[登录] push 失败:', e)
       }
     }
-    // 最终兜底：如果 300ms 后还在登录页，强制 location 跳转
     setTimeout(() => {
-      if (!isOnTarget(target)) {
-        console.warn('[登录] 路由跳转失败，强制 location 跳转到', target)
+      if (!isOnTarget(target))
         window.location.href = target
-      }
     }, 300)
   }
   catch (error) {
@@ -183,18 +223,37 @@ function goForgot() {
 }
 
 // ===== 注册 =====
-const regForm = reactive({ username: '', email: '', password: '', confirm_password: '', captcha: '', email_code: '' })
-const regCaptchaUrl = ref('')
+const regForm = reactive({ username: '', email: '', password: '', confirm_password: '', email_code: '' })
+const regCaptchaRef = ref(null)
+const regCaptchaData = ref({})
+const regCaptchaPayload = ref(null)
+const regCaptchaVerified = ref(false) // 滑过验证后才能发邮件
 const emailSending = ref(false)
 const emailCountdown = ref(0)
 let emailTimer = null
 
-const canSendEmailCode = computed(() => regForm.email && /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(regForm.email) && regForm.captcha.length >= 5)
-
-function refreshRegCaptcha() {
-  regCaptchaUrl.value = phpAuthApi.captchaUrl()
+function canSendEmailCode() {
+  return regCaptchaVerified.value && regForm.email && /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(regForm.email)
 }
-refreshRegCaptcha()
+
+async function loadRegCaptcha() {
+  regCaptchaVerified.value = false
+  regCaptchaPayload.value = null
+  try {
+    const result = await phpAuthApi.authCaptcha('register')
+    if (result.success)
+      regCaptchaData.value = result.data
+    else
+      $message.error(result.message || '验证码加载失败')
+  }
+  catch { $message.error('验证码加载失败') }
+}
+
+function onRegCaptchaSubmit(payload) {
+  regCaptchaPayload.value = payload
+  regCaptchaVerified.value = true
+  regCaptchaRef.value?.markSuccess?.()
+}
 
 function startEmailCountdown() {
   emailCountdown.value = 60
@@ -211,24 +270,36 @@ function startEmailCountdown() {
 
 async function sendRegEmailCode() {
   if (!canSendEmailCode.value)
-    return $message.warning('请先填写邮箱和图片验证码')
+    return $message.warning('请先通过滑动验证并填写邮箱')
+  if (!regCaptchaPayload.value)
+    return $message.warning('滑动验证状态丢失，请重新拖动')
   emailSending.value = true
   try {
-    const result = await phpAuthApi.sendEmailCode({ email: regForm.email, captcha: regForm.captcha, purpose: 'register' })
+    const result = await phpAuthApi.sendEmailCode({
+      email: regForm.email,
+      purpose: 'register',
+      captcha_r: regCaptchaPayload.value.captcha_r,
+      slide_track: JSON.stringify(regCaptchaPayload.value.slide_track || []),
+    })
     $message.success(result.message || '验证码已发送')
     startEmailCountdown()
-    refreshRegCaptcha()
+    // 发完邮件重置一次验证码（避免别人重复利用同一个 session）
+    regCaptchaVerified.value = false
+    loadRegCaptcha()
   }
   catch (error) {
     $message.error(error.message || '发送失败')
-    refreshRegCaptcha()
+    regCaptchaVerified.value = false
+    loadRegCaptcha()
   }
   finally { emailSending.value = false }
 }
 
 async function register() {
-  if (!regForm.username || !regForm.email || !regForm.password || !regForm.confirm_password || !regForm.captcha || !regForm.email_code)
+  if (!regForm.username || !regForm.email || !regForm.password || !regForm.confirm_password || !regForm.email_code)
     return $message.warning('请完整填写注册信息')
+  if (!regCaptchaPayload.value)
+    return $message.warning('请先通过滑动验证')
   if (!/^[\u4e00-\u9fa5\w\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]+$/u.test(regForm.username))
     return $message.warning('用户名只能包含中文、英文、数字、下划线和表情符号')
   if (regForm.username.length < 2)
@@ -241,46 +312,95 @@ async function register() {
     return $message.warning('邮箱验证码为 6 位数字')
   loading.value = true
   try {
-    const result = await phpAuthApi.register(regForm)
+    const result = await phpAuthApi.register({
+      username: regForm.username,
+      email: regForm.email,
+      password: regForm.password,
+      email_code: regForm.email_code,
+      // 第二次校验滑动验证码（后端 backend_only 幂等）
+      captcha_r: regCaptchaPayload.value.captcha_r,
+      slide_track: JSON.stringify(regCaptchaPayload.value.slide_track || []),
+    })
     $message.success(result.message || '注册成功，请登录')
     mode.value = 'login'
     form.username = regForm.username
     form.password = ''
-    refreshRegCaptcha()
+    regForm.username = ''
+    regForm.email = ''
+    regForm.password = ''
+    regForm.confirm_password = ''
+    regForm.email_code = ''
+    regCaptchaVerified.value = false
+    loadRegCaptcha()
   }
   catch (error) {
     $message.error(error.message || '注册失败')
-    refreshRegCaptcha()
+    regCaptchaVerified.value = false
+    loadRegCaptcha()
   }
   finally { loading.value = false }
 }
 
 // ===== 忘记密码/重置密码 =====
-const resetForm = reactive({ account: '', nickname: '', email: '', captcha: '', email_code: '', new_password: '', confirm_new_password: '' })
-const resetCaptchaUrl = ref('')
+const resetForm = reactive({ account: '', nickname: '', email: '', email_code: '', new_password: '', confirm_new_password: '' })
+const resetCaptchaRef = ref(null) // lookup 阶段的 SlideCaptcha
+const resetSubmitCaptchaRef = ref(null) // reset 提交阶段的 SlideCaptcha
+const resetCaptchaData = ref({})
+const resetSubmitCaptchaData = ref({})
+const resetCaptchaPayload = ref(null)
+const resetSubmitPayload = ref(null)
 const resetLoading = ref(false)
 const resetEmailSending = ref(false)
 const resetCountdown = ref(0)
-const resetConfirmed = ref(false) // 邮箱已确认 → 显示用户名
-const resetLooking = ref(false) // lookupResetEmail loading
+const resetConfirmed = ref(false)
+const resetLooking = ref(false)
 let resetTimer = null
 
-function canLookupResetEmail() {
-  return resetForm.email && /^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(resetForm.email) && resetForm.captcha.length >= 5
+function loadResetCaptcha(purpose) {
+  if (purpose === 'forgot_email') {
+    resetCaptchaPayload.value = null
+    try {
+      phpAuthApi.authCaptcha('forgot_email').then((r) => {
+        if (r.success)
+          resetCaptchaData.value = r.data
+      })
+    }
+    catch { /* 静默 */ }
+  }
+  else if (purpose === 'reset') {
+    resetSubmitPayload.value = null
+    try {
+      phpAuthApi.authCaptcha('reset').then((r) => {
+        if (r.success)
+          resetSubmitCaptchaData.value = r.data
+      })
+    }
+    catch { /* 静默 */ }
+  }
 }
 
-function refreshResetCaptcha() {
-  resetCaptchaUrl.value = phpAuthApi.captchaUrl()
+function onResetLookupCaptchaSubmit(payload) {
+  resetCaptchaPayload.value = payload
+  resetCaptchaRef.value?.markSuccess?.()
 }
-// 切到忘记密码 tab 时再初始化验证码
+
+function onResetSubmitCaptchaSubmit(payload) {
+  resetSubmitPayload.value = payload
+  resetSubmitCaptchaRef.value?.markSuccess?.()
+}
+
+// 切到 forgot tab 时初始化 forgot_email 验证码
 watch(mode, (m) => {
   if (m === 'forgot') {
-    // 每次切到 forgot 重置状态
     resetConfirmed.value = false
     resetForm.account = ''
     resetForm.nickname = ''
-    if (!resetCaptchaUrl.value)
-      refreshResetCaptcha()
+    if (!resetCaptchaData.value.bg_image)
+      loadResetCaptcha('forgot_email')
+  }
+  if (m === 'register') {
+    if (!regCaptchaData.value.bg_image)
+      loadRegCaptcha()
   }
 })
 
@@ -298,20 +418,27 @@ function startResetCountdown() {
 }
 
 async function lookupResetEmail() {
-  if (!canLookupResetEmail())
-    return $message.warning('请填写正确的邮箱和 5 位图片验证码')
+  if (!resetForm.email || !/^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(resetForm.email))
+    return $message.warning('请填写正确的邮箱')
+  if (!resetCaptchaPayload.value)
+    return $message.warning('请先完成滑动验证')
   resetLooking.value = true
   try {
-    const result = await phpAuthApi.lookupResetEmail({ email: resetForm.email, captcha: resetForm.captcha })
+    const result = await phpAuthApi.lookupResetEmail({
+      email: resetForm.email,
+      captcha_r: resetCaptchaPayload.value.captcha_r,
+      slide_track: JSON.stringify(resetCaptchaPayload.value.slide_track || []),
+    })
     resetForm.account = result.data.username
     resetForm.nickname = result.data.nickname || ''
     resetConfirmed.value = true
-    resetForm.captcha = '' // 图片验证码已用掉
     $message.success(result.message || '请确认是这个账号')
+    // lookup 消耗了 forgot_email 的验证码，现在加载 reset purpose 的新验证码
+    loadResetCaptcha('reset')
   }
   catch (error) {
     $message.error(error.message || '查询失败')
-    refreshResetCaptcha()
+    loadResetCaptcha('forgot_email')
   }
   finally { resetLooking.value = false }
 }
@@ -321,10 +448,9 @@ async function sendResetEmailCode() {
     return $message.warning('请先确认邮箱对应的账号')
   resetEmailSending.value = true
   try {
-    const result = await phpAuthApi.sendEmailCode({ email: resetForm.email, captcha: resetForm.captcha, purpose: 'reset' })
+    const result = await phpAuthApi.sendEmailCode({ email: resetForm.email, purpose: 'reset' })
     $message.success(result.message || '验证码已发送')
     startResetCountdown()
-    // 发送邮箱验证码不再校验图片验证码 (已经在 lookup 阶段消耗过)
   }
   catch (error) {
     $message.error(error.message || '发送失败')
@@ -335,6 +461,8 @@ async function sendResetEmailCode() {
 async function doReset() {
   if (!resetConfirmed.value || !resetForm.email || !resetForm.email_code || !resetForm.new_password || !resetForm.confirm_new_password)
     return $message.warning('请完整填写所有信息')
+  if (!resetSubmitPayload.value)
+    return $message.warning('请先完成滑动验证')
   if (resetForm.new_password.length < 6)
     return $message.warning('新密码至少 6 位')
   if (resetForm.new_password !== resetForm.confirm_new_password)
@@ -343,19 +471,26 @@ async function doReset() {
     return $message.warning('邮箱验证码为 6 位数字')
   resetLoading.value = true
   try {
-    const result = await phpAuthApi.resetPassword({ email: resetForm.email, email_code: resetForm.email_code, new_password: resetForm.new_password, captcha: resetForm.captcha })
+    const result = await phpAuthApi.resetPassword({
+      email: resetForm.email,
+      email_code: resetForm.email_code,
+      new_password: resetForm.new_password,
+      captcha_r: resetSubmitPayload.value.captcha_r,
+      slide_track: JSON.stringify(resetSubmitPayload.value.slide_track || []),
+    })
     $message.success(result.message || '密码重置成功')
     mode.value = 'login'
     form.username = resetForm.account
     form.password = ''
-    // 全部重置
-    Object.assign(resetForm, { account: '', nickname: '', email: '', captcha: '', email_code: '', new_password: '' })
+    Object.assign(resetForm, { account: '', nickname: '', email: '', email_code: '', new_password: '', confirm_new_password: '' })
     resetConfirmed.value = false
-    refreshResetCaptcha()
+    resetCaptchaPayload.value = null
+    resetSubmitPayload.value = null
+    loadResetCaptcha('forgot_email')
   }
   catch (error) {
     $message.error(error.message || '重置失败')
-    refreshResetCaptcha()
+    loadResetCaptcha('reset')
   }
   finally { resetLoading.value = false }
 }
@@ -424,18 +559,14 @@ async function doReset() {
 .login-form {
   padding-top: 18px;
 }
-.captcha-row {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 18px;
+.captcha-label {
+  font-size: 13px;
+  color: var(--n-text-color-2);
+  margin-bottom: 6px;
 }
-.captcha-row img {
-  width: 120px;
-  height: 34px;
-  cursor: pointer;
-  border: 1px solid var(--n-border-color);
-  border-radius: 4px;
-  flex-shrink: 0;
+.auth-captcha-row {
+  margin-bottom: 18px;
+  text-align: center;
 }
 .email-code-row {
   display: flex;
@@ -486,9 +617,6 @@ async function doReset() {
     width: 42px;
     height: 42px;
     font-size: 20px;
-  }
-  .captcha-row img {
-    width: 100px;
   }
   .email-code-row .n-button {
     min-width: 100px;

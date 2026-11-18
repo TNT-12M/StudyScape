@@ -6,6 +6,8 @@ export const phpAuthApi = {
   logout: () => phpAction('logout'),
   checkSession: () => phpAction('check_session', {}, { bypassCsrf: true }),
   captchaUrl: () => getCaptchaUrl(),
+  // 滑动验证码（auth 通用，purpose 区分 session：register / forgot_email / reset）
+  authCaptcha: purpose => phpAction('auth_captcha', { purpose }, { bypassCsrf: true }),
   sendEmailCode: data => phpAction('send_email_code', data, { bypassCsrf: true }),
   lookupResetEmail: data => phpAction('lookup_reset_email', data, { bypassCsrf: true }),
   resetPassword: data => phpAction('reset_password', data, { bypassCsrf: true }),

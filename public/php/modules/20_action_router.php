@@ -127,21 +127,98 @@ if (!function_exists('_material_extract_archive')) {
 }
 
 // ===================== API处理 =====================
+
+// ===== 统一滑动验证码校验辅助函数（auth / register / forgot_email / reset 共用） =====
+// 返回 true=通过，false=未通过（具体错误调用方自行 jsonOut）
+function authSlideVerify(string $purpose): bool {
+    if (!class_exists(\zxf\Captcha\Captcha::class)) return false;
+    $offset = trim((string)($_POST['captcha_r'] ?? ''));
+    $track = $_POST['slide_track'] ?? [];
+    if (is_string($track) && $track !== '') {
+        $decoded = json_decode($track, true);
+        if (is_array($decoded)) $track = $decoded;
+        else $track = [];
+    } elseif (!is_array($track)) {
+        $track = [];
+    }
+    if ($offset === '') return false;
+    $captcha = new \zxf\Captcha\Captcha([
+        'captcha_type'   => \zxf\Captcha\Captcha::TYPE_SLIDE,
+        'verify_mode'    => \zxf\Captcha\Captcha::VERIFY_BACKEND_ONLY,
+        'session_prefix' => 'auth_' . $purpose,
+        'security'       => ['fingerprint_check' => true],
+        'token_expire'   => 600,
+        'captcha_expire' => 600,
+        'max_error_count' => 5,
+        'slide' => ['fault_tolerance' => 6, 'track_verify' => true],
+    ]);
+    try {
+        $r = $captcha->verify($offset, null, [], $track);
+        return (bool)($r['success'] ?? false);
+    } catch (\Throwable $e) {
+        error_log("authSlideVerify($purpose): " . $e->getMessage());
+        return false;
+    }
+}
+
 if ($action) {
     try {
         switch ($action) {
+            // ==================== 滑动验证码生成（auth 通用，purpose 区分 session） ====================
+            // purpose: register | forgot_email | reset | login_fallback
+            case 'auth_captcha':
+                $purpose = trim((string)($_GET['purpose'] ?? $_POST['purpose'] ?? 'register'));
+                if (!in_array($purpose, ['register', 'forgot_email', 'reset'], true)) $purpose = 'register';
+                $ip = getClientIp();
+                $uid = isLoggedIn() ? (int)getUid() : 0;
+                if (!siteRateAllowed('auth_captcha_ip_' . $ip, 10, 300)) jsonOut(false, '验证码获取过于频繁');
+                if ($uid > 0 && !siteRateAllowed('auth_captcha_user_' . $uid, 15, 300)) jsonOut(false, '验证码获取过于频繁');
+
+                if (!class_exists(\zxf\Captcha\Captcha::class) || !function_exists('imagecreatetruecolor')) {
+                    jsonOut(false, '服务器验证码组件未就绪');
+                }
+                $captcha = new \zxf\Captcha\Captcha([
+                    'captcha_type'   => \zxf\Captcha\Captcha::TYPE_SLIDE,
+                    'bg_width'       => 310,
+                    'bg_height'      => 150,
+                    'mark_width'     => 44,
+                    'mark_height'    => 44,
+                    'verify_mode'    => \zxf\Captcha\Captcha::VERIFY_BACKEND_ONLY,
+                    'session_prefix' => 'auth_' . $purpose, // 按 purpose 隔离 session，register / forgot_email 互不干扰
+                    'security'       => ['fingerprint_check' => true],
+                    'token_expire'   => 600,
+                    'captcha_expire' => 600,
+                    'max_error_count' => 5,
+                    'slide' => ['fault_tolerance' => 6, 'track_verify' => true],
+                ]);
+                try {
+                    $data = $captcha->makeData();
+                } catch (\Throwable $e) {
+                    error_log('auth_captcha makeData: ' . $e->getMessage());
+                    jsonOut(false, '验证码生成失败');
+                }
+                if (!($data['success'] ?? true)) jsonOut(false, $data['message'] ?? '验证码生成失败');
+
+                jsonOut(true, '', [
+                    'purpose'      => $purpose,
+                    'type'         => $data['type'],
+                    'bg_image'     => $data['image_base64'],
+                    'pos_y'        => (int)($data['pos_y'] ?? 0),
+                    'bg_width'     => (int)$data['bg_width'],
+                    'bg_height'    => (int)$data['bg_height'],
+                    'mark_width'   => (int)$data['mark_width'],
+                    'mark_height'  => (int)$data['mark_height'],
+                    'hint'         => $data['hint'],
+                    'expires_in'   => 600,
+                ]);
+                break;
+
             // ==================== 找回密码: 邮箱 → 用户名自动匹配 ====================
             case 'lookup_reset_email':
                 $email = sanitizeInput($_POST['email'] ?? '');
-                $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
                 if (!validateEmail($email)) jsonOut(false, '邮箱格式不正确');
-                if (empty($captcha)) jsonOut(false, '请填写图片验证码');
-                // 图片验证码 (和 send_email_code 共用)
-                if (!isset($_SESSION['captcha_code']) || $_SESSION['captcha_code'] !== $captcha) {
-                    unset($_SESSION['captcha_code']);
-                    jsonOut(false, '图片验证码错误');
-                }
-                unset($_SESSION['captcha_code']);
+                // 滑动验证码校验（zxf/captcha, session_prefix=auth_forgot_email）
+                if (!authSlideVerify('forgot_email')) jsonOut(false, '滑动验证未通过，请重试');
                 $u = dbFetchOne($db, 'SELECT username, nickname FROM users WHERE email=?', [$email]);
                 if (!$u) jsonOut(false, '该邮箱未注册，请确认后再试');
                 jsonOut(true, '请确认是该账号', [
@@ -153,7 +230,6 @@ if ($action) {
             case 'send_email_code':
                 $email = sanitizeInput($_POST['email'] ?? '');
                 $purpose = sanitizeInput($_POST['purpose'] ?? 'register'); // register | reset
-                $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
                 $ip = getClientIp();
 
                 // --- 第一层：基础格式 ---
@@ -163,26 +239,18 @@ if ($action) {
                 if (empty($email)) {
                     jsonOut(false, '请填写邮箱');
                 }
-                if ($purpose === 'register' && empty($captcha)) {
-                    jsonOut(false, '请填写图片验证码');
-                }
                 if (!validateEmail($email)) {
                     jsonOut(false, '邮箱格式不正确');
                 }
 
-                // --- 第二层：IP 级总频率（captcha 过了再查，省资源） ---
+                // --- 第二层：IP 级总频率 ---
                 if (!checkEmailIpRate($ip)) {
                     jsonOut(false, '请求过于频繁，请稍后再试');
                 }
 
-                // --- 第三层：captcha 校验 (reset 流程已在 lookup_reset_email 消耗过 captcha, 这里跳过) ---
+                // --- 第三层：滑动验证码校验 (reset 流程已在 lookup_reset_email 消耗过 forgot_email, 这里跳过) ---
                 if ($purpose === 'register') {
-                    $captchaExpired = empty($_SESSION['captcha_expires']) || (int)$_SESSION['captcha_expires'] < time();
-                    $captchaOk = !$captchaExpired && isset($_SESSION['captcha_code']) && hash_equals((string)$_SESSION['captcha_code'], $captcha);
-                    unset($_SESSION['captcha_code'], $_SESSION['captcha_expires']);
-                    if (!$captchaOk) {
-                        jsonOut(false, '图片验证码错误或已过期');
-                    }
+                    if (!authSlideVerify('register')) jsonOut(false, '滑动验证未通过，请重试');
                 }
 
                 // --- 第四层：per-IP 去重邮箱检查（防轮换伪造邮箱绕过 per-email 冷却） ---
@@ -250,18 +318,13 @@ if ($action) {
                 $username = validateUsername((string)($_POST['username'] ?? ''));
                 $email = sanitizeInput($_POST['email'] ?? '');
                 $password = $_POST['password'] ?? '';
-                $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
                 $emailCode = trim($_POST['email_code'] ?? '');
 
-                if (empty($username) || empty($email) || empty($password) || empty($captcha) || empty($emailCode)) {
+                if (empty($username) || empty($email) || empty($password) || empty($emailCode)) {
                     jsonOut(false, "请完整填写注册信息+验证码");
                 }
-                
-                if (!isset($_SESSION['captcha_code']) || $_SESSION['captcha_code'] !== $captcha) {
-                    unset($_SESSION['captcha_code']);
-                    jsonOut(false, "图片验证码错误，请刷新");
-                }
-                unset($_SESSION['captcha_code']);
+                // 滑动验证码二次校验（backend_only 模式幂等，和 send_email_code 共用 session）
+                if (!authSlideVerify('register')) jsonOut(false, '滑动验证未通过，请刷新后重试');
 
                 if (!validateEmail($email)) {
                     jsonOut(false, "邮箱格式不正确");
@@ -384,16 +447,12 @@ if ($action) {
                 $newPassword = $_POST['new_password'] ?? '';
                 $captcha = strtoupper(trim($_POST['captcha'] ?? ''));
 
-                if (empty($email) || empty($emailCode) || empty($newPassword) || empty($captcha)) {
+                if (empty($email) || empty($emailCode) || empty($newPassword)) {
                     jsonOut(false, '请完整填写所有信息');
                 }
 
-                // 先过图片验证码
-                if (!isset($_SESSION['captcha_code']) || $_SESSION['captcha_code'] !== $captcha) {
-                    unset($_SESSION['captcha_code']);
-                    jsonOut(false, '图片验证码错误');
-                }
-                unset($_SESSION['captcha_code']);
+                // 滑动验证码校验（reset purpose，与 lookup 的 forgot_email 隔离）
+                if (!authSlideVerify('reset')) jsonOut(false, '滑动验证未通过，请刷新后重试');
 
                 if (!validateEmail($email)) {
                     jsonOut(false, '邮箱格式不正确');
