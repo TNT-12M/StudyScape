@@ -188,6 +188,30 @@ function ensureWritableDir(string $dir): bool {
     return false;
 }
 
+// zxf/captcha makeSlideData() 返回 3× bg_height 高的合成图（第一行=带缺口背景, 第二行=滑块填充, 第三行=完整背景）
+// 但前端 SlideCaptcha 只需要第一行（带缺口的完整背景）作为 background-image，所以裁前 bg_height 行再返回
+function zxfSlideBgCrop(string $dataUri, int $targetW, int $targetH): string {
+    $commaPos = strpos($dataUri, ',');
+    if ($commaPos === false) return $dataUri;
+    $prefix = substr($dataUri, 0, $commaPos + 1);
+    $raw = base64_decode(substr($dataUri, $commaPos + 1));
+    if ($raw === false || $raw === '') return $dataUri;
+    $src = @imagecreatefromstring($raw);
+    if (!$src) return $dataUri;
+    $crop = imagecreatetruecolor($targetW, $targetH);
+    imagealphablending($crop, false);
+    imagesavealpha($crop, true);
+    imagecopy($crop, $src, 0, 0, 0, 0, $targetW, $targetH);
+    imagedestroy($src);
+    ob_start();
+    $fmt = preg_match('#data:image/(png|webp);base64#i', $prefix, $m) ? strtolower($m[1]) : 'png';
+    if ($fmt === 'webp' && function_exists('imagewebp')) imagewebp($crop, null, 85);
+    else imagepng($crop, null, 6);
+    $blob = ob_get_clean();
+    imagedestroy($crop);
+    return $prefix . base64_encode($blob);
+}
+
 if ($action) {
     try {
         switch ($action) {
@@ -226,13 +250,18 @@ if ($action) {
                 }
                 if (!($data['success'] ?? true)) jsonOut(false, $data['message'] ?? '验证码生成失败');
 
+                // 裁 zxf/captcha 3× 合成图的第一行（带缺口背景）
+                $bgW = (int)$data['bg_width'];
+                $bgH = (int)$data['bg_height'];
+                $cropped = zxfSlideBgCrop((string)$data['image_base64'], $bgW, $bgH);
+
                 jsonOut(true, '', [
                     'purpose'      => $purpose,
                     'type'         => $data['type'],
-                    'bg_image'     => $data['image_base64'],
+                    'bg_image'     => $cropped,
                     'pos_y'        => (int)($data['pos_y'] ?? 0),
-                    'bg_width'     => (int)$data['bg_width'],
-                    'bg_height'    => (int)$data['bg_height'],
+                    'bg_width'     => $bgW,
+                    'bg_height'    => $bgH,
                     'mark_width'   => (int)$data['mark_width'],
                     'mark_height'  => (int)$data['mark_height'],
                     'hint'         => $data['hint'],
@@ -724,13 +753,17 @@ if ($action) {
                     jsonOut(false, $data['message'] ?? '验证码生成失败');
                 }
 
-                // zxf/captcha 返回 image_base64（带 data:image 前缀），不再需要手动生成
+                // 裁 zxf/captcha 3× 合成图的第一行（带缺口背景）
+                $bgW = (int)$data['bg_width'];
+                $bgH = (int)$data['bg_height'];
+                $cropped = zxfSlideBgCrop((string)$data['image_base64'], $bgW, $bgH);
+
                 jsonOut(true, '', [
                     'type'        => $data['type'],
-                    'bg_image'    => $data['image_base64'], // 直接给前端渲染
+                    'bg_image'    => $cropped,
                     'pos_y'       => (int)($data['pos_y'] ?? 0),
-                    'bg_width'    => (int)$data['bg_width'],
-                    'bg_height'   => (int)$data['bg_height'],
+                    'bg_width'    => $bgW,
+                    'bg_height'   => $bgH,
                     'mark_width'  => (int)$data['mark_width'],
                     'mark_height' => (int)$data['mark_height'],
                     'hint'        => $data['hint'],
