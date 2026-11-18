@@ -117,6 +117,11 @@ data/study_questions.db
 # ===== 大体积测试 PDF =====
 *真题*.pdf
 
+# ===== 运行时上传的图片（头像/二维码/站点图标，不入库） =====
+data/avatars/
+data/qr/
+data/branding/
+
 # ===== StudyScape 运行结果（正式源码之外的运行数据） =====
 data/ocr_batches/
 
