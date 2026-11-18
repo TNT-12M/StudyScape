@@ -9,6 +9,8 @@
       <n-button type="primary" size="large" @click="router.push('/app/practice')">开始刷题</n-button>
     </div>
 
+    <DailyQuote class="mt-16" />
+
     <n-grid :cols="4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
       <n-gi v-for="item in stats" :key="item.label" span="4 m:2 l:1">
         <n-card size="small">
@@ -62,6 +64,7 @@ import { TitleComponent, TooltipComponent, LegendComponent } from 'echarts/compo
 import VChart from 'vue-echarts'
 import { phpPublicApi } from '@/api/php-modules'
 import { useSessionStore } from '@/store'
+import DailyQuote from '@/components/common/DailyQuote.vue'
 
 use([CanvasRenderer, PieChart, TitleComponent, TooltipComponent, LegendComponent])
 

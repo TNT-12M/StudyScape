@@ -3,6 +3,8 @@
     <n-space vertical size="large">
       <n-alert v-if="loadError" type="warning" closable>{{ loadError }}</n-alert>
 
+      <DailyQuote />
+
       <!-- 顶部统计卡片 -->
       <n-grid :cols="4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
         <n-gi v-for="item in statCards" :key="item.label" span="4 s:2 m:1">
@@ -194,6 +196,7 @@ import {
 import VChart from 'vue-echarts'
 import { phpAdminApi } from '@/api/php-modules'
 import { useSessionStore } from '@/store'
+import DailyQuote from '@/components/common/DailyQuote.vue'
 
 use([CanvasRenderer, LineChart, PieChart, BarChart, TitleComponent, TooltipComponent, LegendComponent, GridComponent])
 
