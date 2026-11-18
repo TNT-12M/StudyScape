@@ -52,6 +52,24 @@ if ($action === 'qr_image') {
     exit;
 }
 
+// 全站站点图标（存放在项目 data/branding 目录，上传后全站生效）
+if ($action === 'site_icon') {
+    $iconDir = dirname(dirname(dirname(__DIR__))) . '/data/branding';
+    $matches = glob($iconDir . '/site-icon.*') ?: [];
+    $path = $matches[0] ?? '';
+    $info = $path !== '' ? @getimagesize($path) : false;
+    if (!$info) {
+        http_response_code(404);
+        exit;
+    }
+    header('Content-Type: ' . $info['mime']);
+    header('Content-Length: ' . (int)filesize($path));
+    header('Cache-Control: no-cache, max-age=0, must-revalidate');
+    header('X-Content-Type-Options: nosniff');
+    readfile($path);
+    exit;
+}
+
 // 用户头像（上传后由 GD 重新编码为 256×256 JPEG，存放于 data/avatars）
 if ($action === 'avatar_image') {
     $uid = (int)($_GET['uid'] ?? 0);

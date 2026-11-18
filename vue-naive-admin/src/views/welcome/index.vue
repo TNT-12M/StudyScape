@@ -4,7 +4,7 @@
     <header class="nav" :class="{ scrolled }">
       <div class="nav-inner">
         <a class="brand" @click="scrollTop">
-          <span class="brand-mark">境</span>
+          <span class="brand-mark"><SiteIcon /></span>
           <span class="brand-text">
             <strong>学境 · StudyScape</strong>
             <small>学习的新境界</small>
@@ -262,7 +262,7 @@
     <footer class="footer">
       <div class="footer-inner container">
         <div class="footer-brand">
-          <span class="brand-mark sm">境</span>
+          <span class="brand-mark sm"><SiteIcon /></span>
           <div>
             <strong>学境 · StudyScape</strong>
             <p>初高中智能学习平台 —— 学习的新境界</p>
@@ -286,6 +286,7 @@
 import katex from 'katex'
 import { onBeforeUnmount } from 'vue'
 import { phpPublicApi } from '@/api/php-modules'
+import SiteIcon from '@/components/common/SiteIcon.vue'
 import { useSessionStore } from '@/store'
 import 'katex/dist/katex.min.css'
 

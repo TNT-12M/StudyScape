@@ -6,7 +6,11 @@
  - Copyright © 2023 Ronnie Zhang(大脸怪) | https://isme.top
  --------------------------------->
 <template>
-  <div class="h-32 w-32 rounded-4 bg-primary">
-    <img src="@/assets/images/isme.png" alt="Logo">
+  <div class="h-32 w-32 rounded-4 bg-primary text-white">
+    <SiteIcon />
   </div>
 </template>
+
+<script setup>
+import SiteIcon from '@/components/common/SiteIcon.vue'
+</script>

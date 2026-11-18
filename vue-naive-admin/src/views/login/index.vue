@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="login-page">
     <a class="back-home" @click="router.push('/welcome')">
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 18l-6-6 6-6" /></svg>
@@ -7,7 +7,7 @@
     <n-card class="login-card" :bordered="false">
       <div class="login-heading">
         <div class="brand-mark">
-          境
+          <SiteIcon />
         </div>
         <div><h1>学境・StudyScape</h1><p>学习的新境界</p></div>
       </div>
@@ -76,7 +76,9 @@
             <!-- 已确认阶段: 显示匹配结果 + 发验证码 + 重置 -->
             <template v-else>
               <n-alert type="info" :bordered="false" style="margin-bottom: 12px">
-                <template #header>该邮箱注册的账号</template>
+                <template #header>
+                  该邮箱注册的账号
+                </template>
                 <div>用户名：<b>{{ resetForm.account }}</b><span v-if="resetForm.nickname">（{{ resetForm.nickname }}）</span></div>
               </n-alert>
               <div class="email-code-row">
@@ -94,7 +96,9 @@
               <n-button type="primary" block :loading="resetLoading" attr-type="submit">
                 重置密码
               </n-button>
-              <n-button block text type="info" @click="resetConfirmed = false">换个邮箱试试</n-button>
+              <n-button text block type="info" @click="resetConfirmed = false">
+                换个邮箱试试
+              </n-button>
             </template>
             <div class="back-login-row">
               <a @click="mode = 'login'">← 返回登录</a>
@@ -108,6 +112,7 @@
 
 <script setup>
 import { phpAuthApi } from '@/api/php-modules'
+import SiteIcon from '@/components/common/SiteIcon.vue'
 import { useSessionStore } from '@/store'
 
 const router = useRouter()
@@ -256,8 +261,8 @@ const resetCaptchaUrl = ref('')
 const resetLoading = ref(false)
 const resetEmailSending = ref(false)
 const resetCountdown = ref(0)
-const resetConfirmed = ref(false)   // 邮箱已确认 → 显示用户名
-const resetLooking = ref(false)     // lookupResetEmail loading
+const resetConfirmed = ref(false) // 邮箱已确认 → 显示用户名
+const resetLooking = ref(false) // lookupResetEmail loading
 let resetTimer = null
 
 function canLookupResetEmail() {
@@ -301,7 +306,7 @@ async function lookupResetEmail() {
     resetForm.account = result.data.username
     resetForm.nickname = result.data.nickname || ''
     resetConfirmed.value = true
-    resetForm.captcha = ''  // 图片验证码已用掉
+    resetForm.captcha = '' // 图片验证码已用掉
     $message.success(result.message || '请确认是这个账号')
   }
   catch (error) {

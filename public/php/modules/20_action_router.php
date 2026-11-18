@@ -1195,6 +1195,68 @@ if ($action) {
                 ]);
                 break;
 
+            // ---------- 全站站点图标上传（仅 root，存服务器 data/branding 目录） ----------
+            case 'admin_site_icon_upload':
+                requireRoot();
+                $iconFile = $_FILES['file'] ?? null;
+                if (!is_array($iconFile)) jsonOut(false, '图片超过服务器允许的上传大小（' . ini_get('upload_max_filesize') . '），请压缩后重试');
+                $iconErr = (int)($iconFile['error'] ?? UPLOAD_ERR_NO_FILE);
+                if ($iconErr === UPLOAD_ERR_INI_SIZE || $iconErr === UPLOAD_ERR_FORM_SIZE) {
+                    jsonOut(false, '图片超过服务器允许的上传大小（' . ini_get('upload_max_filesize') . '），请压缩后重试');
+                }
+                if ($iconErr !== UPLOAD_ERR_OK) jsonOut(false, '请选择要上传的图标图片');
+                if (!is_uploaded_file($iconFile['tmp_name'])) jsonOut(false, '非法的上传请求');
+                if ((int)($iconFile['size'] ?? 0) <= 0 || (int)$iconFile['size'] > 2 * 1024 * 1024) jsonOut(false, '图标图片不能为空且不能超过 2MB');
+                $iconInfo = @getimagesize($iconFile['tmp_name']);
+                $iconMimeMap = ['image/png' => 'png', 'image/jpeg' => 'jpg', 'image/webp' => 'webp'];
+                $iconMime = $iconInfo['mime'] ?? '';
+                if (!$iconInfo || !isset($iconMimeMap[$iconMime])) jsonOut(false, '仅支持 PNG / JPG / WEBP 图片');
+                $iconW = (int)($iconInfo[0] ?? 0);
+                $iconH = (int)($iconInfo[1] ?? 0);
+                if ($iconW < 64 || $iconH < 64) jsonOut(false, '图标尺寸过小，请上传 64×64 以上的图片');
+                if ($iconW > 4096 || $iconH > 4096 || $iconW * $iconH > 16000000) jsonOut(false, '图标尺寸过大，请控制在 4096×4096 以内');
+                if (!function_exists('imagecreatefromstring')) jsonOut(false, '服务器未启用 GD 扩展，无法处理图标');
+                $iconSrc = @imagecreatefromstring(@file_get_contents($iconFile['tmp_name']));
+                if (!$iconSrc) jsonOut(false, '图片内容校验失败，请更换图片后重试');
+                $srcW = imagesx($iconSrc);
+                $srcH = imagesy($iconSrc);
+                if ($srcW !== $iconW || $srcH !== $iconH) {
+                    imagedestroy($iconSrc);
+                    jsonOut(false, '图片内容校验失败，请更换图片后重试');
+                }
+                // 居中裁成正方形并重新编码为 256×256 PNG，丢弃 EXIF 与任何附加数据
+                $side = min($srcW, $srcH);
+                $sx = (int)(($srcW - $side) / 2);
+                $sy = (int)(($srcH - $side) / 2);
+                $iconDst = imagecreatetruecolor(256, 256);
+                imagealphablending($iconDst, false);
+                imagesavealpha($iconDst, true);
+                $iconTransparent = imagecolorallocatealpha($iconDst, 0, 0, 0, 127);
+                imagefilledrectangle($iconDst, 0, 0, 255, 255, $iconTransparent);
+                imagecopyresampled($iconDst, $iconSrc, 0, 0, $sx, $sy, 256, 256, $side, $side);
+                imagedestroy($iconSrc);
+                $iconDir = dirname(dirname(dirname(__DIR__))) . '/data/branding';
+                if (!is_dir($iconDir) && !@mkdir($iconDir, 0750, true) && !is_dir($iconDir)) {
+                    imagedestroy($iconDst);
+                    jsonOut(false, '图标目录创建失败，请检查 data 目录权限');
+                }
+                foreach (glob($iconDir . '/site-icon.*') ?: [] as $iconOld) @unlink($iconOld);
+                $iconPath = $iconDir . '/site-icon.png';
+                if (!@imagepng($iconDst, $iconPath, 6)) {
+                    imagedestroy($iconDst);
+                    jsonOut(false, '图标保存失败，请检查服务器目录权限');
+                }
+                imagedestroy($iconDst);
+                @chmod($iconPath, 0644);
+                $iconCheck = @getimagesize($iconPath);
+                if (!$iconCheck || ($iconCheck['mime'] ?? '') !== 'image/png') jsonOut(false, '图标校验失败，请重试');
+                log_admin_action('upload_site_icon');
+                jsonOut(true, '网站图标已更新，全站立即生效', [
+                    'url' => '/api.php?action=site_icon',
+                    'version' => (int)filemtime($iconPath),
+                ]);
+                break;
+
             // ---------- 公告管理（仅 root） ----------
             case 'admin_announcement_list':
                 $adminUid = requireRoot();
