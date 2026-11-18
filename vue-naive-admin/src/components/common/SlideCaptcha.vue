@@ -7,13 +7,15 @@
       @mousedown="startDrag"
       @touchstart.prevent="startDragTouch"
     >
-      <img
+      <!-- 滑块：只靠 CSS 画形状，不再依赖后端返回 piece 图 -->
+      <div
         class="slide-piece"
-        :src="pieceImage"
-        :style="{ left: `${pieceX}px`, top: `${trackY}px`, width: `${pieceSize}px`, height: `${pieceSize}px` }"
-        draggable="false"
-        alt="拼图块"
+        :style="{ left: `${pieceX}px`, top: `${trackY}px`, width: `${markWidth}px`, height: `${markHeight}px` }"
+        @mousedown.stop
+        @touchstart.stop
       >
+        <div class="piece-inner" />
+      </div>
       <button
         class="slide-refresh"
         title="换一张验证码"
@@ -45,10 +47,10 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 const props = defineProps({
   bgImage: { type: String, default: '' },
-  pieceImage: { type: String, default: '' },
   bgWidth: { type: Number, default: 310 },
   bgHeight: { type: Number, default: 150 },
-  pieceSize: { type: Number, default: 44 },
+  markWidth: { type: Number, default: 44 },
+  markHeight: { type: Number, default: 44 },
   trackY: { type: Number, default: 50 },
 })
 
@@ -59,9 +61,20 @@ const pieceX = ref(0)
 const dragging = ref(false)
 const success = ref(false)
 let startClientX = 0
+let dragStartTs = 0
+let trackPoints = [] // [{x, y, t}] 轨迹数组
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v))
+}
+
+function recordTrack(x, y) {
+  // 只在拖动过程中采样轨迹（节流 ~每 20ms 一个点）
+  const now = performance.now()
+  if (now - (dragStartTs || now) < 15)
+    return
+  // x, y 为轨道坐标系内的像素（滑块中心偏移）
+  trackPoints.push({ x: Math.round(x), y: Math.round(y), t: Math.round(now - dragStartTs) })
 }
 
 function startDrag(e) {
@@ -71,6 +84,9 @@ function startDrag(e) {
     return
   dragging.value = true
   startClientX = e.clientX - pieceX.value
+  dragStartTs = performance.now()
+  trackPoints = []
+  recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
   window.addEventListener('mousemove', onDrag)
   window.addEventListener('mouseup', onEnd)
 }
@@ -83,6 +99,9 @@ function startDragTouch(e) {
     return
   dragging.value = true
   startClientX = t.clientX - pieceX.value
+  dragStartTs = performance.now()
+  trackPoints = []
+  recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
   window.addEventListener('touchmove', onDragTouch, { passive: false })
   window.addEventListener('touchend', onEnd)
   window.addEventListener('touchcancel', onEnd)
@@ -91,7 +110,10 @@ function startDragTouch(e) {
 function onDrag(e) {
   if (!dragging.value)
     return
-  pieceX.value = clamp(e.clientX - startClientX, 0, props.bgWidth - props.pieceSize)
+  const prevX = pieceX.value
+  pieceX.value = clamp(e.clientX - startClientX, 0, props.bgWidth - props.markWidth)
+  if (pieceX.value !== prevX)
+    recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
 }
 
 function onDragTouch(e) {
@@ -101,7 +123,10 @@ function onDragTouch(e) {
   const t = e.touches[0]
   if (!t)
     return
-  pieceX.value = clamp(t.clientX - startClientX, 0, props.bgWidth - props.pieceSize)
+  const prevX = pieceX.value
+  pieceX.value = clamp(t.clientX - startClientX, 0, props.bgWidth - props.markWidth)
+  if (pieceX.value !== prevX)
+    recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
 }
 
 function onEnd() {
@@ -113,17 +138,19 @@ function onEnd() {
   window.removeEventListener('touchmove', onDragTouch)
   window.removeEventListener('touchend', onEnd)
   window.removeEventListener('touchcancel', onEnd)
-  // 防抖：必须有明显位移才提交
+  recordTrack(pieceX.value + props.markWidth / 2, props.trackY + props.markHeight / 2)
   if (pieceX.value >= 5) {
-    emit('submit', pieceX.value)
+    // zxf/captcha 后端用 captcha_r 作为滑动偏移量 + slide_track 轨迹数组
+    emit('submit', {
+      captcha_r: pieceX.value,
+      slide_track: trackPoints,
+    })
   }
 }
 
 onMounted(() => {
-  // 防止文本选中导致拖动卡顿
-  if (trackRef.value) {
+  if (trackRef.value)
     trackRef.value.addEventListener('dragstart', e => e.preventDefault())
-  }
 })
 
 onBeforeUnmount(() => {
@@ -134,15 +161,13 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchcancel', onEnd)
 })
 
-// 外部调用：标记验证成功（禁用后续拖动）
 defineExpose({
-  markSuccess() {
-    success.value = true
-  },
+  markSuccess() { success.value = true },
   reset() {
     success.value = false
     pieceX.value = 0
     dragging.value = false
+    trackPoints = []
   },
 })
 </script>
@@ -166,12 +191,22 @@ defineExpose({
 }
 .slide-piece {
   position: absolute;
-  pointer-events: none;
+  pointer-events: auto;
+  /* 用 zxf/captcha 包提供的滑块形状图 */
+  background-image: url('/StudyScape/vendor/zxf/captcha/resources/assets/images/mark_02.png');
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
   image-rendering: -webkit-optimize-contrast;
   image-rendering: crisp-edges;
-  border-radius: 4px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
-  transition: box-shadow 0.15s;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
+  cursor: grab;
+}
+.slide-piece:active {
+  cursor: grabbing;
+}
+.piece-inner {
+  width: 100%;
+  height: 100%;
 }
 .slide-refresh {
   position: absolute;

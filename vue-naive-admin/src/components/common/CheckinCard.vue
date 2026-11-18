@@ -49,17 +49,17 @@
       <SlideCaptcha
         ref="captchaRef"
         :bg-image="captchaBg"
-        :piece-image="captchaPiece"
-        :bg-width="310"
-        :bg-height="150"
-        :piece-size="44"
-        :track-y="50"
+        :bg-width="captchaBgWidth"
+        :bg-height="captchaBgHeight"
+        :mark-width="captchaMarkWidth"
+        :mark-height="captchaMarkHeight"
+        :track-y="captchaPosY"
         :style="{ display: 'inline-block' }"
         @submit="onCaptchaSubmit"
         @refresh="loadCaptcha"
       />
       <p class="captcha-tip">
-        把拼图拖到缺口位置即可完成验证。积分奖励 = 5 + 连续奖励（封顶 7 天）
+        {{ captchaHint || '把滑块拖到缺口位置即可完成验证' }}。积分奖励 = 5 + 连续奖励（封顶 7 天）
       </p>
     </div>
 
@@ -86,8 +86,12 @@ import SlideCaptcha from '@/components/common/SlideCaptcha.vue'
 
 const status = ref(null)
 const captchaBg = ref('')
-const captchaPiece = ref('')
-const captchaToken = ref('')
+const captchaBgWidth = ref(310)
+const captchaBgHeight = ref(150)
+const captchaMarkWidth = ref(44)
+const captchaMarkHeight = ref(44)
+const captchaPosY = ref(50)
+const captchaHint = ref('')
 const captchaReady = ref(false)
 const loadingCaptcha = ref(false)
 const submitting = ref(false)
@@ -108,13 +112,10 @@ const availableAtLabel = computed(() => {
 async function loadStatus() {
   try {
     const result = await phpCheckinApi.status()
-    if (result.success) {
+    if (result.success)
       status.value = result.data
-    }
   }
-  catch {
-    // 静默：签到卡片加载失败不阻塞页面
-  }
+  catch { /* 静默 */ }
 }
 
 async function loadCaptcha() {
@@ -126,9 +127,14 @@ async function loadCaptcha() {
       $message.error(result.message || '验证码加载失败')
       return
     }
+    // zxf/captcha 返回带缺口的完整背景图 + 位置参数（MIT, zhaoxianfang）
     captchaBg.value = result.data.bg_image
-    captchaPiece.value = result.data.piece_image
-    captchaToken.value = result.data.token
+    captchaBgWidth.value = result.data.bg_width || 310
+    captchaBgHeight.value = result.data.bg_height || 150
+    captchaMarkWidth.value = result.data.mark_width || 44
+    captchaMarkHeight.value = result.data.mark_height || 44
+    captchaPosY.value = result.data.pos_y || 50
+    captchaHint.value = result.data.hint || ''
     captchaReady.value = true
   }
   catch {
@@ -145,18 +151,15 @@ function startCheckin() {
   loadCaptcha()
 }
 
-async function onCaptchaSubmit(pieceX) {
+// SlideCaptcha 现在 emit { captcha_r, slide_track }
+async function onCaptchaSubmit(payload) {
   if (submitting.value)
     return
-  if (!captchaToken.value) {
-    $message.warning('请先获取验证码')
-    return
-  }
   submitting.value = true
   try {
     const result = await phpCheckinApi.submit({
-      captcha_token: captchaToken.value,
-      piece_x: pieceX,
+      captcha_r: payload.captcha_r,
+      slide_track: JSON.stringify(payload.slide_track || []),
     })
     if (result.success) {
       $message.success(result.message)
@@ -167,15 +170,12 @@ async function onCaptchaSubmit(pieceX) {
         streak: result.data?.streak ?? status.value?.streak ?? 1,
         total_checkins: (status.value?.total_checkins ?? 0) + 1,
         points_awarded_today: result.data?.awarded ?? 0,
-        available_at: result.data?.available_at,
       }
       captchaReady.value = false
-      captchaToken.value = ''
       captchaRef.value?.markSuccess?.()
     }
     else {
       $message.error(result.message || '验证未通过，请重试')
-      // token 一次性消费后自动换新
       loadCaptcha()
     }
   }
@@ -187,7 +187,7 @@ async function onCaptchaSubmit(pieceX) {
   }
 }
 
-// 自动刷新验证码（防止 token 过期）
+// 自动刷新验证码（防过期）
 watch(captchaReady, (val) => {
   if (!val)
     return
@@ -196,7 +196,7 @@ watch(captchaReady, (val) => {
   refreshTimer = setTimeout(() => {
     if (captchaReady.value && !checkedInToday.value)
       loadCaptcha()
-  }, 180_000) // 3 分钟后自动换（后端 10 分钟过期，提前换掉更稳）
+  }, 180_000)
 })
 
 onMounted(() => {

@@ -602,94 +602,53 @@ if ($action) {
                 $uid = (int)getUid();
                 if (!siteRateAllowed('checkin_captcha_user_' . $uid, 10, 300)) jsonOut(false, '验证码获取过于频繁，请稍后再试');
 
-                if (!function_exists('imagecreatetruecolor') || !function_exists('imagepng')) {
-                    jsonOut(false, '服务器未启用 GD 扩展，暂时无法使用验证码');
+                if (!class_exists(\zxf\Captcha\Captcha::class) || !function_exists('imagecreatetruecolor')) {
+                    jsonOut(false, '服务器验证码组件未就绪，请稍后再试');
                 }
 
-                // 尺寸（水平滑动拼图：只校验 X，Y 固定）
-                $bgW = 310;
-                $bgH = 150;
-                $pieceSize = 44;
-                $trackY = 50; // 拼图块在追踪区域的固定 Y 坐标
-                $gapX = random_int(55, $bgW - $pieceSize - 25);
+                // 用 zxf/captcha 生成滑动验证码（MIT, zhaoxianfang）
+                // backend_only 模式：verify() 成功后服务端 session 标记 'used'，幂等放行
+                $captcha = new \zxf\Captcha\Captcha([
+                    'captcha_type'   => \zxf\Captcha\Captcha::TYPE_SLIDE,
+                    'bg_width'       => 310,
+                    'bg_height'      => 150,
+                    'mark_width'     => 44,
+                    'mark_height'    => 44,
+                    'verify_mode'    => \zxf\Captcha\Captcha::VERIFY_BACKEND_ONLY,
+                    'session_prefix' => 'checkin',
+                    'security'       => ['fingerprint_check' => true],
+                    'token_expire'   => 600,
+                    'captcha_expire' => 600,
+                    'max_error_count' => 5,
+                    'slide' => [
+                        'fault_tolerance'    => 6,
+                        'track_verify'       => true,
+                        'track_strictness'  => 'normal',
+                    ],
+                ]);
 
-                // 1) 生成带渐变 + 装饰的背景
-                $bg = imagecreatetruecolor($bgW, $bgH);
-                imagealphablending($bg, false);
-                imagesavealpha($bg, true);
-                // 渐变起止 RGB
-                $topR = 56; $topG = 128; $topB = 180;
-                $midR = 28; $midG = 66; $midB = 120;
-                $botR = 12; $botG = 30; $botB = 70;
-                for ($y = 0; $y < $bgH; $y++) {
-                    $t = $y / $bgH;
-                    $half = $t < 0.5 ? $t * 2 : 1.0;
-                    $other = $t < 0.5 ? 0.0 : ($t - 0.5) * 2;
-                    $r = (int)($topR * (1 - $half) + $midR * $half);
-                    $g = (int)($topG * (1 - $half) + $midG * $half);
-                    $b = (int)($topB * (1 - $half) + $midB * $half);
-                    $r = (int)($r * (1 - $other) + $botR * $other);
-                    $g = (int)($g * (1 - $other) + $botG * $other);
-                    $b = (int)($b * (1 - $other) + $botB * $other);
-                    imageline($bg, 0, $y, $bgW - 1, $y, imagecolorallocate($bg, max(0, min(255, $r)), max(0, min(255, $g)), max(0, min(255, $b))));
-                }
-                // 随机装饰圆圈（增加视觉干扰 + 防 OCR）
-                for ($i = 0; $i < 6; $i++) {
-                    $cx = random_int(10, $bgW - 10);
-                    $cy = random_int(10, $bgH - 10);
-                    $rad = random_int(8, 28);
-                    $alpha = imagecolorallocatealpha($bg, random_int(200, 255), random_int(200, 255), random_int(200, 255), random_int(80, 120));
-                    imagefilledellipse($bg, $cx, $cy, $rad * 2, $rad * 2, $alpha);
-                }
-                // 随机横线
-                for ($i = 0; $i < 5; $i++) {
-                    $ly = random_int(5, $bgH - 5);
-                    $alpha = imagecolorallocatealpha($bg, random_int(180, 255), random_int(180, 255), random_int(180, 255), random_int(90, 127));
-                    imageline($bg, random_int(0, 40), $ly, $bgW - random_int(0, 40), $ly, $alpha);
+                try {
+                    $data = $captcha->makeData();
+                } catch (\Throwable $e) {
+                    error_log('checkin_captcha makeData: ' . $e->getMessage());
+                    jsonOut(false, '验证码生成失败，请刷新重试');
                 }
 
-                // 2) 从背景裁出拼图块（水平位置随机，Y 固定）
-                $piece = imagecreatetruecolor($pieceSize, $pieceSize);
-                imagealphablending($piece, false);
-                imagesavealpha($piece, true);
-                imagecopy($piece, $bg, 0, 0, $gapX, $trackY, $pieceSize, $pieceSize);
+                if (!($data['success'] ?? true)) {
+                    jsonOut(false, $data['message'] ?? '验证码生成失败');
+                }
 
-                // 3) 在背景上挖洞（深灰 + 阴影）
-                $holeFill = imagecolorallocate($bg, 20, 30, 50);
-                imagefilledrectangle($bg, $gapX, $trackY, $gapX + $pieceSize - 1, $trackY + $pieceSize - 1, $holeFill);
-                $holeBorder = imagecolorallocate($bg, 120, 160, 200);
-                imagerectangle($bg, $gapX, $trackY, $gapX + $pieceSize - 1, $trackY + $pieceSize - 1, $holeBorder);
-
-                // 4) 给拼图块加外框，让用户知道目标尺寸
-                $pieceBorder = imagecolorallocate($piece, 220, 235, 255);
-                imagerectangle($piece, 0, 0, $pieceSize - 1, $pieceSize - 1, $pieceBorder);
-
-                // 5) 输出 PNG 到内存（no temp file）
-                $bgBlob = capturePng($bg);
-                $pieceBlob = capturePng($piece);
-                imagedestroy($bg);
-                imagedestroy($piece);
-                if ($bgBlob === '' || $pieceBlob === '') jsonOut(false, '验证码生成失败，请重试');
-
-                // 6) 存 session + token（一次性，10 分钟过期）
-                $captchaToken = bin2hex(random_bytes(16));
-                $_SESSION['checkin_captcha'] = [
-                    'token'      => $captchaToken,
-                    'gap_x'      => $gapX,
-                    'track_y'    => $trackY,
-                    'piece_size' => $pieceSize,
-                    'bg_width'   => $bgW,
-                    'expires_at' => time() + 600,
-                    'consumed'   => false,
-                ];
-
+                // zxf/captcha 返回 image_base64（带 data:image 前缀），不再需要手动生成
                 jsonOut(true, '', [
-                    'bg_image'   => 'data:image/png;base64,' . base64_encode($bgBlob),
-                    'piece_image'=> 'data:image/png;base64,' . base64_encode($pieceBlob),
-                    'token'      => $captchaToken,
-                    'bg_width'   => $bgW,
-                    'piece_size' => $pieceSize,
-                    'expires_in' => 600,
+                    'type'        => $data['type'],
+                    'bg_image'    => $data['image_base64'], // 直接给前端渲染
+                    'pos_y'       => (int)($data['pos_y'] ?? 0),
+                    'bg_width'    => (int)$data['bg_width'],
+                    'bg_height'   => (int)$data['bg_height'],
+                    'mark_width'  => (int)$data['mark_width'],
+                    'mark_height' => (int)$data['mark_height'],
+                    'hint'        => $data['hint'],
+                    'expires_in'  => 600,
                 ]);
                 break;
 
@@ -705,60 +664,64 @@ if ($action) {
                 if (!siteRateAllowed('checkin_submit_user_' . $uid, 3, 300)) jsonOut(false, '签到尝试过于频繁，请稍后再试');
                 if (!siteRateAllowed('checkin_submit_ip_' . $ip, 10, 300)) jsonOut(false, '签到尝试过于频繁，请稍后再试');
 
-                $token = trim((string)($_POST['captcha_token'] ?? ''));
-                $submittedX = (int)($_POST['piece_x'] ?? -9999);
-                if ($token === '' || $submittedX < -1) jsonOut(false, '参数不完整，请刷新验证码重试');
-
-                $stored = $_SESSION['checkin_captcha'] ?? null;
-                if (!$stored || $stored['token'] !== $token) jsonOut(false, '验证码已失效，请重新获取');
-                if ($stored['consumed']) jsonOut(false, '验证码已使用过，请重新获取');
-                if (time() > (int)($stored['expires_at'] ?? 0)) {
-                    unset($_SESSION['checkin_captcha']);
-                    jsonOut(false, '验证码已过期，请重新获取');
+                // 用 zxf/captcha verify() 做服务端硬校验（MIT, zhaoxianfang）
+                $offset = trim((string)($_POST['captcha_r'] ?? $_POST['piece_x'] ?? ''));
+                $slideTrack = $_POST['slide_track'] ?? $_POST['track'] ?? [];
+                if (is_string($slideTrack) && $slideTrack !== '') {
+                    $decoded = json_decode($slideTrack, true);
+                    if (is_array($decoded)) $slideTrack = $decoded;
+                    else $slideTrack = [];
+                } elseif (!is_array($slideTrack)) {
+                    $slideTrack = [];
                 }
+                if ($offset === '') jsonOut(false, '请完成滑动验证后再提交');
 
-                // 校验水平滑动位置（水平 ±6px 容差）
-                $tolerance = 6;
-                $deltaX = abs($submittedX - (int)$stored['gap_x']);
-                if ($deltaX > $tolerance) {
-                    $stored['consumed'] = true;
-                    $_SESSION['checkin_captcha'] = $stored; // 已用但不清，让前端知道失败原因
-                    jsonOut(false, '滑动验证未通过，请重试');
+                $captcha = new \zxf\Captcha\Captcha([
+                    'captcha_type'   => \zxf\Captcha\Captcha::TYPE_SLIDE,
+                    'verify_mode'    => \zxf\Captcha\Captcha::VERIFY_BACKEND_ONLY,
+                    'session_prefix' => 'checkin',     // 同 captcha action，共用同一份 session 数据
+                    'security'       => ['fingerprint_check' => true],
+                    'token_expire'   => 600,
+                    'captcha_expire' => 600,
+                    'max_error_count' => 5,
+                    'slide' => [
+                        'fault_tolerance'   => 6,
+                        'track_verify'      => true,
+                        'track_strictness' => 'normal',
+                    ],
+                ]);
+                try {
+                    $verify = $captcha->verify($offset, null, [], $slideTrack);
+                } catch (\Throwable $e) {
+                    error_log('checkin_submit verify: ' . $e->getMessage());
+                    jsonOut(false, '验证码校验服务异常，请刷新重试');
                 }
-
-                // 标记 token 一次性消费
-                unset($_SESSION['checkin_captcha']);
+                if (!($verify['success'] ?? false)) {
+                    jsonOut(false, $verify['message'] ?? '滑动验证未通过，请重试');
+                }
 
                 // 幂等签到（UNIQUE 约束兜底）
                 $tz = new DateTimeZone('Asia/Shanghai');
                 $todayStr = (new DateTimeImmutable('today', $tz))->format('Y-m-d');
                 $prevDay = (new DateTimeImmutable('yesterday', $tz))->format('Y-m-d');
 
-                // 今天是否已签到
                 $todayExists = dbFetchOne($db, 'SELECT id FROM checkin_records WHERE user_id=? AND checkin_date=?', [$uid, $todayStr]);
                 if ($todayExists) jsonOut(false, '今天已经签到过了，明天再来吧');
 
-                // 连胜：昨天是否签到
                 $yesterdayRow = dbFetchOne($db, 'SELECT streak_days FROM checkin_records WHERE user_id=? AND checkin_date=?', [$uid, $prevDay]);
                 $streak = $yesterdayRow ? (int)($yesterdayRow['streak_days'] ?? 0) + 1 : 1;
-                // 防止长时间断签后补签仍显示连胜（每天一查，自然归零）
-                // 封顶 7 天为一个奖励周期，之后重新计数（或保持 7，此处保持 7 并给满额奖励）
                 $effectiveStreak = min($streak, 7);
-                // 积分公式：基础 5 + 连胜奖励 (streak-1)*3，封顶 5 + 18 = 23
-                $basePoints = 5;
-                $streakBonus = ($effectiveStreak - 1) * 3;
-                $award = $basePoints + $streakBonus;
+                $award = 5 + ($effectiveStreak - 1) * 3;
 
                 try {
                     $db->exec('BEGIN IMMEDIATE');
                     dbQuery($db, 'INSERT INTO checkin_records(user_id, checkin_date, points_awarded, streak_days, captcha_token) VALUES(?,?,?,?,?)', [
-                        $uid, $todayStr, $award, $streak, $token,
+                        $uid, $todayStr, $award, $streak, substr(bin2hex(random_bytes(8)), 0, 16),
                     ]);
                     dbQuery($db, 'UPDATE users SET points = points + ? WHERE id=?', [$award, $uid]);
                     $db->exec('COMMIT');
                 } catch (Throwable $e) {
                     try { $db->exec('ROLLBACK'); } catch (Throwable $_) {}
-                    // UNIQUE 冲突 → 已签到
                     if (str_contains($e->getMessage(), 'UNIQUE')) {
                         jsonOut(false, '今天已经签到过了，明天再来吧');
                     }

@@ -19,6 +19,17 @@ spl_autoload_register(function ($class) {
     if (is_file($file)) require $file;
 });
 
+// ====== PSR-4 Autoloader for zxf/captcha ======
+// MIT License (zhaoxianfang), vendor 源码位于 vendor/zxf/captcha/
+spl_autoload_register(function ($class) {
+    $prefix = 'zxf\\Captcha\\';
+    $baseDir = __DIR__ . '/../../vendor/zxf/captcha/src/';
+    if (strncmp($prefix, $class, strlen($prefix)) !== 0) return;
+    $relative = substr($class, strlen($prefix));
+    $file = $baseDir . str_replace('\\', '/', $relative) . '.php';
+    if (is_file($file)) require $file;
+});
+
 // ===================== 配置加载器 =====================
 // 统一读取 server.env / smtp.env / AccessKey.env 格式 (KEY=VALUE)
 // 与 Python 端读取格式兼容
