@@ -23,7 +23,7 @@ spl_autoload_register(function ($class) {
 // MIT License (zhaoxianfang), vendor 源码位于 vendor/zxf/captcha/
 spl_autoload_register(function ($class) {
     $prefix = 'zxf\\Captcha\\';
-    $baseDir = __DIR__ . '/../../vendor/zxf/captcha/src/';
+    $baseDir = __DIR__ . '/../vendor/zxf/captcha/src/';
     if (strncmp($prefix, $class, strlen($prefix)) !== 0) return;
     $relative = substr($class, strlen($prefix));
     $file = $baseDir . str_replace('\\', '/', $relative) . '.php';
