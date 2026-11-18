@@ -1,4 +1,4 @@
-﻿﻿<template>
+<template>
   <div class="admin-shell">
     <!-- 移动端遮罩 -->
     <div v-if="mobileSidebarOpen" class="sidebar-mask" @click="mobileSidebarOpen = false" />
@@ -92,7 +92,9 @@
                     <n-list size="small">
                       <n-list-item v-for="item in personalNotifs" :key="`not-${item.id}`" class="notify-item">
                         <n-thing :title="item.title" :description="item.body" />
-                        <button class="notify-del-btn" title="删除这条通知" @click.stop="clearNotification(item.id)">×</button>
+                        <button class="notify-del-btn" title="删除这条通知" @click.stop="clearNotification(item.id)">
+                          ×
+                        </button>
                       </n-list-item>
                     </n-list>
                   </div>
@@ -123,16 +125,32 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { phpNotificationApi } from '@/api/php-modules'
+import { useIsMobile } from '@/composables/useIsMobile'
 import { SessionProfileLink } from '@/layouts/components'
 import { useSessionStore } from '@/store'
 
 const router = useRouter()
+const route = useRoute()
 const session = useSessionStore()
+const { isMobile } = useIsMobile()
 const notifications = ref([])
 const unreadCount = ref(0)
 const mobileSidebarOpen = ref(false)
+
+// 切路由时自动关闭移动侧边栏
+watch(() => route.path, () => {
+  if (isMobile.value)
+    mobileSidebarOpen.value = false
+})
+
+// 切到 desktop 时自动关闭抽屉
+watch(isMobile, (v) => {
+  if (!v)
+    mobileSidebarOpen.value = false
+})
 
 // 公告（置顶）
 const announcements = computed(() =>
@@ -144,12 +162,7 @@ const personalNotifs = computed(() =>
 )
 
 function closeOnMobile() {
-  if (window.innerWidth <= 768)
-    mobileSidebarOpen.value = false
-}
-
-function handleResize() {
-  if (window.innerWidth > 768)
+  if (isMobile.value)
     mobileSidebarOpen.value = false
 }
 
@@ -173,19 +186,17 @@ async function clearNotification(id) {
   catch { /* 静默失败 */ }
 }
 async function clearAllNotifications() {
-  if (!confirm('确认清空所有通知吗？（公告不会被清除）')) return
+  if (!confirm('确认清空所有通知吗？（公告不会被清除）'))
+    return
   try {
     await phpNotificationApi.clear()
     await loadNotifications()
   }
   catch { /* 静默失败 */ }
 }
+
 onMounted(() => {
   loadNotifications()
-  window.addEventListener('resize', handleResize)
-})
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', handleResize)
 })
 
 async function logout() {
@@ -473,7 +484,9 @@ async function logout() {
   display: none;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 .notify-item:hover .notify-del-btn {
   display: flex;
