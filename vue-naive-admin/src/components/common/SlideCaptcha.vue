@@ -1,12 +1,11 @@
 <template>
-  <div class="slide-captcha" :class="{ 'is-success': success, 'is-disabled': disabled }">
-    <!-- 图片区域：背景 + 拼图块 -->
+  <div class="slide-captcha" :class="{ 'is-success': success, 'is-fail': fail, 'is-disabled': verifying || disabled }">
+    <!-- 图片区：背景 + 拼图块 + 成功/失败叠层 -->
     <div
       ref="trackRef"
       class="slide-track"
       :style="{ width: `${bgWidth}px`, height: `${bgHeight}px`, backgroundImage: `url(${bgImage})` }"
     >
-      <!-- 拼图块：用后端 gocaptcha 返回的 tileImage（PNG 带 mask） -->
       <div
         class="slide-piece"
         :style="{
@@ -19,20 +18,40 @@
       >
         <div v-if="!tileImage" class="piece-inner" />
       </div>
-      <button class="slide-refresh" title="换一张验证码" type="button" @click.stop="onRefresh">
+      <button class="slide-refresh" title="换一张" type="button" :disabled="verifying" @click.stop="onRefresh">
         ↻
       </button>
+
+      <!-- 成功/失败叠层：后端接口返回后显示 -->
+      <div v-if="success || fail" class="slide-result">
+        <div class="result-icon" :class="[success ? 'result-ok' : 'result-bad']">
+          <svg v-if="success" viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 12 10 18 20 6" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="6" y1="6" x2="18" y2="18" />
+            <line x1="6" y1="18" x2="18" y2="6" />
+          </svg>
+        </div>
+        <div class="result-text" :class="[success ? 'result-ok' : 'result-bad']">
+          {{ success ? '验证通过' : '验证失败' }}
+        </div>
+      </div>
     </div>
 
-    <!-- 底部滑轨 + 滑块手柄（经典样式） -->
+    <!-- 底部滑轨 -->
     <div class="slide-bar" :style="{ width: `${bgWidth}px` }">
       <div class="slide-bar-track">
-        <div class="slide-bar-fill" :style="{ width: `${Math.min(handleX + handleWidth, bgWidth)}px` }" />
-        <span class="slide-bar-hint" :class="{ 'slide-bar-hint--hidden': handleX > 0 }">
+        <div class="slide-bar-fill" :class="{ 'is-ok': success, 'is-bad': fail }" :style="{ width: `${Math.min(handleX + handleWidth, bgWidth)}px` }" />
+        <span class="slide-bar-hint" :class="{ 'slide-bar-hint--hidden': handleX > 0 || success || fail }">
           ← 按住滑块拖到缺口处 →
+        </span>
+        <span v-if="verifying" class="slide-bar-hint slide-bar-hint--center">
+          验证中…
         </span>
         <div
           class="slide-handle"
+          :class="{ 'is-ok': success, 'is-bad': fail }"
           :style="{ left: `${handleX}px` }"
           @mousedown.prevent.stop="startHandleDrag"
           @touchstart.prevent.stop="startHandleDragTouch"
@@ -58,22 +77,23 @@ const props = defineProps({
   markWidth: { type: Number, default: 44 },
   markHeight: { type: Number, default: 44 },
   trackY: { type: Number, default: 50 },
-  // 拖完是否禁止再拖（等后端返回结果）；默认 true 防重复提交
   disabled: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['submit', 'refresh'])
+const emit = defineEmits(['submit', 'refresh', 'done'])
 
 const trackRef = ref(null)
-// handleX = 滑块手柄左边缘位置；拼图块 pieceX = handleX（1:1 映射）
 const handleX = ref(0)
 const pieceX = ref(0)
 const dragging = ref(false)
 const success = ref(false)
+const fail = ref(false)
+const verifying = ref(false)
 
-const handleWidth = 40 // 滑块手柄宽度 px
+const handleWidth = 40
 let startClientX = 0
-let trackPoints = [] // [{x, y, t}] 轨迹
+let trackPoints = []
+let doneTimer = null
 
 function onRefresh() {
   reset()
@@ -92,14 +112,20 @@ function pieceFromHandle(hx) {
 
 function reset() {
   success.value = false
+  fail.value = false
   handleX.value = 0
   pieceX.value = 0
   dragging.value = false
   trackPoints = []
+  verifying.value = false
+  if (doneTimer) {
+    clearTimeout(doneTimer)
+    doneTimer = null
+  }
 }
 
 function startHandleDrag(e) {
-  if (success.value || props.disabled)
+  if (success.value || fail.value || verifying.value || props.disabled)
     return
   if (e.button !== undefined && e.button !== 0)
     return
@@ -111,10 +137,9 @@ function startHandleDrag(e) {
 }
 
 function startHandleDragTouch(e) {
-  if (success.value || props.disabled)
+  if (success.value || fail.value || verifying.value || props.disabled)
     return
-  const t = e.touches[0]
-  if (!t)
+  const t = e.touches[0]; if (!t)
     return
   dragging.value = true
   startClientX = t.clientX - handleX.value
@@ -130,7 +155,6 @@ function onHandleDrag(e) {
   e.preventDefault()
   handleX.value = clamp(e.clientX - startClientX, 0, props.bgWidth - handleWidth)
   pieceX.value = pieceFromHandle(handleX.value)
-  // 轨迹采样（节流 ~15ms）
   const now = performance.now()
   if (trackPoints.length === 0 || now - (trackPoints[trackPoints.length - 1].t_ref ?? 0) > 15) {
     trackPoints.push({
@@ -146,8 +170,7 @@ function onHandleDragTouch(e) {
   if (!dragging.value)
     return
   e.preventDefault()
-  const t = e.touches[0]
-  if (!t)
+  const t = e.touches[0]; if (!t)
     return
   handleX.value = clamp(t.clientX - startClientX, 0, props.bgWidth - handleWidth)
   pieceX.value = pieceFromHandle(handleX.value)
@@ -171,10 +194,9 @@ function onHandleEnd() {
   window.removeEventListener('touchmove', onHandleDragTouch)
   window.removeEventListener('touchend', onHandleEnd)
   window.removeEventListener('touchcancel', onHandleEnd)
-  // 清理 t_ref（内部用，不提交）
   trackPoints = trackPoints.map(p => ({ x: p.x, y: p.y, t: p.t }))
-  // 必须真的拖过才 emit
   if (pieceX.value >= 5 && trackPoints.length >= 3) {
+    verifying.value = true
     emit('submit', {
       captcha_r: pieceX.value,
       captcha_y: props.trackY,
@@ -182,14 +204,13 @@ function onHandleEnd() {
     })
   }
   else {
-    // 没真拖就弹回原位
     handleX.value = 0
     pieceX.value = 0
     trackPoints = []
   }
 }
 
-// 监听 bgImage 变化（父组件 load 新图），自动 reset 状态
+// 监听 bgImage 变化自动 reset（父组件 load 新图时）
 watch(() => props.bgImage, (newVal, oldVal) => {
   if (newVal && newVal !== oldVal)
     reset()
@@ -201,23 +222,39 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchmove', onHandleDragTouch)
   window.removeEventListener('touchend', onHandleEnd)
   window.removeEventListener('touchcancel', onHandleEnd)
+  if (doneTimer)
+    clearTimeout(doneTimer)
 })
 
 defineExpose({
-  // 后端返回"验证通过"后调
-  markSuccess() {
+  // 后端返回成功后调：显示 ✓ → 1.5s 后 emit('done', true) 让父组件关弹窗
+  markSuccess(done = true) {
     success.value = true
+    fail.value = false
+    verifying.value = false
     handleX.value = props.bgWidth - handleWidth
     pieceX.value = props.bgWidth - props.markWidth
+    if (done) {
+      if (doneTimer)
+        clearTimeout(doneTimer)
+      doneTimer = setTimeout(emit, 1500, 'done', { success: true })
+    }
   },
-  // 换图 / 后端返回失败时调
-  reset() {
+  // 后端返回失败后调：显示 ✗ → 2s 后自动 reset 换新图（通过父组件 emit refresh）
+  markFail(done = true) {
+    fail.value = true
     success.value = false
-    handleX.value = 0
-    pieceX.value = 0
-    dragging.value = false
-    trackPoints = []
+    verifying.value = false
+    if (done) {
+      if (doneTimer)
+        clearTimeout(doneTimer)
+      doneTimer = setTimeout(() => {
+        emit('done', { success: false })
+        reset()
+      }, 1500)
+    }
   },
+  reset,
 })
 </script>
 
@@ -229,10 +266,8 @@ defineExpose({
 }
 .slide-captcha.is-disabled .slide-handle {
   cursor: not-allowed;
-  opacity: 0.5;
 }
 
-/* 图片区 */
 .slide-track {
   position: relative;
   background-repeat: no-repeat;
@@ -247,7 +282,6 @@ defineExpose({
   background-size: 100% 100%;
   background-repeat: no-repeat;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
-  transition: none;
 }
 .piece-inner {
   width: 100%;
@@ -268,13 +302,57 @@ defineExpose({
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
-  transition: background 0.15s;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: background 0.15s;
 }
 .slide-refresh:hover {
   background: rgba(0, 0, 0, 0.55);
+}
+
+/* 成功/失败叠层 */
+.slide-result {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.85);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  animation: fadeIn 0.2s ease-out;
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.result-icon {
+  animation: pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes pop {
+  0% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.result-ok {
+  color: #18a058;
+}
+.result-bad {
+  color: #d03050;
+}
+.result-text {
+  font-size: 14px;
+  font-weight: 500;
 }
 
 /* 底部滑轨 */
@@ -298,7 +376,12 @@ defineExpose({
   height: 100%;
   background: linear-gradient(90deg, #3b82f6, #60a5fa);
   border-radius: 6px 0 0 6px;
-  transition: width 0.05s linear;
+}
+.slide-bar-fill.is-ok {
+  background: linear-gradient(90deg, #18a058, #34d399);
+}
+.slide-bar-fill.is-bad {
+  background: linear-gradient(90deg, #d03050, #f87171);
 }
 .slide-bar-hint {
   position: absolute;
@@ -314,8 +397,10 @@ defineExpose({
 .slide-bar-hint--hidden {
   opacity: 0;
 }
+.slide-bar-hint--center {
+  color: #94a3b8;
+}
 
-/* 滑块手柄 */
 .slide-handle {
   position: absolute;
   top: 0;
@@ -331,37 +416,24 @@ defineExpose({
   align-items: center;
   justify-content: center;
   color: #3b82f6;
-  transition: box-shadow 0.15s;
   z-index: 2;
 }
-.slide-handle:hover {
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
+.slide-handle.is-ok {
+  border-color: #18a058;
+  color: #18a058;
+}
+.slide-handle.is-bad {
+  border-color: #d03050;
+  color: #d03050;
 }
 .slide-handle:active {
   cursor: grabbing;
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.45);
 }
 .handle-icon {
   color: #94a3b8;
-  transition: color 0.15s;
 }
 .slide-handle:hover .handle-icon,
 .slide-handle:active .handle-icon {
   color: #3b82f6;
-}
-
-/* 成功态 */
-.slide-captcha.is-success .slide-bar-fill {
-  background: linear-gradient(90deg, #18a058, #34d399);
-}
-.slide-captcha.is-success .slide-handle {
-  border-color: #18a058;
-  color: #18a058;
-}
-.slide-captcha.is-success .slide-bar-hint {
-  opacity: 1;
-  color: #18a058;
-  font-weight: 500;
-  content: '✓ 验证通过';
 }
 </style>

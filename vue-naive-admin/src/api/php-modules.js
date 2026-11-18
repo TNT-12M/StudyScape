@@ -8,6 +8,7 @@ export const phpAuthApi = {
   captchaUrl: () => getCaptchaUrl(),
   // 滑动验证码（auth 通用，purpose 区分 session：register / forgot_email / reset）
   authCaptcha: purpose => phpAction('auth_captcha', { purpose }, { bypassCsrf: true }),
+  captchaVerify: data => phpAction('captcha_verify', data),
   sendEmailCode: data => phpAction('send_email_code', data, { bypassCsrf: true }),
   lookupResetEmail: data => phpAction('lookup_reset_email', data, { bypassCsrf: true }),
   resetPassword: data => phpAction('reset_password', data, { bypassCsrf: true }),

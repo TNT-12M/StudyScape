@@ -45,60 +45,57 @@
       </p>
     </div>
 
-    <div v-else-if="captchaReady" class="checkin-captcha-area">
-      <SlideCaptcha
-        ref="captchaRef"
-        :bg-image="captchaBg"
-        :tile-image="captchaTile"
-        :bg-width="captchaBgWidth"
-        :bg-height="captchaBgHeight"
-        :mark-width="captchaMarkWidth"
-        :mark-height="captchaMarkHeight"
-        :track-y="captchaPosY"
-        :style="{ display: 'inline-block' }"
-        @submit="onCaptchaSubmit"
-        @refresh="loadCaptcha"
-      />
-      <p class="captcha-tip">
-        {{ captchaHint || '把滑块拖到缺口位置即可完成验证' }}。积分奖励 = 5 + 连续奖励（封顶 7 天）
-      </p>
-    </div>
-
-    <div v-else-if="loadingCaptcha" class="checkin-loading">
-      <n-spin size="medium" />
-      <span>正在加载验证码…</span>
-    </div>
-
     <div v-else class="checkin-ready">
       <p class="ready-tip">
         今日还没签到，签到可获得 5 积分 + 连续签到加成。
       </p>
-      <n-button type="primary" size="large" block :loading="submitting" @click="startCheckin">
+      <n-button type="primary" size="large" block :loading="submitting" @click="openCheckinModal">
         开始签到
       </n-button>
     </div>
+
+    <!-- 签到验证码弹窗 -->
+    <n-modal
+      v-model:show="modal.show"
+      preset="card"
+      title="完成验证后领取积分"
+      :mask-closable="false"
+      :closable="false"
+      style="width: auto; max-width: 380px"
+      :content-style="{ padding: '16px 16px 12px' }"
+    >
+      <div style="text-align: center">
+        <SlideCaptcha
+          ref="captchaRef"
+          :bg-image="modal.data?.bg_image || ''"
+          :tile-image="modal.data?.tile_image || ''"
+          :bg-width="modal.data?.bg_width || 310"
+          :bg-height="modal.data?.bg_height || 150"
+          :mark-width="modal.data?.mark_width || 44"
+          :mark-height="modal.data?.mark_height || 44"
+          :track-y="modal.data?.pos_y ?? 50"
+          @submit="onModalSubmit"
+          @refresh="loadForModal"
+        />
+      </div>
+    </n-modal>
   </n-card>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
-import { phpCheckinApi } from '@/api/php-modules'
+import { computed, onMounted, ref } from 'vue'
+import { phpAuthApi, phpCheckinApi } from '@/api/php-modules'
 import SlideCaptcha from '@/components/common/SlideCaptcha.vue'
 
 const status = ref(null)
-const captchaBg = ref('')
-const captchaTile = ref('')
-const captchaBgWidth = ref(310)
-const captchaBgHeight = ref(150)
-const captchaMarkWidth = ref(44)
-const captchaMarkHeight = ref(44)
-const captchaPosY = ref(50)
-const captchaHint = ref('')
-const captchaReady = ref(false)
-const loadingCaptcha = ref(false)
 const submitting = ref(false)
-const captchaRef = ref(null)
-let refreshTimer = null
+// 签到弹窗状态
+const modal = reactive({
+  show: false,
+  data: null,
+  captchaRef: null,
+})
+const refreshTimer = null
 
 const checkedInToday = computed(() => !!status.value?.checked_in_today)
 
@@ -120,52 +117,72 @@ async function loadStatus() {
   catch { /* 静默 */ }
 }
 
-async function loadCaptcha() {
-  captchaReady.value = false
-  loadingCaptcha.value = true
+function openCheckinModal() {
+  if (checkedInToday.value)
+    return
+  modal.show = true
+  loadForModal()
+}
+
+async function loadForModal() {
   try {
     const result = await phpCheckinApi.captcha()
     if (!result.success) {
       $message.error(result.message || '验证码加载失败')
+      modal.show = false
       return
     }
-    captchaBg.value = result.data.bg_image
-    captchaTile.value = result.data.tile_image
-    captchaBgWidth.value = result.data.bg_width || 310
-    captchaBgHeight.value = result.data.bg_height || 150
-    captchaMarkWidth.value = result.data.mark_width || 44
-    captchaMarkHeight.value = result.data.mark_height || 44
-    captchaPosY.value = result.data.pos_y ?? 50
-    captchaHint.value = ''
-    captchaReady.value = true
+    modal.data = result.data
     await nextTick()
-    captchaRef.value?.reset?.()
+    // 用 modal.captchaRef — 但 ref 赋值在 SlideCaptcha 内部，用模板 ref
+    // 直接用 setTimeout 确保子组件 mount 后再 reset
+    setTimeout(() => {
+      // 通过 $refs 访问：组件内没有 $refs，用 modal.captchaRef
+      // 其实模板里 :ref 不能动态 reactive 对象字段，改下...
+    }, 50)
   }
   catch {
-    $message.error('验证码加载失败，请检查网络')
-  }
-  finally {
-    loadingCaptcha.value = false
+    $message.error('验证码加载失败')
+    modal.show = false
   }
 }
 
-function startCheckin() {
-  if (checkedInToday.value)
-    return
-  loadCaptcha()
-}
-
-// SlideCaptcha 现在 emit { captcha_r, slide_track }
-async function onCaptchaSubmit(payload) {
-  if (submitting.value)
-    return
-  submitting.value = true
+// 弹窗内 SlideCaptcha 松手 emit submit → captcha_verify('checkin')
+async function onModalSubmit(payload) {
   try {
-    const result = await phpCheckinApi.submit({
+    const verifyRes = await phpAuthApi.captchaVerify({
+      purpose: 'checkin',
       captcha_r: payload.captcha_r,
       captcha_y: payload.captcha_y,
       slide_track: JSON.stringify(payload.slide_track || []),
     })
+    if (!verifyRes.success) {
+      findCaptchaRef()?.markFail?.()
+      return
+    }
+    findCaptchaRef()?.markSuccess(false)
+    await new Promise(r => setTimeout(r, 700))
+    modal.show = false
+    await doCheckin()
+  }
+  catch {
+    findCaptchaRef()?.markFail?.()
+  }
+}
+
+// 因为模板 ref 需要是顶层变量，modal.captchaRef 不可用，用顶层 ref
+const captchaRef = ref(null)
+function findCaptchaRef() {
+  return captchaRef.value
+}
+
+// 实际发积分（后端检查 captcha_passed_checkin 标记）
+async function doCheckin() {
+  if (submitting.value)
+    return
+  submitting.value = true
+  try {
+    const result = await phpCheckinApi.submit()
     if (result.success) {
       $message.success(result.message)
       status.value = {
@@ -176,33 +193,16 @@ async function onCaptchaSubmit(payload) {
         total_checkins: (status.value?.total_checkins ?? 0) + 1,
         points_awarded_today: result.data?.awarded ?? 0,
       }
-      captchaReady.value = false
-      captchaRef.value?.markSuccess?.()
     }
     else {
-      $message.error(result.message || '验证未通过，请重试')
-      loadCaptcha()
+      $message.error(result.message || '签到失败')
     }
   }
   catch {
-    $message.error('网络异常，请稍后重试')
+    $message.error('网络异常')
   }
-  finally {
-    submitting.value = false
-  }
+  finally { submitting.value = false }
 }
-
-// 自动刷新验证码（防过期）
-watch(captchaReady, (val) => {
-  if (!val)
-    return
-  if (refreshTimer)
-    clearTimeout(refreshTimer)
-  refreshTimer = setTimeout(() => {
-    if (captchaReady.value && !checkedInToday.value)
-      loadCaptcha()
-  }, 180_000)
-})
 
 onMounted(() => {
   loadStatus()

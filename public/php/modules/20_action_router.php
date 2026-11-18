@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // ===================== 家里云存储 bridge 辅助函数 =====================
 // bridge HTTP 接口走 localhost:1201 (Python asyncio HTTP server)
 if (!function_exists('_bridge_storage')) {
@@ -147,6 +147,18 @@ function authSlideVerify(string $purpose, bool $clearOnSuccess = true): bool {
     return $valid;
 }
 
+// 弹窗式 captcha_verify 成功后在 session 里打一个 passed 标记（10min 有效，一次性消耗）
+function checkCaptchaPassed(string $purpose): bool {
+    $key = 'captcha_passed_' . $purpose;
+    if (empty($_SESSION[$key])) return false;
+    if (time() - (int)$_SESSION[$key] > 600) {
+        unset($_SESSION[$key]);
+        return false;
+    }
+    unset($_SESSION[$key]); // 一次性消耗
+    return true;
+}
+
 // ===== 构建 phgors/gocaptcha SlideCaptcha =====
 function buildGoSlideCaptcha(int $imgW, int $imgH): \Phgors\GoCaptcha\Slide\SlideCaptcha {
     $tileSets = array_map(
@@ -256,12 +268,27 @@ if ($action) {
                 ]);
                 break;
 
+            // ==================== 弹窗式滑动验证码校验（前端点击按钮弹出验证码，提交即一次性校验）====================
+            case 'captcha_verify':
+                if ($_SERVER['REQUEST_METHOD'] !== 'POST') jsonOut(false, '请使用 POST');
+                $purpose = trim((string)($_POST['purpose'] ?? ''));
+                if (!in_array($purpose, ['register', 'forgot_email', 'reset'], true)) jsonOut(false, '非法用途');
+                $ip = getClientIp();
+                $uid = isLoggedIn() ? (int)getUid() : 0;
+                if (!siteRateAllowed('captcha_verify_ip_' . $ip, 10, 300)) jsonOut(false, '验证过于频繁');
+                if ($uid > 0 && !siteRateAllowed('captcha_verify_user_' . $uid, 15, 300)) jsonOut(false, '验证过于频繁');
+                if (!authSlideVerify($purpose, clearOnSuccess: true)) jsonOut(false, '滑动验证未通过，请重试');
+                // 校验通过：打 passed 标记（10min 有效，一次性消耗，业务接口检查）
+                $_SESSION['captcha_passed_' . $purpose] = time();
+                jsonOut(true, '验证通过');
+                break;
+
             // ==================== 找回密码: 邮箱 → 用户名自动匹配 ====================
             case 'lookup_reset_email':
                 $email = sanitizeInput($_POST['email'] ?? '');
                 if (!validateEmail($email)) jsonOut(false, '邮箱格式不正确');
                 // 滑动验证码校验（zxf/captcha, session_prefix=auth_forgot_email）
-                if (!authSlideVerify('forgot_email')) jsonOut(false, '滑动验证未通过，请重试');
+                if (!checkCaptchaPassed('forgot_email')) jsonOut(false, '请先完成滑动验证');
                 $u = dbFetchOne($db, 'SELECT username, nickname FROM users WHERE email=?', [$email]);
                 if (!$u) jsonOut(false, '该邮箱未注册，请确认后再试');
                 jsonOut(true, '请确认是该账号', [
@@ -293,7 +320,7 @@ if ($action) {
 
                 // --- 第三层：滑动验证码校验 (reset 流程已在 lookup_reset_email 消耗过 forgot_email, 这里跳过) ---
                 if ($purpose === 'register') {
-                    if (!authSlideVerify('register')) jsonOut(false, '滑动验证未通过，请重试');
+                    if (!checkCaptchaPassed('register')) jsonOut(false, '请先完成滑动验证');
                 }
 
                 // --- 第四层：per-IP 去重邮箱检查（防轮换伪造邮箱绕过 per-email 冷却） ---
@@ -367,7 +394,7 @@ if ($action) {
                     jsonOut(false, "请完整填写注册信息+验证码");
                 }
                 // 滑动验证码二次校验（backend_only 模式幂等，和 send_email_code 共用 session）
-                if (!authSlideVerify('register')) jsonOut(false, '滑动验证未通过，请刷新后重试');
+                if (!checkCaptchaPassed('register')) jsonOut(false, '请先完成滑动验证');
 
                 if (!validateEmail($email)) {
                     jsonOut(false, "邮箱格式不正确");
@@ -495,7 +522,7 @@ if ($action) {
                 }
 
                 // 滑动验证码校验（reset purpose，与 lookup 的 forgot_email 隔离）
-                if (!authSlideVerify('reset')) jsonOut(false, '滑动验证未通过，请刷新后重试');
+                if (!checkCaptchaPassed('reset')) jsonOut(false, '请先完成滑动验证');
 
                 if (!validateEmail($email)) {
                     jsonOut(false, '邮箱格式不正确');
@@ -740,7 +767,7 @@ if ($action) {
                 if (!siteRateAllowed('checkin_submit_ip_' . $ip, 10, 300)) jsonOut(false, '签到尝试过于频繁，请稍后再试');
 
                 // gocaptcha 纯无状态校验
-                if (!authSlideVerify('checkin')) jsonOut(false, '滑动验证未通过，请重试');
+                if (!checkCaptchaPassed('checkin')) jsonOut(false, '请先完成滑动验证');
 
                 // 幂等签到（UNIQUE 约束兜底）
                 $tz = new DateTimeZone('Asia/Shanghai');
