@@ -161,6 +161,33 @@ function authSlideVerify(string $purpose): bool {
     }
 }
 
+// 确保壁纸目录存在且可写，返回绝对路径；失败返回 false
+function ensureWallpaperDir() {
+    $root = dirname(dirname(dirname(__DIR__)));
+    // 主目录：public/admin/assets/wallpapers（前端构建产物一起托管）
+    $primary = $root . '/public/admin/assets/wallpapers';
+    if (ensureWritableDir($primary)) return $primary;
+    // 备选：public/assets/wallpapers（兼容一些 Nginx 只映射 public/ 的环境）
+    $fallback = $root . '/public/assets/wallpapers';
+    if (ensureWritableDir($fallback)) return $fallback;
+    // 都不行，返回 false
+    return false;
+}
+
+function ensureWritableDir(string $dir): bool {
+    if (is_dir($dir)) return is_writable($dir);
+    // 尝试 755（更宽松，公网机 Nginx/Apache 子进程通常需要 group 写）
+    // 再尝试 0777 + chmod 兜底
+    if (@mkdir($dir, 0755, true)) {
+        @chmod($dir, 0775);
+        return true;
+    }
+    // 上一级不存在也可能导致失败，再用 error_get_last 记录
+    $e = error_get_last();
+    error_log('ensureWritableDir mkdir failed: ' . $dir . ' — ' . ($e['message'] ?? 'unknown'));
+    return false;
+}
+
 if ($action) {
     try {
         switch ($action) {
@@ -1589,9 +1616,10 @@ if ($action) {
                 }
 
                 // 重新编码为 JPEG（丢弃 EXIF/元数据，防路径穿越+安全）
-                $wallpaperDir = dirname(dirname(dirname(__DIR__))) . '/public/admin/assets/wallpapers';
-                if (!is_dir($wallpaperDir) && !@mkdir($wallpaperDir, 0750, true)) {
-                    imagedestroy($img); jsonOut(false, '壁纸目录创建失败');
+                $wallpaperDir = ensureWallpaperDir();
+                if ($wallpaperDir === false) {
+                    imagedestroy($img);
+                    jsonOut(false, '壁纸目录创建失败，请联系服务器管理员检查 public/admin/assets/ 目录权限');
                 }
                 // 随机文件名，不带扩展名（前端拼接 .jpg）
                 $baseName = 'user_' . bin2hex(random_bytes(8));
@@ -1642,7 +1670,8 @@ if ($action) {
                 if (!preg_match('/^user_[0-9a-f]+\.jpg$/', $filename)) {
                     jsonOut(false, '内置壁纸不可删除');
                 }
-                $wallpaperDir = dirname(dirname(dirname(__DIR__))) . '/public/admin/assets/wallpapers';
+                $wallpaperDir = ensureWallpaperDir();
+                if ($wallpaperDir === false) jsonOut(false, '壁纸目录异常');
                 $filePath = $wallpaperDir . '/' . $filename;
                 if (str_contains(realpath($wallpaperDir) . '/', realpath($filePath) ?: '') === false) {
                     jsonOut(false, '非法路径'); // 防路径穿越双保险
