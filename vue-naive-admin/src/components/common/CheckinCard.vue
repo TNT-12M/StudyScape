@@ -163,6 +163,7 @@ async function onCaptchaSubmit(payload) {
   try {
     const result = await phpCheckinApi.submit({
       captcha_r: payload.captcha_r,
+      captcha_y: payload.captcha_y,
       slide_track: JSON.stringify(payload.slide_track || []),
     })
     if (result.success) {

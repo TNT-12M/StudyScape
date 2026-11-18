@@ -289,6 +289,7 @@ async function sendRegEmailCode() {
       email: regForm.email,
       purpose: 'register',
       captcha_r: regCaptchaPayload.value.captcha_r,
+      captcha_y: regCaptchaPayload.value.captcha_y,
       slide_track: JSON.stringify(regCaptchaPayload.value.slide_track || []),
     })
     $message.success(result.message || '验证码已发送')
@@ -329,6 +330,7 @@ async function register() {
       email_code: regForm.email_code,
       // 第二次校验滑动验证码（后端 backend_only 幂等）
       captcha_r: regCaptchaPayload.value.captcha_r,
+      captcha_y: regCaptchaPayload.value.captcha_y,
       slide_track: JSON.stringify(regCaptchaPayload.value.slide_track || []),
     })
     $message.success(result.message || '注册成功，请登录')
@@ -437,6 +439,7 @@ async function lookupResetEmail() {
     const result = await phpAuthApi.lookupResetEmail({
       email: resetForm.email,
       captcha_r: resetCaptchaPayload.value.captcha_r,
+      captcha_y: resetCaptchaPayload.value.captcha_y,
       slide_track: JSON.stringify(resetCaptchaPayload.value.slide_track || []),
     })
     resetForm.account = result.data.username
@@ -486,6 +489,7 @@ async function doReset() {
       email_code: resetForm.email_code,
       new_password: resetForm.new_password,
       captcha_r: resetSubmitPayload.value.captcha_r,
+      captcha_y: resetSubmitPayload.value.captcha_y,
       slide_track: JSON.stringify(resetSubmitPayload.value.slide_track || []),
     })
     $message.success(result.message || '密码重置成功')
