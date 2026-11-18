@@ -228,17 +228,19 @@ if ($action) {
                 if (!siteRateAllowed('auth_captcha_ip_' . $ip, 10, 300)) jsonOut(false, '验证码获取过于频繁');
                 if ($uid > 0 && !siteRateAllowed('auth_captcha_user_' . $uid, 15, 300)) jsonOut(false, '验证码获取过于频繁');
 
-                if (!class_exists(\Phgors\GoCaptcha\Slide\SlideBuilder::class)) jsonOut(false, '服务器验证码组件未就绪');
+                if (!class_exists(\Phgors\GoCaptcha\Slide\SlideBuilder::class)) jsonOut(false, '服务器验证码组件未就绪（gocaptcha missing）');
+                if (!function_exists('imagecreatefromjpeg')) jsonOut(false, '服务器 GD 未支持 JPEG（imagecreatefromjpeg missing）');
+                if (!function_exists('imagecreatefrompng')) jsonOut(false, '服务器 GD 未支持 PNG（imagecreatefrompng missing）');
 
                 try {
                     $captcha = buildGoSlideCaptcha(310, 150);
                     $data = $captcha->generate();
                     $block = $data->getBlock();
-                    $_SESSION['captcha_block_' . $purpose] = $block->toArray(); // 存答案
-                    $arr = $data->toArray(); // ['masterImage' => JPEG base64, 'tileImage' => PNG base64]
+                    $_SESSION['captcha_block_' . $purpose] = $block->toArray();
+                    $arr = $data->toArray();
                 } catch (\Throwable $e) {
-                    error_log('auth_captcha gocaptcha generate: ' . $e->getMessage());
-                    jsonOut(false, '验证码生成失败');
+                    error_log('auth_captcha gocaptcha generate: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());
+                    jsonOut(false, '验证码生成异常: ' . $e->getMessage() . ' @ ' . basename($e->getFile()) . ':' . $e->getLine());
                 }
 
                 jsonOut(true, '', [
