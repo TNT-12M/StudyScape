@@ -1354,9 +1354,21 @@ if ($action) {
                         jsonOut(false, '壁纸参数无效');
                     }
                     // 双保险：检查文件真实存在于 wallpapers 目录
-                    $wallpaperDir = dirname(dirname(dirname(__DIR__))) . '/public/admin/assets/wallpapers';
-                    $targetFile = $wallpaperDir . '/' . $wallpaper . '.jpg';
-                    if (!is_file($targetFile)) jsonOut(false, '壁纸文件不存在，请刷新列表后重试');
+                    // 同时查主目录和备选目录，确保 upload 存到哪个 save 都能找到
+                    $wpRoot = dirname(dirname(dirname(__DIR__)));
+                    $primary = $wpRoot . '/public/admin/assets/wallpapers';
+                    $fallback = $wpRoot . '/public/assets/wallpapers';
+                    $targetFile = null;
+                    $wallpaperDir = null;
+                    foreach ([$primary, $fallback] as $dir) {
+                        $candidate = $dir . '/' . $wallpaper . '.jpg';
+                        if (is_file($candidate)) {
+                            $targetFile = $candidate;
+                            $wallpaperDir = $dir;
+                            break;
+                        }
+                    }
+                    if ($targetFile === null) jsonOut(false, '壁纸文件不存在，请刷新列表后重试');
                     // 防路径穿越双保险
                     $rp = realpath($targetFile);
                     if ($rp === false || !str_starts_with($rp, realpath($wallpaperDir) . DIRECTORY_SEPARATOR)) {
@@ -1650,17 +1662,33 @@ if ($action) {
                 if (!$row) jsonOut(false, '壁纸不存在或已删除');
                 $filename = (string)$row['filename'];
                 // 只允许删除 DB 记录对应的（内置的不在 DB 里，删不到）
-                if (!preg_match('/^user_[0-9a-f]+\.jpg$/', $filename)) {
+                // DB 存的 filename 不带 .jpg（upload 时 baseName = user_xxx）
+                if (!preg_match('/^user_[a-f0-9]+$/', $filename)) {
                     jsonOut(false, '内置壁纸不可删除');
                 }
-                $wallpaperDir = ensureWallpaperDir();
-                if ($wallpaperDir === false) jsonOut(false, '壁纸目录异常');
-                $filePath = $wallpaperDir . '/' . $filename;
-                if (str_contains(realpath($wallpaperDir) . '/', realpath($filePath) ?: '') === false) {
-                    jsonOut(false, '非法路径'); // 防路径穿越双保险
+                // 双目录查找：主目录 + 备选目录（文件带 .jpg 扩展名）
+                $wpRoot = dirname(dirname(dirname(__DIR__)));
+                $primary = $wpRoot . '/public/admin/assets/wallpapers';
+                $fallback = $wpRoot . '/public/assets/wallpapers';
+                $filePath = null;
+                $wallpaperDir = null;
+                foreach ([$primary, $fallback] as $dir) {
+                    $candidate = $dir . '/' . $filename . '.jpg';
+                    if (is_file($candidate)) {
+                        $filePath = $candidate;
+                        $wallpaperDir = $dir;
+                        break;
+                    }
+                }
+                // 即使找不到文件也删 DB（文件可能手动被清理），但仍需校验路径安全
+                if ($filePath !== null) {
+                    $rp = realpath($filePath);
+                    if ($rp === false || !str_starts_with($rp, realpath($wallpaperDir) . DIRECTORY_SEPARATOR)) {
+                        jsonOut(false, '非法路径');
+                    }
                 }
                 dbQuery($db, 'DELETE FROM site_wallpapers WHERE id=?', [$id]);
-                @unlink($filePath);
+                if ($filePath !== null) @unlink($filePath);
                 log_admin_action('delete_wallpaper');
                 jsonOut(true, '壁纸已删除', ['id' => $id]);
                 break;

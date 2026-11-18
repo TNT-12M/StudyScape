@@ -91,6 +91,9 @@
         <n-button size="small" :loading="wpUploading" @click="pickWallpaperFile">
           上传壁纸
         </n-button>
+        <n-button size="small" ghost :loading="wpRefreshing" @click="loadWallpaperList">
+          刷新列表
+        </n-button>
         <input
           id="wallpaper-file-input"
           type="file"
@@ -208,6 +211,7 @@ const wpFailed = reactive({})
 const wpBuiltIn = ref([])
 const wpUploads = ref([])
 const wpUploading = ref(false)
+const wpRefreshing = ref(false)
 
 function wallpaperSrc(name) {
   return `${import.meta.env.BASE_URL}assets/wallpapers/${name}.jpg`
@@ -215,6 +219,7 @@ function wallpaperSrc(name) {
 
 // 加载完整壁纸列表（内置 + 管理员上传）
 async function loadWallpaperList() {
+  wpRefreshing.value = true
   try {
     const result = await phpSettingsApi.wallpaperList()
     if (result.success) {
@@ -225,6 +230,9 @@ async function loadWallpaperList() {
   }
   catch {
     // 静默：列表加载失败不阻塞页面
+  }
+  finally {
+    wpRefreshing.value = false
   }
 }
 
@@ -254,8 +262,14 @@ async function onWallpaperFileChange(event) {
   try {
     const result = await phpSettingsApi.wallpaperUpload({ file, display_name: '' })
     if (result.success) {
+      const newFilename = String(result.data?.filename || '')
       $message.success('壁纸上传成功')
       await loadWallpaperList()
+      // 自动选中刚上传的壁纸并保存
+      if (newFilename) {
+        wpDraft.value = newFilename
+        await saveWallpaper()
+      }
     }
     else {
       $message.error(result.message || '上传失败')
