@@ -52,7 +52,7 @@
       <div class="hero-inner">
         <div class="hero-copy">
           <span class="hero-badge">
-            <i class="dot" /> 初高中智能学习平台 · 题库 / 组卷 / 考试 / 资料
+            <i class="dot" /> 初高中智能学习平台<span class="hero-badge-detail"> · 题库 / 组卷 / 考试 / 资料</span>
           </span>
           <h1>
             让每一份试卷<br>
@@ -1511,14 +1511,36 @@ onBeforeUnmount(() => {
     width: calc(100% - 36px);
   }
   .hero {
-    padding: 118px 0 80px;
+    padding: 140px 0 80px;
+  }
+  .hero-badge {
+    max-width: 100%;
+  }
+  .hero-badge-detail {
+    display: none;
   }
   .section {
     padding: 74px 0;
   }
 
+  .nav {
+    background: rgb(255 255 255 / 88%);
+    backdrop-filter: saturate(180%) blur(16px);
+    -webkit-backdrop-filter: saturate(180%) blur(16px);
+    box-shadow: 0 1px 0 var(--line);
+  }
+  .nav-inner {
+    gap: 10px;
+  }
+  .brand {
+    min-width: 0;
+  }
+  .brand-text strong {
+    white-space: nowrap;
+  }
   .menu-toggle {
     display: flex;
+    flex: 0 0 42px;
   }
   .nav-links {
     position: fixed;
