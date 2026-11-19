@@ -37,6 +37,7 @@ from config import (
     BRIDGE_REMOTE_HOST, BRIDGE_REMOTE_PORT,
     STORAGE_ROOT, KEY_FILE,
 )
+import material_watermark
 SERVER_HOST = BRIDGE_REMOTE_HOST  # 兼容旧代码里的变量名
 SERVER_PORT = BRIDGE_REMOTE_PORT
 PIPELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "exam_pipeline.py")
@@ -46,6 +47,8 @@ PIPELINE_TIMEOUT = 300
 # 家里云存储根目录
 HOME_STORAGE_ROOT = STORAGE_ROOT
 HOME_MATERIALS_DIR = os.path.join(HOME_STORAGE_ROOT, "materials")
+HOME_VARIANTS_DIR = os.path.join(HOME_STORAGE_ROOT, "material_variants")
+HOME_STAGING_DIR = os.path.join(HOME_STORAGE_ROOT, "_material_staging")
 HOME_TMP_DIR = os.path.join(HOME_STORAGE_ROOT, "_tmp_jobs")  # OCR pipeline 临时文件也走 /data
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -403,10 +406,13 @@ def _safe_path(root_dir, filename):
 
 
 async def handle_storage(writer, req_id, data):
-    """处理家里云存储请求: store / retrieve / delete"""
+    """处理家里云存储请求: store / prepare_variant / retrieve / delete"""
     action = data.get("action", "")
     stored_name = data.get("stored_name", "")
+    scope = data.get("storage_scope", "material")
     os.makedirs(HOME_MATERIALS_DIR, exist_ok=True)
+    os.makedirs(HOME_VARIANTS_DIR, exist_ok=True)
+    os.makedirs(HOME_STAGING_DIR, exist_ok=True)
 
     async def reply(result):
         result["request_id"] = req_id
@@ -414,7 +420,8 @@ async def handle_storage(writer, req_id, data):
         await FrameProto.send(writer, result)
 
     try:
-        safe_fp = _safe_path(HOME_MATERIALS_DIR, stored_name)
+        root_dir = HOME_VARIANTS_DIR if scope == "variant" else HOME_MATERIALS_DIR
+        safe_fp = _safe_path(root_dir, stored_name)
         if not safe_fp:
             await reply({"ok": False, "error": "非法文件名"})
             return
@@ -425,29 +432,85 @@ async def handle_storage(writer, req_id, data):
             if not file_b64:
                 await reply({"ok": False, "error": "缺 file_b64"})
                 return
-            raw = base64.b64decode(file_b64)
-            # SHA256 校验
-            actual_sha = hashlib.sha256(raw).hexdigest()
-            if expected_sha and not hmac.compare_digest(actual_sha, expected_sha):
-                await reply({"ok": False, "error": f"SHA256 mismatch expected={expected_sha} actual={actual_sha}"})
+            raw = base64.b64decode(file_b64, validate=True)
+            source_sha = hashlib.sha256(raw).hexdigest()
+            if expected_sha and not hmac.compare_digest(source_sha, expected_sha):
+                await reply({"ok": False, "error": f"SHA256 mismatch expected={expected_sha} actual={source_sha}"})
                 return
-            # 写文件
+
+            if data.get("watermark_platform"):
+                title = str(data.get("title", "")).strip()
+                if not title:
+                    await reply({"ok": False, "error": "PDF 平台水印缺少 title"})
+                    return
+                staging_fp = _safe_path(HOME_STAGING_DIR, f"{req_id}.pdf")
+                with open(staging_fp, "wb") as stream:
+                    stream.write(raw)
+                try:
+                    await asyncio.to_thread(
+                        material_watermark.render_platform_watermark,
+                        staging_fp, safe_fp, title,
+                    )
+                except Exception:
+                    try:
+                        os.remove(safe_fp)
+                    except FileNotFoundError:
+                        pass
+                    raise
+                finally:
+                    try:
+                        os.remove(staging_fp)
+                    except FileNotFoundError:
+                        pass
+                final_sha = await asyncio.to_thread(material_watermark.sha256_file, safe_fp)
+                final_size = os.path.getsize(safe_fp)
+                log.info(f"  💧 平台水印完成: {stored_name} ({final_size//1024}KB)")
+                await reply({
+                    "ok": True, "source_sha256": source_sha, "sha256": final_sha,
+                    "size": final_size, "home_path": safe_fp, "watermark_version": 1,
+                })
+                return
+
             tmp_fp = safe_fp + ".tmp"
-            with open(tmp_fp, "wb") as f:
-                f.write(raw)
+            with open(tmp_fp, "wb") as stream:
+                stream.write(raw)
             os.replace(tmp_fp, safe_fp)
-            log.info(f"  💾 存储完成: {stored_name} ({len(raw)//1024}KB, sha256={actual_sha[:16]}...)")
-            await reply({"ok": True, "sha256": actual_sha, "home_path": safe_fp})
+            log.info(f"  💾 存储完成: {stored_name} ({len(raw)//1024}KB, sha256={source_sha[:16]}...)")
+            await reply({
+                "ok": True, "source_sha256": source_sha, "sha256": source_sha,
+                "size": len(raw), "home_path": safe_fp, "watermark_version": 0,
+            })
+
+        elif action == "prepare_variant":
+            variant_name = data.get("variant_name", "")
+            variant_fp = _safe_path(HOME_VARIANTS_DIR, variant_name)
+            if not variant_fp:
+                await reply({"ok": False, "error": "非法 variant_name"})
+                return
+            if not os.path.isfile(safe_fp):
+                await reply({"ok": False, "error": "平台水印文件不存在"})
+                return
+            await asyncio.to_thread(
+                material_watermark.render_user_watermark,
+                safe_fp, variant_fp, data.get("username", ""), data.get("user_id", ""),
+            )
+            variant_sha = await asyncio.to_thread(material_watermark.sha256_file, variant_fp)
+            await reply({
+                "ok": True, "variant_name": variant_name, "sha256": variant_sha,
+                "size": os.path.getsize(variant_fp), "mime": "application/pdf",
+            })
 
         elif action == "retrieve":
+            if scope not in ("material", "variant"):
+                await reply({"ok": False, "error": "非法 storage_scope"})
+                return
             if not os.path.isfile(safe_fp):
                 await reply({"ok": False, "error": "文件不存在"})
                 return
-            raw = open(safe_fp, "rb").read()
+            with open(safe_fp, "rb") as stream:
+                raw = stream.read()
             file_b64 = base64.b64encode(raw).decode()
             sha = hashlib.sha256(raw).hexdigest()
-            # mime
-            mime = ""
             ext = stored_name.rsplit(".", 1)[-1].lower() if "." in stored_name else ""
             mime_map = {"pdf": "application/pdf", "doc": "application/msword",
                         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -456,13 +519,16 @@ async def handle_storage(writer, req_id, data):
                         "txt": "text/plain", "md": "text/markdown",
                         "zip": "application/zip", "rar": "application/x-rar-compressed"}
             mime = mime_map.get(ext, "application/octet-stream")
-            log.info(f"  📤 读取文件: {stored_name} ({len(raw)//1024}KB)")
+            log.info(f"  📤 读取文件: {stored_name} ({len(raw)//1024}KB, scope={scope})")
             await reply({"ok": True, "file_b64": file_b64, "sha256": sha, "size": len(raw), "mime": mime})
 
         elif action == "delete":
+            if scope not in ("material", "variant"):
+                await reply({"ok": False, "error": "非法 storage_scope"})
+                return
             if os.path.isfile(safe_fp):
                 os.remove(safe_fp)
-                log.info(f"  🗑️  删除: {stored_name}")
+                log.info(f"  🗑️  删除: {stored_name} (scope={scope})")
             await reply({"ok": True})
 
         else:

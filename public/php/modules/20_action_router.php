@@ -17,7 +17,7 @@ if (!function_exists('_bridge_storage')) {
             CURLOPT_POSTFIELDS     => $json,
             CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 70,   // bridge → 家里云有 60s timeout
+            CURLOPT_TIMEOUT        => 190,  // PDF 水印渲染可能需要数分钟
             CURLOPT_CONNECTTIMEOUT => 5,
         ]);
         $resp = curl_exec($ch);
@@ -3969,49 +3969,51 @@ if ($action) {
                 $stored = uniqid('mat_', true) . '.' . $ext;
                 $stored = preg_replace('/[^A-Za-z0-9._-]/', '', $stored);
 
-                // ===== 先读 tmp_name → SHA256 + base64 → 发给家里云 =====
-                [$fileB64, $clientSha, $fileSize] = _file_b64_sha($f['tmp_name']);
-
-                // 调 bridge HTTP → storage/store (bridge 再走 WS 给家里云)
+                // ===== 所有资料统一走 bridge；PDF 成功加平台水印后才发布 =====
+                [$fileB64, $sourceSha, $sourceSize] = _file_b64_sha($f['tmp_name']);
+                $isPdf = $ext === 'pdf';
                 $bridgeRes = _bridge_storage('/storage/store', [
                     'stored_name' => $stored,
-                    'sha256'      => $clientSha,
-                    'size'        => $fileSize,
-                    'mime'        => $mime,
-                    'file_b64'    => $fileB64,
+                    'sha256' => $sourceSha,
+                    'size' => $sourceSize,
+                    'mime' => $mime,
+                    'file_b64' => $fileB64,
+                    'watermark_platform' => $isPdf,
+                    'title' => $origName,
                 ]);
-
-                // 删 PHP 临时文件（无论成功失败都清）
                 @unlink($f['tmp_name']);
 
                 if (!$bridgeRes['ok']) {
                     $err = $bridgeRes['error'] ?: '家里云存储失败';
-                    if (str_contains($err, 'worker offline')) {
-                        jsonOut(false, "家里云存储未上线，请检查 bridge-client");
-                    }
-                    jsonOut(false, "存储到家里云失败：{$err}");
+                    if (str_contains($err, 'worker offline')) jsonOut(false, "家里云存储未上线，请检查 bridge-client");
+                    jsonOut(false, ($isPdf ? 'PDF 平台水印生成失败，原件未发布：' : '存储到家里云失败：') . $err);
                 }
 
-                // bridge 侧 SHA256 已校验过（bridge_storage/store 里做了双重校验）
-                $homeSha = $bridgeRes['data']['sha256'] ?? '';
-                if ($homeSha !== '' && !hash_equals($clientSha, $homeSha)) {
-                    // 三端 SHA256 不一致 → 不入库
-                    _bridge_storage('/storage/delete', ['stored_name' => $stored]);
-                    jsonOut(false, "传输校验失败 (client={$clientSha} home={$homeSha})");
+                $data = $bridgeRes['data'];
+                $homeSourceSha = (string)($data['source_sha256'] ?? '');
+                $finalSha = (string)($data['sha256'] ?? '');
+                $finalSize = (int)($data['size'] ?? 0);
+                $watermarkVersion = (int)($data['watermark_version'] ?? 0);
+                if ($homeSourceSha === '' || !hash_equals($sourceSha, $homeSourceSha)) {
+                    _bridge_storage('/storage/delete', ['stored_name' => $stored, 'storage_scope' => 'material']);
+                    jsonOut(false, "源文件传输校验失败 (source={$sourceSha} home_source={$homeSourceSha})");
+                }
+                if ($finalSha === '' || $finalSize <= 0 || ($isPdf && $watermarkVersion !== 1)) {
+                    _bridge_storage('/storage/delete', ['stored_name' => $stored, 'storage_scope' => 'material']);
+                    jsonOut(false, '平台版文件校验失败，资料未入库');
                 }
 
-                // 入库：file_path 留空表示 remote（家里云有文件，公网机没有）
+                $watermarkStatus = $isPdf ? 'ready' : 'not_applicable';
                 dbQuery($db,
-                    "INSERT INTO materials(filename, stored_name, file_path, file_size, mime_type, subject, description, uploaded_by, education_level, category_id, sha256, storage_node) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [$origName, $stored, '', $fileSize, $mime, $subject, $desc, getUid(), $educationLevel, $categoryId > 0 ? $categoryId : null, $clientSha, 'home']
+                    "INSERT INTO materials(filename, stored_name, file_path, file_size, mime_type, subject, description, uploaded_by, education_level, category_id, sha256, source_sha256, storage_node, revision, platform_watermark_version, platform_watermark_status, platform_watermarked_at, processing_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,CASE WHEN ?='ready' THEN CURRENT_TIMESTAMP ELSE NULL END,NULL)",
+                    [$origName, $stored, '', $finalSize, $mime, $subject, $desc, getUid(), $educationLevel, $categoryId > 0 ? $categoryId : null, $finalSha, $sourceSha, 'home', $isPdf ? 1 : null, $watermarkStatus, $watermarkStatus]
                 );
                 $newId = (int)$db->lastInsertRowID();
                 notifyRootsOnContentUpload('内容管理员上传了新资料', '「' . $origName . '」已上传，请抽空确认内容与分类。', $newId);
                 jsonOut(true, "上传成功（家里云存储）", [
-                    'material_id' => $newId,
-                    'filename'    => $origName,
-                    'size'        => $fileSize,
-                    'sha256'      => $clientSha,
+                    'material_id' => $newId, 'filename' => $origName,
+                    'size' => $finalSize, 'source_sha256' => $sourceSha,
+                    'sha256' => $finalSha, 'watermark_version' => $watermarkVersion,
                     'education_level' => $educationLevel,
                 ]);
                 break;
@@ -4065,25 +4067,54 @@ if ($action) {
 
                     $stored = 'mat_' . bin2hex(random_bytes(8)) . '.' . $ext;
                     $stored = preg_replace('/[^A-Za-z0-9._-]/', '', $stored);
-                    $dst = $matDir . '/' . $stored;
-
-                    if (!rename($src, $dst)) {
-                        @copy($src, $dst);
-                        @unlink($src);
+                    try {
+                        [$fileB64, $sourceSha, $sourceSize] = _file_b64_sha($src);
+                    } catch (Throwable $e) {
+                        $errors[] = "读取失败: $filename ({$e->getMessage()})";
+                        continue;
                     }
-                    if (!file_exists($dst)) { $errors[] = "保存失败: $filename"; continue; }
-                    @chmod($dst, 0644);
-
-                    dbQuery($db,
-                        "INSERT INTO materials(filename, stored_name, file_path, file_size, mime_type, subject, description, uploaded_by, education_level, category_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                        [$filename, $stored, 'materials/' . $stored, (int)(filesize($dst) ?: 0), $mime, $subject, $desc, $uploadedBy, $level, $categoryId > 0 ? $categoryId : null]
-                    );
-                    $successCount++;
+                    $isPdf = $ext === 'pdf';
+                    $bridgeRes = _bridge_storage('/storage/store', [
+                        'stored_name' => $stored, 'sha256' => $sourceSha,
+                        'size' => $sourceSize, 'mime' => $mime, 'file_b64' => $fileB64,
+                        'watermark_platform' => $isPdf, 'title' => $filename,
+                    ]);
+                    if (!$bridgeRes['ok']) {
+                        $errors[] = ($isPdf ? "PDF 水印失败" : "远端存储失败") . ": $filename ({$bridgeRes['error']})";
+                        continue;
+                    }
+                    $data = $bridgeRes['data'];
+                    $homeSourceSha = (string)($data['source_sha256'] ?? '');
+                    $finalSha = (string)($data['sha256'] ?? '');
+                    $finalSize = (int)($data['size'] ?? 0);
+                    $watermarkVersion = (int)($data['watermark_version'] ?? 0);
+                    if ($homeSourceSha === '' || !hash_equals($sourceSha, $homeSourceSha) || $finalSha === '' || $finalSize <= 0 || ($isPdf && $watermarkVersion !== 1)) {
+                        _bridge_storage('/storage/delete', ['stored_name' => $stored, 'storage_scope' => 'material']);
+                        $errors[] = "远端校验失败: $filename";
+                        continue;
+                    }
+                    $watermarkStatus = $isPdf ? 'ready' : 'not_applicable';
+                    try {
+                        dbQuery($db,
+                            "INSERT INTO materials(filename, stored_name, file_path, file_size, mime_type, subject, description, uploaded_by, education_level, category_id, sha256, source_sha256, storage_node, revision, platform_watermark_version, platform_watermark_status, platform_watermarked_at, processing_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,CASE WHEN ?='ready' THEN CURRENT_TIMESTAMP ELSE NULL END,NULL)",
+                            [$filename, $stored, '', $finalSize, $mime, $subject, $desc, $uploadedBy, $level, $categoryId > 0 ? $categoryId : null, $finalSha, $sourceSha, 'home', $isPdf ? 1 : null, $watermarkStatus, $watermarkStatus]
+                        );
+                        @unlink($src);
+                        $successCount++;
+                    } catch (Throwable $e) {
+                        _bridge_storage('/storage/delete', ['stored_name' => $stored, 'storage_scope' => 'material']);
+                        $errors[] = "入库失败: $filename ({$e->getMessage()})";
+                    }
                 }
 
-                // 清理临时目录
-                foreach (glob($tmpDir . '/*') as $gf) @unlink($gf);
-                @rmdir($tmpDir);
+                // 成功项已删除；失败项连同元数据保留，便于修正后重试
+                $remaining = array_values(array_filter(glob($tmpDir . '/*') ?: [], function($path) {
+                    return is_file($path) && basename($path) !== '.meta';
+                }));
+                if (!$remaining) {
+                    @unlink($tmpDir . '/.meta');
+                    @rmdir($tmpDir);
+                }
 
                 // 顺便清其他过期的 tmp_extract 目录（>24h）
                 foreach (glob(__DIR__ . '/../../../materials/tmp_extract/*/.meta') as $mf) {
@@ -4364,8 +4395,43 @@ if ($action) {
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
                 $id = (int)($_POST['id'] ?? 0);
                 if ($id <= 0) jsonOut(false, "参数错误");
-                $mat = dbFetchOne($db, "SELECT id, filename, file_path FROM materials WHERE id=?", [$id]);
+                $mat = dbFetchOne($db, "SELECT * FROM materials WHERE id=?", [$id]);
                 if (!$mat) jsonOut(false, "资料不存在");
+                $uid = (int)getUid();
+                $user = dbFetchOne($db, "SELECT id, username FROM users WHERE id=?", [$uid]);
+                if (!$user || trim((string)$user['username']) === '') jsonOut(false, '无法读取当前用户身份，请重新登录');
+                $username = (string)$user['username'];
+                $isPdf = strtolower(pathinfo((string)$mat['filename'], PATHINFO_EXTENSION)) === 'pdf'
+                    || strtolower((string)($mat['mime_type'] ?? '')) === 'application/pdf';
+                $variantName = '';
+                $variantSha = '';
+                if ($isPdf) {
+                    if (($mat['storage_node'] ?? '') !== 'home'
+                        || ($mat['platform_watermark_status'] ?? '') !== 'ready'
+                        || (int)($mat['platform_watermark_version'] ?? 0) !== 1) {
+                        jsonOut(false, '该 PDF 尚未完成平台水印处理，暂不可下载');
+                    }
+                    $revision = max(1, (int)($mat['revision'] ?? 1));
+                    $identityHash = hash('sha256', $id . '|' . $revision . '|' . $uid . '|' . $username);
+                    $variantName = 'matv_' . substr($identityHash, 0, 40) . '.pdf';
+                    $variantRes = _bridge_storage('/storage/prepare-variant', [
+                        'stored_name' => $mat['stored_name'], 'variant_name' => $variantName,
+                        'username' => $username, 'user_id' => $uid,
+                    ]);
+                    if (!$variantRes['ok']) {
+                        jsonOut(false, '服务端准备专属水印文件失败：' . ($variantRes['error'] ?: '存储后端不可用'));
+                    }
+                    $variantData = $variantRes['data'];
+                    $variantSha = (string)($variantData['sha256'] ?? '');
+                    $variantSize = (int)($variantData['size'] ?? 0);
+                    if ($variantSha === '' || $variantSize <= 0 || ($variantData['variant_name'] ?? '') !== $variantName) {
+                        jsonOut(false, '服务端专属水印文件校验失败，请稍后重试');
+                    }
+                    dbQuery($db,
+                        "INSERT INTO material_download_variants(material_id,user_id,username,material_revision,variant_name,sha256,file_size) VALUES(?,?,?,?,?,?,?) ON CONFLICT(material_id,user_id,username,material_revision) DO UPDATE SET variant_name=excluded.variant_name,sha256=excluded.sha256,file_size=excluded.file_size,updated_at=CURRENT_TIMESTAMP",
+                        [$id, $uid, $username, $revision, $variantName, $variantSha, $variantSize]
+                    );
+                }
                 if (!isset($_SESSION['download_tokens']) || !is_array($_SESSION['download_tokens'])) {
                     $_SESSION['download_tokens'] = [];
                 }
@@ -4377,10 +4443,15 @@ if ($action) {
                 $token = bin2hex(random_bytes(16));
                 $_SESSION['download_tokens'][$token] = [
                     'material_id' => (int)$mat['id'],
-                    'filename'    => $mat['filename'],
-                    'file_path'   => $mat['file_path'],
-                    'expires'     => $now + 300, // 5 分钟
-                    'uid'         => getUid(),
+                    'filename' => $mat['filename'],
+                    'stored_name' => $mat['stored_name'],
+                    'file_path' => $mat['file_path'],
+                    'is_pdf' => $isPdf,
+                    'variant_name' => $variantName,
+                    'variant_sha256' => $variantSha,
+                    'username' => $username,
+                    'expires' => $now + 300, // 5 分钟
+                    'uid' => $uid,
                 ];
                 jsonOut(true, "", ['download_token' => $token]);
                 break;
@@ -4415,6 +4486,16 @@ if ($action) {
                     include __DIR__ . '/../../error.php';
                     exit;
                 }
+                $tokenUser = dbFetchOne($db, 'SELECT username FROM users WHERE id=?', [(int)getUid()]);
+                if (!$tokenUser || !hash_equals((string)($info['username'] ?? ''), (string)$tokenUser['username'])) {
+                    unset($_SESSION['download_tokens'][$token]);
+                    http_response_code(409);
+                    $http_status = 409;
+                    $title = '用户身份已变化';
+                    $message = '用户名已变化，请返回资料中心重新生成专属水印文件。';
+                    include __DIR__ . '/../../error.php';
+                    exit;
+                }
                 // ★ token 不一次性消费 — 留 5 分钟宽限让 iOS Safari 重试/预检
                 // unset($_SESSION['download_tokens'][$token]);  // 之前注释掉, 改为过期自动清理
 
@@ -4437,18 +4518,30 @@ if ($action) {
                     exit;
                 }
 
-                // ===== storage_node 为空/=local 且本地有文件 → 直接走旧逻辑（兼容历史）=====
-                $matDir = __DIR__ . '/../../../materials';
-                $localAbs = $matDir . DIRECTORY_SEPARATOR . $storedName;
-                $useLocal = false;
-                if (($node === '' || $node === 'local') && is_file($localAbs)) {
-                    $useLocal = true;
+                $isPdf = !empty($info['is_pdf']);
+                if ($isPdf) {
+                    $storedName = (string)($info['variant_name'] ?? '');
+                    $expectedSha = (string)($info['variant_sha256'] ?? '');
+                    if ($storedName === '' || $expectedSha === '') {
+                        http_response_code(409);
+                        $title = '专属水印文件未就绪';
+                        $message = '请返回资料中心重新获取下载链接。';
+                        include __DIR__ . '/../../error.php';
+                        exit;
+                    }
                 }
 
-                // ===== 走家里云 retrieve =====
+                // 非 PDF 保留历史本地兼容；PDF 只允许从 variant scope 获取
+                $matDir = __DIR__ . '/../../../materials';
+                $localAbs = $matDir . DIRECTORY_SEPARATOR . $storedName;
+                $useLocal = !$isPdf && ($node === '' || $node === 'local') && is_file($localAbs);
+
                 $tmpAbs = '';
                 if (!$useLocal) {
-                    $bridgeRes = _bridge_storage('/storage/retrieve', ['stored_name' => $storedName]);
+                    $bridgeRes = _bridge_storage('/storage/retrieve', [
+                        'stored_name' => $storedName,
+                        'storage_scope' => $isPdf ? 'variant' : 'material',
+                    ]);
                     if (!$bridgeRes['ok']) {
                         $err = $bridgeRes['error'] ?? '家里云未找到文件';
                         http_response_code(502);

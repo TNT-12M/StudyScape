@@ -73,7 +73,6 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { phpMaterialsApi } from '@/api/php-modules'
 import { useSessionStore } from '@/store/modules/session'
-import { isPdfFile, saveBlob, stampMaterialPdf } from '@/views/user/components/pdf-watermark'
 import { formatDate } from '@/views/user/components/question-utils'
 
 const session = useSessionStore()
@@ -138,38 +137,14 @@ async function loadMaterials() {
 async function download(material) {
   downloading.value = material.id
   try {
+    window.$message?.info('服务端正在准备专属水印文件，请稍候…', { duration: 4000 })
     const result = await phpMaterialsApi.token(material.id)
     const token = result.data?.download_token
     if (!token)
       throw new Error('下载授权失败')
     const apiUrl = import.meta.env.VITE_PHP_API_URL || '/api.php'
     const url = `${apiUrl}?action=material_download&token=${encodeURIComponent(token)}`
-    const filename = material.filename || '学境资料.pdf'
     const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent)
-
-    // iOS Safari 无法可靠保存 Blob，直接走原始直链；其余平台在浏览器内加水印
-    if (!isIOS && isPdfFile(filename)) {
-      window.$message?.info('正在浏览器内生成带学境水印的版本，请稍候…', { duration: 4000 })
-      const response = await fetch(url, { credentials: 'include' })
-      if (!response.ok)
-        throw new Error('下载链接已失效，请返回资料中心重试')
-      const blob = await response.blob()
-      if (!blob.size)
-        throw new Error('文件内容为空')
-      try {
-        const { blob: stamped, stamped: didStamp } = await stampMaterialPdf(blob, filename)
-        saveBlob(stamped, filename)
-        if (didStamp)
-          window.$message?.success('已生成带学境水印的 PDF')
-      }
-      catch (stampError) {
-        // 加密/损坏 PDF 无法在浏览器加印 → 回退原始直链，保证用户能拿到文件
-        console.warn('[watermark] 加印失败，回退原始文件:', stampError)
-        window.$message?.warning('该 PDF 无法在浏览器加印（可能已加密），已为你下载原始文件')
-        saveBlob(blob, filename)
-      }
-      return
-    }
 
     if (isIOS) {
       // iOS Safari 会拦截隐藏 iframe/target=_blank, 用 window.open 允许用户确认
@@ -188,13 +163,20 @@ async function download(material) {
   finally { downloading.value = null }
 }
 
-function levelLabel(level) { return level === 'senior' ? '高中' : '初中' }
-function extension(filename) { return String(filename || '文件').split('.').pop()?.toUpperCase().slice(0, 5) || '文件' }
+function levelLabel(level) {
+  return level === 'senior' ? '高中' : '初中'
+}
+function extension(filename) {
+  return String(filename || '文件').split('.').pop()?.toUpperCase().slice(0, 5) || '文件'
+}
 function formatSize(size) {
   let value = Number(size) || 0
   const units = ['B', 'KB', 'MB', 'GB']
   let index = 0
-  while (value >= 1024 && index < units.length - 1) { value /= 1024; index += 1 }
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
   return `${value.toFixed(index ? 1 : 0)} ${units[index]}`
 }
 

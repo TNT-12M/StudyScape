@@ -911,18 +911,47 @@ class PHPHandler(BaseHTTPRequestHandler):
                 "size": len(raw),
                 "mime": payload.get("mime", ""),
                 "file_b64": payload["file_b64"],
+                "watermark_platform": bool(payload.get("watermark_platform")),
+                "title": payload.get("title", ""),
             }
             try:
                 result = asyncio.run_coroutine_threadsafe(
-                    STATE.storage_request(req_id, storage_payload, timeout=60), event_loop
-                ).result(timeout=65)
+                    STATE.storage_request(req_id, storage_payload, timeout=180), event_loop
+                ).result(timeout=185)
             except Exception as e:
                 self._send(500, {"error": str(e)}); return
 
             if result.get("ok"):
-                self._send(200, {"ok": True, "sha256": result.get("sha256"), "home_path": result.get("home_path")})
+                self._send(200, {"ok": True, **{k: v for k, v in result.items() if k != "ok"}})
             else:
                 self._send(502, {"ok": False, "error": result.get("error", "unknown")})
+            return
+
+        if path == "/storage/prepare-variant":
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except json.JSONDecodeError:
+                self._send(400, {"error": "JSON 格式错误"}); return
+            required = ["stored_name", "variant_name", "username", "user_id"]
+            missing = [key for key in required if str(payload.get(key, "")).strip() == ""]
+            if missing:
+                self._send(400, {"error": f"缺少字段: {missing}"}); return
+            req_id = f"var_{int(time.time())}_{secrets.token_hex(4)}"
+            storage_payload = {
+                "action": "prepare_variant", "stored_name": payload["stored_name"],
+                "variant_name": payload["variant_name"], "username": payload["username"],
+                "user_id": payload["user_id"],
+            }
+            try:
+                result = asyncio.run_coroutine_threadsafe(
+                    STATE.storage_request(req_id, storage_payload, timeout=180), event_loop
+                ).result(timeout=185)
+            except Exception as e:
+                self._send(500, {"error": str(e)}); return
+            if result.get("ok"):
+                self._send(200, {"ok": True, **{k: v for k, v in result.items() if k != "ok"}})
+            else:
+                self._send(502, {"ok": False, "error": result.get("error", "variant render failed")})
             return
 
         if path == "/storage/retrieve":
@@ -940,6 +969,7 @@ class PHPHandler(BaseHTTPRequestHandler):
             storage_payload = {
                 "action": "retrieve",
                 "stored_name": stored_name,
+                "storage_scope": payload.get("storage_scope", "material"),
             }
             try:
                 result = asyncio.run_coroutine_threadsafe(
@@ -973,8 +1003,10 @@ class PHPHandler(BaseHTTPRequestHandler):
 
             req_id = f"del_{int(time.time())}_{secrets.token_hex(4)}"
             result = asyncio.run_coroutine_threadsafe(
-                STATE.storage_request(req_id, {"action": "delete", "stored_name": stored_name}, timeout=30),
-                event_loop
+                STATE.storage_request(req_id, {
+                    "action": "delete", "stored_name": stored_name,
+                    "storage_scope": payload.get("storage_scope", "material"),
+                }, timeout=30), event_loop
             ).result(timeout=35)
 
             if result.get("ok"):
@@ -985,7 +1017,8 @@ class PHPHandler(BaseHTTPRequestHandler):
 
         self._send(404, {"error": f"未知端点: {path}", "available": [
             "/upload (POST)", "/export_pdf (POST)",
-            "/storage/store (POST)", "/storage/retrieve (POST)", "/storage/delete (POST)"
+            "/storage/store (POST)", "/storage/prepare-variant (POST)",
+            "/storage/retrieve (POST)", "/storage/delete (POST)"
         ]})
 
 

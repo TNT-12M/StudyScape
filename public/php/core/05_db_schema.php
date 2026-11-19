@@ -138,7 +138,13 @@ CREATE TABLE IF NOT EXISTS materials (
     uploaded_by INTEGER,
     uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    downloads INTEGER DEFAULT 0
+    downloads INTEGER DEFAULT 0,
+    source_sha256 TEXT,
+    revision INTEGER DEFAULT 1,
+    platform_watermark_version INTEGER,
+    platform_watermark_status TEXT DEFAULT 'pending',
+    platform_watermarked_at DATETIME,
+    processing_error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_materials_subject ON materials(subject);
 ";
@@ -204,7 +210,7 @@ CREATE INDEX IF NOT EXISTS qdb.idx_pq_question ON paper_questions(question_id);
 
 // ===== 只跑一次的 migration 版本 =====
 // 用 schema_migrations 跟踪已执行版本号, 避免每次请求都跑全量 UPDATE/ALTER
-$MIGRATION_VERSION = 7;
+$MIGRATION_VERSION = 14;
 
 function _runOnce($db, int $version, string $label, callable $fn): void {
     // static 数组: 同一 worker 进程内第一次查完 DB 就记住了, 后续请求 0 DB 查询
@@ -296,4 +302,40 @@ _runOnce($db, 13, '站点配置键值表 app_settings', function() use ($db) {
         v TEXT NOT NULL DEFAULT '',
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )");
+});
+
+_runOnce($db, 14, '资料两阶段水印与用户下载变体缓存', function() use ($db) {
+    $res = $db->query("PRAGMA table_info(materials)");
+    $cols = [];
+    if ($res) while ($c = $res->fetchArray(SQLITE3_ASSOC)) $cols[] = strtolower($c['name']);
+    $definitions = [
+        'source_sha256' => 'TEXT',
+        'revision' => 'INTEGER DEFAULT 1',
+        'platform_watermark_version' => 'INTEGER',
+        'platform_watermark_status' => "TEXT DEFAULT 'pending'",
+        'platform_watermarked_at' => 'DATETIME',
+        'processing_error' => 'TEXT',
+    ];
+    foreach ($definitions as $name => $definition) {
+        if (!in_array($name, $cols, true)) {
+            $db->exec("ALTER TABLE materials ADD COLUMN {$name} {$definition}");
+        }
+    }
+    $db->exec("UPDATE materials SET revision=1 WHERE revision IS NULL OR revision < 1");
+    $db->exec("UPDATE materials SET platform_watermark_status='pending' WHERE platform_watermark_status IS NULL OR platform_watermark_status='' ");
+    $db->exec("CREATE TABLE IF NOT EXISTS material_download_variants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        material_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        username TEXT NOT NULL,
+        material_revision INTEGER NOT NULL,
+        variant_name TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(material_id, user_id, username, material_revision)
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_material_variants_material ON material_download_variants(material_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_material_variants_user ON material_download_variants(user_id, username)");
 });
