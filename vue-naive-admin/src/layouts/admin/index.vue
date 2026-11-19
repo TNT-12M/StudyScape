@@ -3,7 +3,17 @@
     <!-- 移动端遮罩 -->
     <div v-if="mobileSidebarOpen" class="sidebar-mask" @click="mobileSidebarOpen = false" />
 
-    <aside class="admin-sidebar" :class="{ 'is-open': mobileSidebarOpen }">
+    <aside
+      class="admin-sidebar"
+      :class="{ 'is-open': mobileSidebarOpen }"
+      :style="prefs.wallpaperUrl
+        ? {
+          backgroundImage: `linear-gradient(rgba(15,26,40,.72), rgba(15,26,40,.9)), url(${prefs.wallpaperUrl})`,
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+        }
+        : undefined"
+    >
       <div class="admin-logo">
         <span class="logo-icon">📚</span>
         <span class="logo-text">学境・管理</span>
@@ -130,11 +140,12 @@ import { useRoute, useRouter } from 'vue-router'
 import { phpNotificationApi } from '@/api/php-modules'
 import { useIsMobile } from '@/composables/useIsMobile'
 import { SessionProfileLink } from '@/layouts/components'
-import { useSessionStore } from '@/store'
+import { usePrefsStore, useSessionStore } from '@/store'
 
 const router = useRouter()
 const route = useRoute()
 const session = useSessionStore()
+const prefs = usePrefsStore()
 const { isMobile } = useIsMobile()
 const notifications = ref([])
 const unreadCount = ref(0)
@@ -197,6 +208,7 @@ async function clearAllNotifications() {
 
 onMounted(() => {
   loadNotifications()
+  prefs.load()
 })
 
 async function logout() {
