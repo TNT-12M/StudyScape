@@ -173,14 +173,19 @@
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showSpecialImport" preset="card" title="特殊题目上传" style="width:min(680px, 94vw)">
+    <n-modal
+      v-model:show="showSpecialImport" preset="card" title="特殊题目上传" style="width:min(680px, 94vw)"
+      :mask-closable="!specialImporting" :close-on-esc="!specialImporting" :closable="!specialImporting"
+    >
       <n-alert type="warning" class="mb-16">
         适用于包含 questions、stem_html 和 image_urls 的特殊题库 JSON。远程图片将自动下载、适度压缩并替换为服务器本地地址。
       </n-alert>
       <n-form label-placement="top">
         <n-form-item label="特殊题目 JSON">
-          <n-upload :show-file-list="false" accept=".json,application/json" @before-upload="readSpecialQuestionFile">
-            <NButton>选择 JSON 文件</NButton>
+          <n-upload :show-file-list="false" accept=".json,application/json" :disabled="specialImporting" @before-upload="readSpecialQuestionFile">
+            <NButton :disabled="specialImporting">
+              选择 JSON 文件
+            </NButton>
           </n-upload>
           <div v-if="specialImportForm.fileName" class="file-summary">
             {{ specialImportForm.fileName }} · {{ specialImportForm.questionCount }} 道题 · {{ specialImportForm.imageCount }} 张图片
@@ -188,18 +193,35 @@
         </n-form-item>
         <n-grid :cols="2" :x-gap="12">
           <n-form-item-gi label="学段覆盖（可选）">
-            <NSelect v-model:value="specialImportForm.education_level" clearable :options="levelOptions" placeholder="自动识别" />
+            <NSelect v-model:value="specialImportForm.education_level" clearable :disabled="specialImporting" :options="levelOptions" placeholder="自动识别" />
           </n-form-item-gi>
           <n-form-item-gi label="科目覆盖（可选）">
-            <n-input v-model:value="specialImportForm.subject" placeholder="自动识别" />
+            <n-input v-model:value="specialImportForm.subject" :disabled="specialImporting" placeholder="自动识别" />
           </n-form-item-gi>
         </n-grid>
       </n-form>
+      <div v-if="specialImporting" class="special-import-progress">
+        <div class="progress-stage">
+          {{ specialImportProgress.message }}
+        </div>
+        <n-progress type="line" :percentage="specialImportProgress.percent" indicator-placement="inside" processing />
+        <n-grid :cols="2" :x-gap="16" :y-gap="8" class="progress-stats">
+          <n-gi>题目：{{ specialImportProgress.questions_processed }} / {{ specialImportProgress.question_total }}</n-gi>
+          <n-gi>已导入：{{ specialImportProgress.inserted }}</n-gi>
+          <n-gi>重复跳过：{{ specialImportProgress.skipped }}</n-gi>
+          <n-gi>题目失败：{{ specialImportProgress.errors }}</n-gi>
+          <n-gi>图片：{{ specialImportProgress.images_processed }} / {{ specialImportProgress.image_total }}</n-gi>
+          <n-gi>图片未处理：{{ specialImagesRemaining }}</n-gi>
+          <n-gi>新下载：{{ specialImportProgress.images_downloaded }}</n-gi>
+          <n-gi>复用：{{ specialImportProgress.images_reused }}</n-gi>
+          <n-gi>图片失败：{{ specialImportProgress.images_failed }}</n-gi>
+        </n-grid>
+      </div>
       <template #footer>
         <NSpace justify="end">
-          <NButton @click="showSpecialImport = false">
+          <NButton :disabled="specialImporting" @click="showSpecialImport = false">
             取消
-          </NButton><NButton type="warning" :loading="specialImporting" @click="doSpecialImport">
+          </NButton><NButton type="warning" :loading="specialImporting" :disabled="specialImporting" @click="doSpecialImport">
             下载图片并导入
           </NButton>
         </NSpace>
@@ -210,6 +232,7 @@
 
 <script setup>
 import { NButton, NSelect, NSpace, NTag } from 'naive-ui'
+import { onBeforeUnmount } from 'vue'
 import { phpQuestionsApi } from '@/api/php-modules'
 import { renderRichText } from '@/views/user/components/question-utils'
 
@@ -235,12 +258,15 @@ const subjects = ref([])
 const form = reactive(defaultForm())
 const importForm = reactive({ json_data: '', education_level: '', category: '', subject: '', answerData: null })
 const specialImportForm = reactive({ json_data: '', fileName: '', questionCount: 0, imageCount: 0, education_level: '', subject: '' })
+const specialImportProgress = reactive(defaultSpecialImportProgress())
+let specialImportPollTimer = null
 const levelOptions = [{ label: '初中', value: 'junior' }, { label: '高中', value: 'senior' }]
 const typeOptions = [{ label: '单选题', value: 'single' }, { label: '多选题', value: 'multiple' }, { label: '判断题', value: 'judge' }, { label: '填空题', value: 'fill' }, { label: '多空填空题', value: 'multi_fill' }, { label: '简答题', value: 'short' }]
 const qualityOptions = [{ label: '有问题（瑕疵 + 坏题）', value: 'problem' }, { label: '正常', value: 'good' }, { label: '瑕疵', value: 'poor' }, { label: '坏题', value: 'trash' }]
 const categoryOptions = typeOptions
 const subjectOptions = computed(() => subjects.value.map(item => ({ label: item, value: item })))
 const problemIdsOnPage = computed(() => questions.value.filter(item => item.quality === 'poor' || item.quality === 'trash').map(item => Number(item.id)))
+const specialImagesRemaining = computed(() => Math.max(0, specialImportProgress.image_total - specialImportProgress.images_processed))
 const statCards = computed(() => [{ label: '题目总数', value: stats.value.total || 0 }, { label: '科目数', value: stats.value.by_subject?.length || 0 }, { label: '题型数', value: stats.value.by_type?.length || 0 }, { label: '当前页', value: questions.value.length }])
 const previewContent = computed(() => {
   const content = form.content || ''
@@ -273,6 +299,9 @@ const columns = [{ type: 'selection' }, { title: '展开', key: 'expand', width:
 
 function defaultForm() {
   return { subject: '', education_level: 'junior', category: 'single', question_type: 'single', content: '', options: ['', '', '', ''], correct_answer: '', explanation: '', difficulty: 3, points: 1 }
+}
+function defaultSpecialImportProgress() {
+  return { status: 'idle', stage: 'idle', question_total: 0, questions_processed: 0, inserted: 0, skipped: 0, errors: 0, image_total: 0, images_processed: 0, images_downloaded: 0, images_reused: 0, images_failed: 0, percent: 0, message: '准备开始导入', error_details: [] }
 }
 function labelOf(type) {
   return typeOptions.find(item => item.value === type)?.label || type || '-'
@@ -650,32 +679,68 @@ async function readSpecialQuestionFile({ file }) {
   }
   return false
 }
+function stopSpecialImportPolling() {
+  if (specialImportPollTimer) {
+    clearTimeout(specialImportPollTimer)
+    specialImportPollTimer = null
+  }
+}
+function pollSpecialImportProgress(jobId) {
+  stopSpecialImportPolling()
+  const poll = async () => {
+    if (!specialImporting.value)
+      return
+    try {
+      const result = await phpQuestionsApi.specialImportProgress(jobId)
+      if (result.progress)
+        Object.assign(specialImportProgress, result.progress)
+    }
+    catch {
+      // The import request remains authoritative; transient polling errors are retried.
+    }
+    if (specialImporting.value)
+      specialImportPollTimer = setTimeout(poll, 500)
+  }
+  specialImportPollTimer = setTimeout(poll, 500)
+}
 async function doSpecialImport() {
   if (!specialImportForm.json_data)
     return message.warning('请先选择特殊题目 JSON 文件')
+  const jobId = crypto.randomUUID()
   specialImporting.value = true
-  const notice = message.loading('正在下载图片并导入题目，请稍候...', { duration: 0 })
+  Object.assign(specialImportProgress, defaultSpecialImportProgress(), {
+    status: 'running',
+    stage: 'initializing',
+    question_total: specialImportForm.questionCount,
+    image_total: specialImportForm.imageCount,
+    percent: 1,
+    message: '正在启动导入任务',
+  })
+  pollSpecialImportProgress(jobId)
   try {
     const result = await phpQuestionsApi.importSpecial({
+      job_id: jobId,
       json_data: specialImportForm.json_data,
       education_level: specialImportForm.education_level,
       subject: specialImportForm.subject,
     })
-    notice.destroy()
+    Object.assign(specialImportProgress, { status: 'completed', stage: 'completed', percent: 100, message: result.message || '特殊题目导入完成' })
     message.success(result.message || '特殊题目导入完成', { duration: 6000 })
     showSpecialImport.value = false
     Object.assign(specialImportForm, { json_data: '', fileName: '', questionCount: 0, imageCount: 0, education_level: '', subject: '' })
     await Promise.all([loadQuestions(), loadStats()])
   }
   catch (error) {
-    notice.destroy()
     const detail = error.legacy?.data?.errors?.[0]
+    Object.assign(specialImportProgress, { status: 'failed', stage: 'failed', message: detail || error.message || '特殊题目导入失败' })
     message.error(detail || error.message || '特殊题目导入失败', { duration: 8000 })
   }
   finally {
     specialImporting.value = false
+    stopSpecialImportPolling()
   }
 }
+onBeforeUnmount(stopSpecialImportPolling)
 onMounted(async () => {
   await Promise.all([loadStats(), reloadSubjects()])
   await loadQuestions()
@@ -691,6 +756,18 @@ onMounted(async () => {
 }
 .file-summary {
   margin-top: 10px;
+  color: var(--n-text-color-2);
+  font-size: 13px;
+}
+.special-import-progress {
+  padding-top: 4px;
+}
+.progress-stage {
+  margin-bottom: 10px;
+  font-weight: 500;
+}
+.progress-stats {
+  margin-top: 12px;
   color: var(--n-text-color-2);
   font-size: 13px;
 }

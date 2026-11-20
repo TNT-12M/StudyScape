@@ -2,6 +2,66 @@
 // =====================================================
 // ============== 特殊题库导入辅助函数 =================
 // =====================================================
+function specialImportJobDirectory(): string {
+    return dirname(__DIR__) . '/runtime/special-import-jobs';
+}
+
+function specialImportJobPath(string $jobId): string {
+    if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i', $jobId)) {
+        throw new InvalidArgumentException('导入任务 ID 无效');
+    }
+    return specialImportJobDirectory() . '/' . strtolower($jobId) . '.json';
+}
+
+function specialImportCleanupJobs(): void {
+    $dir = specialImportJobDirectory();
+    if (!is_dir($dir) && !@mkdir($dir, 0750, true) && !is_dir($dir)) {
+        throw new RuntimeException('导入进度目录创建失败');
+    }
+    $expiresAt = time() - 86400;
+    foreach (glob($dir . '/*.json') ?: [] as $path) {
+        if ((int)@filemtime($path) < $expiresAt) @unlink($path);
+    }
+}
+
+function specialImportWriteJob(string $jobId, array $state): array {
+    $path = specialImportJobPath($jobId);
+    $dir = dirname($path);
+    if (!is_dir($dir) && !@mkdir($dir, 0750, true) && !is_dir($dir)) {
+        throw new RuntimeException('导入进度目录创建失败');
+    }
+    $defaults = [
+        'owner_id' => 0, 'status' => 'running', 'stage' => 'initializing',
+        'question_total' => 0, 'questions_processed' => 0, 'inserted' => 0,
+        'skipped' => 0, 'errors' => 0, 'image_total' => 0,
+        'images_processed' => 0, 'images_downloaded' => 0, 'images_reused' => 0,
+        'images_failed' => 0, 'percent' => 0, 'message' => '正在初始化导入任务',
+        'error_details' => [], 'updated_at' => date('c'),
+    ];
+    $current = [];
+    if (is_file($path)) {
+        $decoded = json_decode((string)@file_get_contents($path), true);
+        if (is_array($decoded)) $current = $decoded;
+    }
+    $next = array_merge($defaults, $current, $state, ['updated_at' => date('c')]);
+    $json = json_encode($next, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false) throw new RuntimeException('导入进度序列化失败');
+    $tmp = @tempnam($dir, '.special-import-');
+    if ($tmp === false || @file_put_contents($tmp, $json, LOCK_EX) === false || !@rename($tmp, $path)) {
+        if ($tmp !== false) @unlink($tmp);
+        throw new RuntimeException('导入进度写入失败');
+    }
+    @chmod($path, 0640);
+    return $next;
+}
+
+function specialImportReadJob(string $jobId): ?array {
+    $path = specialImportJobPath($jobId);
+    if (!is_file($path)) return null;
+    $state = json_decode((string)@file_get_contents($path), true);
+    return is_array($state) ? $state : null;
+}
+
 function specialQuestionIsPublicIp(string $ip): bool {
     return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) !== false;
 }
@@ -102,18 +162,23 @@ function specialQuestionSaveDownloadedImage(string $tmp, string $targetDir): arr
     return ['path' => $target, 'created' => true];
 }
 
-function specialQuestionDownloadImages(array $urls, string $targetDir, int $concurrency = 4): array {
+function specialQuestionDownloadImages(array $urls, string $targetDir, int $concurrency = 4, ?callable $progressCallback = null): array {
     $urls = array_values(array_unique(array_filter(array_map('trim', $urls))));
     $concurrency = max(1, min(4, $concurrency));
     $results = []; $errors = []; $queue = [];
+    $report = static function (string $url, string $status, ?array $saved = null, string $error = '') use ($progressCallback): void {
+        if ($progressCallback !== null) $progressCallback($url, $status, $saved, $error);
+    };
     foreach ($urls as $url) {
         try {
             [$normalizedUrl, $host, $ip] = specialQuestionValidateImageUrl($url);
             $queue[] = ['key' => $url, 'url' => $normalizedUrl, 'host' => $host, 'ip' => $ip];
         } catch (Throwable $error) {
             $errors[$url] = $error->getMessage();
+            $report($url, 'failed', null, $error->getMessage());
         }
     }
+    if (!$queue) return ['results' => $results, 'errors' => $errors];
     $multi = curl_multi_init();
     if (defined('CURLMOPT_MAX_TOTAL_CONNECTIONS')) curl_multi_setopt($multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, $concurrency);
     if (defined('CURLMOPT_MAX_HOST_CONNECTIONS')) curl_multi_setopt($multi, CURLMOPT_MAX_HOST_CONNECTIONS, 2);
@@ -126,6 +191,7 @@ function specialQuestionDownloadImages(array $urls, string $targetDir, int $conc
             if (!$fh) {
                 if ($tmp !== false) @unlink($tmp);
                 $errors[$item['key']] = '无法创建图片临时文件';
+                $report($item['key'], 'failed', null, $errors[$item['key']]);
                 continue;
             }
             $state = (object)['item' => $item, 'tmp' => $tmp, 'fh' => $fh, 'size' => 0, 'limit' => 8 * 1024 * 1024];
@@ -160,12 +226,15 @@ function specialQuestionDownloadImages(array $urls, string $targetDir, int $conc
             if ($status !== CURLM_OK || $curlError !== '' || $httpStatus < 200 || $httpStatus >= 300 || $state->size < 1) {
                 @unlink($state->tmp);
                 $errors[$key] = $state->size >= $state->limit ? '图片超过 8MB 限制' : ('图片下载失败' . ($curlError ? "：{$curlError}" : "（HTTP {$httpStatus}）"));
+                $report($key, 'failed', null, $errors[$key]);
                 continue;
             }
             try {
                 $results[$key] = specialQuestionSaveDownloadedImage($state->tmp, $targetDir);
+                $report($key, $results[$key]['created'] ? 'downloaded' : 'reused', $results[$key]);
             } catch (Throwable $error) {
                 $errors[$key] = $error->getMessage();
+                $report($key, 'failed', null, $error->getMessage());
             }
         }
         if ($queue) usleep(100000);

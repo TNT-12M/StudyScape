@@ -3071,14 +3071,43 @@ if ($action) {
                 break;
 
             // ---------- 特殊题库 JSON 导入（远程图片落盘） ----------
+            case 'get_special_import_progress':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                $uid = requireContentPermission('question_import');
+                $jobId = strtolower(trim((string)($_POST['job_id'] ?? $_GET['job_id'] ?? '')));
+                try {
+                    $job = specialImportReadJob($jobId);
+                } catch (InvalidArgumentException $error) {
+                    jsonOut(false, $error->getMessage());
+                }
+                if (!$job || (int)($job['owner_id'] ?? 0) !== (int)$uid) jsonOut(false, '导入任务不存在');
+                jsonOut(true, '', ['progress' => $job]);
+                break;
+
             case 'import_special_questions_json':
                 if (!isLoggedIn()) jsonOut(false, '请先登录');
-                requireContentPermission('question_import');
+                $uid = requireContentPermission('question_import');
+                $jobId = strtolower(trim((string)($_POST['job_id'] ?? '')));
+                try {
+                    specialImportJobPath($jobId);
+                } catch (InvalidArgumentException $error) {
+                    jsonOut(false, $error->getMessage());
+                }
                 $rawJson = (string)($_POST['json_data'] ?? '');
                 if (trim($rawJson) === '') jsonOut(false, '请提供特殊题目 JSON 数据');
                 $data = json_decode($rawJson, true);
                 if (!is_array($data) || !isset($data['questions']) || !is_array($data['questions'])) jsonOut(false, 'JSON 格式不正确：缺少 questions 数组');
-                if (count($data['questions']) < 1 || count($data['questions']) > 10000) jsonOut(false, '单次仅允许导入 1-10000 道题目');
+                $questionTotal = count($data['questions']);
+                if ($questionTotal < 1 || $questionTotal > 10000) jsonOut(false, '单次仅允许导入 1-10000 道题目');
+
+                specialImportCleanupJobs();
+                $progress = specialImportWriteJob($jobId, [
+                    'owner_id' => (int)$uid, 'question_total' => $questionTotal,
+                    'status' => 'running', 'stage' => 'initializing', 'percent' => 1,
+                    'message' => '正在分析题目和图片',
+                ]);
+                ignore_user_abort(true);
+                if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
 
                 $subject = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
                 if ($subject === '') {
@@ -3096,7 +3125,7 @@ if ($action) {
                 $imageDir = dirname(__DIR__, 2) . '/question-images';
                 $createdFiles = [];
                 $imageCache = [];
-                $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0, 'images_downloaded' => 0, 'images_reused' => 0];
+                $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0, 'images_downloaded' => 0, 'images_reused' => 0, 'images_failed' => 0];
                 $errorDetails = [];
                 $preparedQuestions = [];
 
@@ -3111,17 +3140,33 @@ if ($action) {
                         }
                         $allImageUrls = array_merge($allImageUrls, $urls);
                     }
-                    $downloadBatch = specialQuestionDownloadImages($allImageUrls, $imageDir, 4);
+                    $allImageUrls = array_values(array_unique(array_filter(array_map('trim', $allImageUrls))));
+                    $progress = specialImportWriteJob($jobId, [
+                        'stage' => 'downloading_images', 'image_total' => count($allImageUrls),
+                        'percent' => count($allImageUrls) ? 5 : 45,
+                        'message' => count($allImageUrls) ? '正在下载并处理题目图片' : '题目中没有需要下载的图片',
+                    ]);
+                    $downloadBatch = specialQuestionDownloadImages($allImageUrls, $imageDir, 4, function (string $url, string $status, ?array $saved, string $error) use ($jobId, &$progress, &$stats): void {
+                        $progress['images_processed']++;
+                        if ($status === 'downloaded') $stats['images_downloaded']++;
+                        elseif ($status === 'reused') $stats['images_reused']++;
+                        else $stats['images_failed']++;
+                        $imageTotal = max(1, (int)$progress['image_total']);
+                        $progress = specialImportWriteJob($jobId, [
+                            'images_processed' => $progress['images_processed'],
+                            'images_downloaded' => $stats['images_downloaded'],
+                            'images_reused' => $stats['images_reused'],
+                            'images_failed' => $stats['images_failed'],
+                            'percent' => min(45, 5 + (int)floor(40 * $progress['images_processed'] / $imageTotal)),
+                            'message' => "正在处理图片 {$progress['images_processed']} / {$progress['image_total']}",
+                        ]);
+                    });
                     foreach ($downloadBatch['results'] as $imageUrl => $saved) {
                         $imageCache[$imageUrl] = '/question-images/' . basename($saved['path']);
-                        if ($saved['created']) {
-                            $createdFiles[] = $saved['path'];
-                            $stats['images_downloaded']++;
-                        } else {
-                            $stats['images_reused']++;
-                        }
+                        if ($saved['created']) $createdFiles[] = $saved['path'];
                     }
 
+                    $progress = specialImportWriteJob($jobId, ['stage' => 'preparing_questions', 'percent' => 48, 'message' => '正在校验和整理题目']);
                     foreach ($data['questions'] as $index => $source) {
                         try {
                             if (!is_array($source)) throw new RuntimeException('题目不是对象');
@@ -3134,9 +3179,7 @@ if ($action) {
                             }
                             $urls = array_values(array_unique(array_filter(array_map('trim', $urls))));
                             foreach ($urls as $imageUrl) {
-                                if (!isset($imageCache[$imageUrl])) {
-                                    throw new RuntimeException($downloadBatch['errors'][$imageUrl] ?? '图片下载失败');
-                                }
+                                if (!isset($imageCache[$imageUrl])) throw new RuntimeException($downloadBatch['errors'][$imageUrl] ?? '图片下载失败');
                                 $content = str_replace([$imageUrl, htmlspecialchars($imageUrl, ENT_QUOTES | ENT_HTML5, 'UTF-8')], $imageCache[$imageUrl], $content);
                             }
                             if (preg_match('/<img\b[^>]*\bsrc\s*=\s*["\']https?:\/\//iu', $content)) throw new RuntimeException('题干仍包含未成功处理的远程图片');
@@ -3160,29 +3203,59 @@ if ($action) {
                     }
                     if (!$preparedQuestions && $stats['errors'] > 0) throw new RuntimeException($errorDetails[0] ?? '没有题目可以导入');
 
+                    $questionsProcessed = $stats['errors'];
+                    $progress = specialImportWriteJob($jobId, [
+                        'stage' => 'importing_questions', 'questions_processed' => $questionsProcessed,
+                        'errors' => $stats['errors'], 'error_details' => $errorDetails,
+                        'percent' => min(98, 50 + (int)floor(48 * $questionsProcessed / $questionTotal)),
+                        'message' => "正在写入题目 {$questionsProcessed} / {$questionTotal}",
+                    ]);
                     $db->exec('BEGIN IMMEDIATE');
                     $matchKey = 'special_' . hash('sha256', (string)($data['source'] ?? '') . '|' . $subject . '|' . $educationLevel);
                     foreach ($preparedQuestions as [$sourceId, $content, $type, $category, $options, $answer, $explanation, $difficulty]) {
                         $dup = dbFetchOne($db, 'SELECT id FROM questions WHERE content=? AND subject=? AND education_level=? LIMIT 1', [$content, $subject, $educationLevel]);
                         if ($dup) {
                             $stats['skipped']++;
-                            continue;
+                        } else {
+                            $optionsJson = $options ? json_encode($options, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null;
+                            dbQuery($db, 'INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html, match_key, source_qid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                [$subject, $type, $category, $educationLevel, $content, $optionsJson, $answer, $explanation ?: null, $difficulty, 1.0, 1, $matchKey, $sourceId]);
+                            $stats['inserted']++;
                         }
-                        $optionsJson = $options ? json_encode($options, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null;
-                        dbQuery($db, 'INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html, match_key, source_qid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                            [$subject, $type, $category, $educationLevel, $content, $optionsJson, $answer, $explanation ?: null, $difficulty, 1.0, 1, $matchKey, $sourceId]);
-                        $stats['inserted']++;
+                        $questionsProcessed++;
+                        $progress = specialImportWriteJob($jobId, [
+                            'questions_processed' => $questionsProcessed, 'inserted' => $stats['inserted'],
+                            'skipped' => $stats['skipped'], 'errors' => $stats['errors'],
+                            'percent' => min(98, 50 + (int)floor(48 * $questionsProcessed / $questionTotal)),
+                            'message' => "正在写入题目 {$questionsProcessed} / {$questionTotal}",
+                        ]);
                     }
                     $db->exec('COMMIT');
                 } catch (Throwable $importError) {
                     @$db->exec('ROLLBACK');
                     foreach ($createdFiles as $createdFile) @unlink($createdFile);
+                    $failureDetails = $errorDetails;
+                    if (count($failureDetails) < 20) $failureDetails[] = $importError->getMessage();
+                    specialImportWriteJob($jobId, [
+                        'status' => 'failed', 'stage' => 'failed', 'inserted' => $stats['inserted'],
+                        'skipped' => $stats['skipped'], 'errors' => $stats['errors'],
+                        'images_downloaded' => $stats['images_downloaded'], 'images_reused' => $stats['images_reused'],
+                        'images_failed' => $stats['images_failed'], 'message' => '特殊题目导入失败：' . $importError->getMessage(),
+                        'error_details' => $failureDetails,
+                    ]);
                     jsonOut(false, '特殊题目导入失败：' . $importError->getMessage(), ['stats' => $stats, 'errors' => $errorDetails]);
                 }
                 if ($stats['inserted'] > 0) {
                     notifyRootsOnContentUpload('内容管理员导入了特殊题目', "本次导入新增 {$stats['inserted']} 道（{$subject}），请抽空确认。", 0);
                 }
                 $message = "导入完成：新增 {$stats['inserted']} / 重复跳过 {$stats['skipped']} / 失败 {$stats['errors']} / 新图片 {$stats['images_downloaded']}";
+                specialImportWriteJob($jobId, [
+                    'status' => 'completed', 'stage' => 'completed', 'questions_processed' => $questionTotal,
+                    'inserted' => $stats['inserted'], 'skipped' => $stats['skipped'], 'errors' => $stats['errors'],
+                    'images_downloaded' => $stats['images_downloaded'], 'images_reused' => $stats['images_reused'],
+                    'images_failed' => $stats['images_failed'], 'percent' => 100, 'message' => $message,
+                    'error_details' => $errorDetails,
+                ]);
                 jsonOut(true, $message, ['stats' => $stats, 'errors' => $errorDetails, 'subject' => $subject, 'education_level' => $educationLevel]);
                 break;
 
