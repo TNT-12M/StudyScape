@@ -7,78 +7,57 @@ function specialQuestionIsPublicIp(string $ip): bool {
 }
 
 function specialQuestionResolveHost(string $host): array {
+    static $cache = [];
+    if (array_key_exists($host, $cache)) return $cache[$host];
     if (filter_var($host, FILTER_VALIDATE_IP)) {
-        return specialQuestionIsPublicIp($host) ? [$host] : [];
+        return $cache[$host] = specialQuestionIsPublicIp($host) ? [$host] : [];
     }
     $ips = [];
-    if (function_exists('dns_get_record')) {
-        $records = @dns_get_record($host, DNS_A | DNS_AAAA) ?: [];
-        foreach ($records as $record) {
-            $ip = $record['ip'] ?? ($record['ipv6'] ?? '');
-            if ($ip !== '') $ips[] = $ip;
-        }
+    $canAlarm = function_exists('pcntl_async_signals') && function_exists('pcntl_signal') && function_exists('pcntl_alarm');
+    if ($canAlarm) {
+        pcntl_async_signals(true);
+        pcntl_signal(SIGALRM, static function (): void { throw new RuntimeException('图片域名解析超时'); });
+        pcntl_alarm(3);
     }
-    if (!$ips) {
-        $ip = @gethostbyname($host);
-        if ($ip !== $host) $ips[] = $ip;
+    try {
+        if (function_exists('dns_get_record')) {
+            $records = @dns_get_record($host, DNS_A | DNS_AAAA) ?: [];
+            foreach ($records as $record) {
+                $ip = $record['ip'] ?? ($record['ipv6'] ?? '');
+                if ($ip !== '') $ips[] = $ip;
+            }
+        }
+        if (!$ips) {
+            $ip = @gethostbyname($host);
+            if ($ip !== $host) $ips[] = $ip;
+        }
+    } finally {
+        if ($canAlarm) {
+            pcntl_alarm(0);
+            pcntl_signal(SIGALRM, SIG_DFL);
+        }
     }
     $ips = array_values(array_unique($ips));
     foreach ($ips as $ip) {
-        if (!specialQuestionIsPublicIp($ip)) return [];
+        if (!specialQuestionIsPublicIp($ip)) return $cache[$host] = [];
     }
-    return $ips;
+    return $cache[$host] = $ips;
 }
 
-function specialQuestionDownloadImage(string $url, string $targetDir): array {
+function specialQuestionValidateImageUrl(string $url): array {
     $url = html_entity_decode(trim($url), ENT_QUOTES | ENT_HTML5, 'UTF-8');
     $parts = parse_url($url);
     if (!$parts || strtolower((string)($parts['scheme'] ?? '')) !== 'https' || empty($parts['host']) || isset($parts['user']) || isset($parts['pass'])) {
         throw new RuntimeException('图片地址必须是公开 HTTPS URL');
     }
     $host = strtolower(rtrim((string)$parts['host'], '.'));
+    if ((int)($parts['port'] ?? 443) !== 443) throw new RuntimeException('图片地址仅允许 HTTPS 标准端口');
     $ips = specialQuestionResolveHost($host);
     if (!$ips) throw new RuntimeException('图片域名无法解析到公网地址');
-    $port = (int)($parts['port'] ?? 443);
-    if ($port !== 443) throw new RuntimeException('图片地址仅允许 HTTPS 标准端口');
+    return [$url, $host, $ips[0]];
+}
 
-    $tmp = tempnam(sys_get_temp_dir(), 'sqimg_');
-    if ($tmp === false) throw new RuntimeException('无法创建图片临时文件');
-    $fh = @fopen($tmp, 'w+b');
-    if (!$fh) {
-        @unlink($tmp);
-        throw new RuntimeException('无法写入图片临时文件');
-    }
-    $size = 0;
-    $limit = 8 * 1024 * 1024;
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_FOLLOWLOCATION => false,
-        CURLOPT_CONNECTTIMEOUT => 8,
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_USERAGENT => 'StudyScape-Question-Importer/1.0',
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_SSL_VERIFYHOST => 2,
-        CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
-        CURLOPT_RESOLVE => ["{$host}:443:{$ips[0]}"],
-        CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use ($fh, &$size, $limit): int {
-            $length = strlen($chunk);
-            if ($size + $length > $limit) return 0;
-            $written = fwrite($fh, $chunk);
-            if ($written === false) return 0;
-            $size += $written;
-            return $written;
-        },
-    ]);
-    $ok = curl_exec($ch);
-    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $error = curl_error($ch);
-    curl_close($ch);
-    fclose($fh);
-    if ($ok === false || $status < 200 || $status >= 300 || $size < 1) {
-        @unlink($tmp);
-        throw new RuntimeException($size >= $limit ? '图片超过 8MB 限制' : ('图片下载失败' . ($error ? "：{$error}" : "（HTTP {$status}）")));
-    }
-
+function specialQuestionSaveDownloadedImage(string $tmp, string $targetDir): array {
     $info = @getimagesize($tmp);
     $mime = strtolower((string)($info['mime'] ?? ''));
     $allowed = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp'];
@@ -90,15 +69,12 @@ function specialQuestionDownloadImage(string $url, string $targetDir): array {
         @unlink($tmp);
         throw new RuntimeException('题目图片目录创建失败');
     }
-
     $hash = hash_file('sha256', $tmp);
-    $extension = $allowed[$mime];
-    $target = $targetDir . '/' . $hash . '.' . $extension;
+    $target = $targetDir . '/' . $hash . '.' . $allowed[$mime];
     if (is_file($target)) {
         @unlink($tmp);
         return ['path' => $target, 'created' => false];
     }
-
     $saved = false;
     if ($mime !== 'image/gif' && function_exists('imagecreatefromstring')) {
         $raw = @file_get_contents($tmp);
@@ -110,10 +86,8 @@ function specialQuestionDownloadImage(string $url, string $targetDir): array {
             $newHeight = max(1, (int)round($height * $scale));
             $canvas = imagecreatetruecolor($newWidth, $newHeight);
             if ($mime === 'image/png' || $mime === 'image/webp') {
-                imagealphablending($canvas, false);
-                imagesavealpha($canvas, true);
-                $transparent = imagecolorallocatealpha($canvas, 0, 0, 0, 127);
-                imagefill($canvas, 0, 0, $transparent);
+                imagealphablending($canvas, false); imagesavealpha($canvas, true);
+                imagefill($canvas, 0, 0, imagecolorallocatealpha($canvas, 0, 0, 0, 127));
             }
             imagecopyresampled($canvas, $src, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height);
             if ($mime === 'image/jpeg' && function_exists('imagejpeg')) $saved = @imagejpeg($canvas, $target, 84);
@@ -126,6 +100,84 @@ function specialQuestionDownloadImage(string $url, string $targetDir): array {
     if (is_file($tmp)) @unlink($tmp);
     if (!$saved || !is_file($target)) throw new RuntimeException('题目图片保存失败');
     return ['path' => $target, 'created' => true];
+}
+
+function specialQuestionDownloadImages(array $urls, string $targetDir, int $concurrency = 4): array {
+    $urls = array_values(array_unique(array_filter(array_map('trim', $urls))));
+    $concurrency = max(1, min(4, $concurrency));
+    $results = []; $errors = []; $queue = [];
+    foreach ($urls as $url) {
+        try {
+            [$normalizedUrl, $host, $ip] = specialQuestionValidateImageUrl($url);
+            $queue[] = ['key' => $url, 'url' => $normalizedUrl, 'host' => $host, 'ip' => $ip];
+        } catch (Throwable $error) {
+            $errors[$url] = $error->getMessage();
+        }
+    }
+    $multi = curl_multi_init();
+    if (defined('CURLMOPT_MAX_TOTAL_CONNECTIONS')) curl_multi_setopt($multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, $concurrency);
+    if (defined('CURLMOPT_MAX_HOST_CONNECTIONS')) curl_multi_setopt($multi, CURLMOPT_MAX_HOST_CONNECTIONS, 2);
+    while ($queue) {
+        $batch = array_splice($queue, 0, $concurrency);
+        $states = [];
+        foreach ($batch as $item) {
+            $tmp = tempnam(sys_get_temp_dir(), 'sqimg_');
+            $fh = $tmp !== false ? @fopen($tmp, 'w+b') : false;
+            if (!$fh) {
+                if ($tmp !== false) @unlink($tmp);
+                $errors[$item['key']] = '无法创建图片临时文件';
+                continue;
+            }
+            $state = (object)['item' => $item, 'tmp' => $tmp, 'fh' => $fh, 'size' => 0, 'limit' => 8 * 1024 * 1024];
+            $ch = curl_init($item['url']);
+            curl_setopt_array($ch, [
+                CURLOPT_FOLLOWLOCATION => false, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => 20,
+                CURLOPT_USERAGENT => 'StudyScape-Question-Importer/1.0', CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+                CURLOPT_RESOLVE => ["{$item['host']}:443:{$item['ip']}"],
+                CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use ($state): int {
+                    $length = strlen($chunk);
+                    if ($state->size + $length > $state->limit) return 0;
+                    $written = fwrite($state->fh, $chunk);
+                    if ($written === false) return 0;
+                    $state->size += $written;
+                    return $written;
+                },
+            ]);
+            $states[] = [$ch, $state];
+            curl_multi_add_handle($multi, $ch);
+        }
+        $status = CURLM_OK;
+        do {
+            $status = curl_multi_exec($multi, $running);
+            if ($running) curl_multi_select($multi, 1.0);
+        } while ($running && $status === CURLM_OK);
+        foreach ($states as [$ch, $state]) {
+            $httpStatus = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
+            curl_multi_remove_handle($multi, $ch); curl_close($ch); fclose($state->fh);
+            $key = $state->item['key'];
+            if ($status !== CURLM_OK || $curlError !== '' || $httpStatus < 200 || $httpStatus >= 300 || $state->size < 1) {
+                @unlink($state->tmp);
+                $errors[$key] = $state->size >= $state->limit ? '图片超过 8MB 限制' : ('图片下载失败' . ($curlError ? "：{$curlError}" : "（HTTP {$httpStatus}）"));
+                continue;
+            }
+            try {
+                $results[$key] = specialQuestionSaveDownloadedImage($state->tmp, $targetDir);
+            } catch (Throwable $error) {
+                $errors[$key] = $error->getMessage();
+            }
+        }
+        if ($queue) usleep(100000);
+    }
+    curl_multi_close($multi);
+    return ['results' => $results, 'errors' => $errors];
+}
+
+function specialQuestionDownloadImage(string $url, string $targetDir): array {
+    $batch = specialQuestionDownloadImages([$url], $targetDir, 1);
+    if (isset($batch['results'][$url])) return $batch['results'][$url];
+    throw new RuntimeException($batch['errors'][$url] ?? '图片下载失败');
 }
 
 function specialQuestionType(array $question): string {

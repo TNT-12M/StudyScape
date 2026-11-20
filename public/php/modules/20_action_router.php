@@ -3101,6 +3101,27 @@ if ($action) {
                 $preparedQuestions = [];
 
                 try {
+                    $allImageUrls = [];
+                    foreach ($data['questions'] as $source) {
+                        if (!is_array($source)) continue;
+                        $content = (string)($source['stem_html'] ?? '');
+                        $urls = is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [];
+                        if (preg_match_all('/<img\b[^>]*\bsrc\s*=\s*(["\'])(.*?)\1/isu', $content, $matches)) {
+                            $urls = array_merge($urls, $matches[2]);
+                        }
+                        $allImageUrls = array_merge($allImageUrls, $urls);
+                    }
+                    $downloadBatch = specialQuestionDownloadImages($allImageUrls, $imageDir, 4);
+                    foreach ($downloadBatch['results'] as $imageUrl => $saved) {
+                        $imageCache[$imageUrl] = '/question-images/' . basename($saved['path']);
+                        if ($saved['created']) {
+                            $createdFiles[] = $saved['path'];
+                            $stats['images_downloaded']++;
+                        } else {
+                            $stats['images_reused']++;
+                        }
+                    }
+
                     foreach ($data['questions'] as $index => $source) {
                         try {
                             if (!is_array($source)) throw new RuntimeException('题目不是对象');
@@ -3114,14 +3135,7 @@ if ($action) {
                             $urls = array_values(array_unique(array_filter(array_map('trim', $urls))));
                             foreach ($urls as $imageUrl) {
                                 if (!isset($imageCache[$imageUrl])) {
-                                    $saved = specialQuestionDownloadImage($imageUrl, $imageDir);
-                                    $imageCache[$imageUrl] = '/question-images/' . basename($saved['path']);
-                                    if ($saved['created']) {
-                                        $createdFiles[] = $saved['path'];
-                                        $stats['images_downloaded']++;
-                                    } else {
-                                        $stats['images_reused']++;
-                                    }
+                                    throw new RuntimeException($downloadBatch['errors'][$imageUrl] ?? '图片下载失败');
                                 }
                                 $content = str_replace([$imageUrl, htmlspecialchars($imageUrl, ENT_QUOTES | ENT_HTML5, 'UTF-8')], $imageCache[$imageUrl], $content);
                             }

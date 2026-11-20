@@ -43,6 +43,6 @@ if (!in_array($requestedAction, $allowedActions, true)) {
 
 // 大文件解析/转码需要更多内存与执行时间
 @ini_set('memory_limit', '256M');
-@set_time_limit(300);
+@set_time_limit(600);
 
 require __DIR__ . '/api.php';

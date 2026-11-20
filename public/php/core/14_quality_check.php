@@ -63,7 +63,7 @@ function qualityScanQuestion(array $q): array {
         $op=$p[0]; $cl=$p[1];
         if (substr_count($content,$op) !== substr_count($content,$cl)) {
             $flags[] = 'bracket_mismatch_' . $op . $cl;
-            $details[] = "括号不配对: $op×" . substr_count($content,$op) . " vs $cl×" . substr_count($content,$cl);
+            $details[] = "括号不配对: {$op}×" . substr_count($content,$op) . " vs {$cl}×" . substr_count($content,$cl);
         }
     }
 
