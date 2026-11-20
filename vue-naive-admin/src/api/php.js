@@ -19,6 +19,7 @@ const BIG_UPLOAD_ACTIONS = new Set([
   'ocr_batch_import_json',
   'ocr_batch_commit',
   'import_questions_json',
+  'import_special_questions_json',
   'material_upload',
   'material_extract',
 ])
@@ -26,7 +27,8 @@ const BIG_UPLOAD_ACTIONS = new Set([
 let csrfToken = ''
 
 function appendValue(form, key, value) {
-  if (value === undefined || value === null) return
+  if (value === undefined || value === null)
+    return
   if (typeof Blob !== 'undefined' && value instanceof Blob) {
     form.append(key, value)
     return
@@ -41,7 +43,8 @@ function appendValue(form, key, value) {
 function toFormData(action, payload = {}, includeCsrf = true) {
   const form = new FormData()
   form.append('action', action)
-  if (includeCsrf && csrfToken) form.append('csrf_token', csrfToken)
+  if (includeCsrf && csrfToken)
+    form.append('csrf_token', csrfToken)
   Object.entries(payload).forEach(([key, value]) => appendValue(form, key, value))
   return form
 }
@@ -50,7 +53,8 @@ function installResponseInterceptors(client) {
   client.interceptors.response.use(
     (response) => {
       const body = response.data
-      if (body && typeof body === 'object' && body.csrf_token) csrfToken = body.csrf_token
+      if (body && typeof body === 'object' && body.csrf_token)
+        csrfToken = body.csrf_token
       if (body && typeof body === 'object' && 'success' in body) {
         if (!body.success) {
           const error = new Error(body.message || '请求失败')

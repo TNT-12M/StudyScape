@@ -1,5 +1,163 @@
 <?php
 // =====================================================
+// ============== 特殊题库导入辅助函数 =================
+// =====================================================
+function specialQuestionIsPublicIp(string $ip): bool {
+    return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) !== false;
+}
+
+function specialQuestionResolveHost(string $host): array {
+    if (filter_var($host, FILTER_VALIDATE_IP)) {
+        return specialQuestionIsPublicIp($host) ? [$host] : [];
+    }
+    $ips = [];
+    if (function_exists('dns_get_record')) {
+        $records = @dns_get_record($host, DNS_A | DNS_AAAA) ?: [];
+        foreach ($records as $record) {
+            $ip = $record['ip'] ?? ($record['ipv6'] ?? '');
+            if ($ip !== '') $ips[] = $ip;
+        }
+    }
+    if (!$ips) {
+        $ip = @gethostbyname($host);
+        if ($ip !== $host) $ips[] = $ip;
+    }
+    $ips = array_values(array_unique($ips));
+    foreach ($ips as $ip) {
+        if (!specialQuestionIsPublicIp($ip)) return [];
+    }
+    return $ips;
+}
+
+function specialQuestionDownloadImage(string $url, string $targetDir): array {
+    $url = html_entity_decode(trim($url), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $parts = parse_url($url);
+    if (!$parts || strtolower((string)($parts['scheme'] ?? '')) !== 'https' || empty($parts['host']) || isset($parts['user']) || isset($parts['pass'])) {
+        throw new RuntimeException('图片地址必须是公开 HTTPS URL');
+    }
+    $host = strtolower(rtrim((string)$parts['host'], '.'));
+    $ips = specialQuestionResolveHost($host);
+    if (!$ips) throw new RuntimeException('图片域名无法解析到公网地址');
+    $port = (int)($parts['port'] ?? 443);
+    if ($port !== 443) throw new RuntimeException('图片地址仅允许 HTTPS 标准端口');
+
+    $tmp = tempnam(sys_get_temp_dir(), 'sqimg_');
+    if ($tmp === false) throw new RuntimeException('无法创建图片临时文件');
+    $fh = @fopen($tmp, 'w+b');
+    if (!$fh) {
+        @unlink($tmp);
+        throw new RuntimeException('无法写入图片临时文件');
+    }
+    $size = 0;
+    $limit = 8 * 1024 * 1024;
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_CONNECTTIMEOUT => 8,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_USERAGENT => 'StudyScape-Question-Importer/1.0',
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+        CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+        CURLOPT_RESOLVE => ["{$host}:443:{$ips[0]}"],
+        CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use ($fh, &$size, $limit): int {
+            $length = strlen($chunk);
+            if ($size + $length > $limit) return 0;
+            $written = fwrite($fh, $chunk);
+            if ($written === false) return 0;
+            $size += $written;
+            return $written;
+        },
+    ]);
+    $ok = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+    fclose($fh);
+    if ($ok === false || $status < 200 || $status >= 300 || $size < 1) {
+        @unlink($tmp);
+        throw new RuntimeException($size >= $limit ? '图片超过 8MB 限制' : ('图片下载失败' . ($error ? "：{$error}" : "（HTTP {$status}）")));
+    }
+
+    $info = @getimagesize($tmp);
+    $mime = strtolower((string)($info['mime'] ?? ''));
+    $allowed = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp'];
+    if (!$info || !isset($allowed[$mime]) || (int)$info[0] < 1 || (int)$info[1] < 1 || ((int)$info[0] * (int)$info[1]) > 40000000) {
+        @unlink($tmp);
+        throw new RuntimeException('下载内容不是有效图片或图片尺寸过大');
+    }
+    if (!is_dir($targetDir) && !@mkdir($targetDir, 0755, true) && !is_dir($targetDir)) {
+        @unlink($tmp);
+        throw new RuntimeException('题目图片目录创建失败');
+    }
+
+    $hash = hash_file('sha256', $tmp);
+    $extension = $allowed[$mime];
+    $target = $targetDir . '/' . $hash . '.' . $extension;
+    if (is_file($target)) {
+        @unlink($tmp);
+        return ['path' => $target, 'created' => false];
+    }
+
+    $saved = false;
+    if ($mime !== 'image/gif' && function_exists('imagecreatefromstring')) {
+        $raw = @file_get_contents($tmp);
+        $src = $raw !== false ? @imagecreatefromstring($raw) : false;
+        if ($src) {
+            $width = imagesx($src); $height = imagesy($src);
+            $scale = min(1, 1800 / max($width, $height));
+            $newWidth = max(1, (int)round($width * $scale));
+            $newHeight = max(1, (int)round($height * $scale));
+            $canvas = imagecreatetruecolor($newWidth, $newHeight);
+            if ($mime === 'image/png' || $mime === 'image/webp') {
+                imagealphablending($canvas, false);
+                imagesavealpha($canvas, true);
+                $transparent = imagecolorallocatealpha($canvas, 0, 0, 0, 127);
+                imagefill($canvas, 0, 0, $transparent);
+            }
+            imagecopyresampled($canvas, $src, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height);
+            if ($mime === 'image/jpeg' && function_exists('imagejpeg')) $saved = @imagejpeg($canvas, $target, 84);
+            elseif ($mime === 'image/png' && function_exists('imagepng')) $saved = @imagepng($canvas, $target, 7);
+            elseif ($mime === 'image/webp' && function_exists('imagewebp')) $saved = @imagewebp($canvas, $target, 84);
+            imagedestroy($canvas); imagedestroy($src);
+        }
+    }
+    if (!$saved) $saved = @rename($tmp, $target);
+    if (is_file($tmp)) @unlink($tmp);
+    if (!$saved || !is_file($target)) throw new RuntimeException('题目图片保存失败');
+    return ['path' => $target, 'created' => true];
+}
+
+function specialQuestionType(array $question): string {
+    $options = $question['options'] ?? [];
+    $answer = $question['answer'] ?? '';
+    $answerText = is_array($answer) ? implode('', array_map('strval', $answer)) : trim((string)$answer);
+    if (is_array($options) && count($options) > 0) {
+        if (preg_match('/^[A-Z]$/i', $answerText)) return 'single';
+        if (preg_match('/^[A-Z]{2,}$/i', str_replace([',', '、', ' '], '', $answerText))) return 'multiple';
+        return 'single';
+    }
+    $text = (string)($question['stem_text'] ?? '');
+    $typeId = (string)($question['question_type_id'] ?? '');
+    if ($typeId === '600108' || preg_match('/填空|默写|补写|按原文/', $text)) return 'fill';
+    if (preg_match('/^判断题[：:]/u', trim($text))) return 'judge';
+    return 'short';
+}
+
+function specialQuestionNormalizeOptions($options): array {
+    if (!is_array($options)) return [];
+    $result = [];
+    foreach ($options as $key => $value) {
+        if (is_array($value)) $value = $value['content'] ?? ($value['text'] ?? '');
+        $value = trim((string)$value);
+        if ($value === '') continue;
+        if (!is_int($key) && !preg_match('/^[A-Z][\.、]\s*/u', $value)) $value = strtoupper((string)$key) . '. ' . $value;
+        $result[] = $value;
+    }
+    return $result;
+}
+
+// =====================================================
 // ============== 批量导入辅助函数 =====================
 // =====================================================
 // 兼容 import_exam.json 结构：

@@ -15,6 +15,7 @@ $allowedActions = [
     'ocr_batch_import_json',   // OCR：直接导入 JSON
     'ocr_batch_commit',        // OCR 审核：入库（含题目图片 base64）
     'import_questions_json',   // 题库：导入题库 JSON
+    'import_special_questions_json', // 题库：特殊来源 JSON + 远程图片
     'material_upload',         // 资料：上传资料文件
     'material_extract',        // 资料：上传待解析文件
 ];

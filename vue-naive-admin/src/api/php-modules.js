@@ -47,6 +47,7 @@ export const phpQuestionsApi = {
   update: data => phpAction('update_question', data),
   remove: id => phpAction('delete_question', { id }),
   importJson: data => phpAction('import_questions_json', data),
+  importSpecial: data => phpAction('import_special_questions_json', data, { timeout: 300000 }),
   bulkMove: data => phpAction('bulk_move_questions', data),
   bulkCategory: data => phpAction('bulk_update_question_category', data),
   bulkSubject: data => phpAction('bulk_update_question_subject', data),

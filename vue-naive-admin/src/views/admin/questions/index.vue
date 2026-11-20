@@ -17,6 +17,8 @@
               新增题目
             </NButton><NButton type="info" @click="showImport = true">
               JSON / OCR 导入
+            </NButton><NButton type="warning" @click="showSpecialImport = true">
+              特殊题目上传
             </NButton>
           </NSpace>
         </template>
@@ -170,6 +172,39 @@
         </NSpace>
       </template>
     </n-modal>
+
+    <n-modal v-model:show="showSpecialImport" preset="card" title="特殊题目上传" style="width:min(680px, 94vw)">
+      <n-alert type="warning" class="mb-16">
+        适用于包含 questions、stem_html 和 image_urls 的特殊题库 JSON。远程图片将自动下载、适度压缩并替换为服务器本地地址。
+      </n-alert>
+      <n-form label-placement="top">
+        <n-form-item label="特殊题目 JSON">
+          <n-upload :show-file-list="false" accept=".json,application/json" @before-upload="readSpecialQuestionFile">
+            <NButton>选择 JSON 文件</NButton>
+          </n-upload>
+          <div v-if="specialImportForm.fileName" class="file-summary">
+            {{ specialImportForm.fileName }} · {{ specialImportForm.questionCount }} 道题 · {{ specialImportForm.imageCount }} 张图片
+          </div>
+        </n-form-item>
+        <n-grid :cols="2" :x-gap="12">
+          <n-form-item-gi label="学段覆盖（可选）">
+            <NSelect v-model:value="specialImportForm.education_level" clearable :options="levelOptions" placeholder="自动识别" />
+          </n-form-item-gi>
+          <n-form-item-gi label="科目覆盖（可选）">
+            <n-input v-model:value="specialImportForm.subject" placeholder="自动识别" />
+          </n-form-item-gi>
+        </n-grid>
+      </n-form>
+      <template #footer>
+        <NSpace justify="end">
+          <NButton @click="showSpecialImport = false">
+            取消
+          </NButton><NButton type="warning" :loading="specialImporting" @click="doSpecialImport">
+            下载图片并导入
+          </NButton>
+        </NSpace>
+      </template>
+    </n-modal>
   </AppPage>
 </template>
 
@@ -186,9 +221,11 @@ const expandedRowKeys = ref([])
 const loading = ref(false)
 const saving = ref(false)
 const importing = ref(false)
+const specialImporting = ref(false)
 const scanning = ref(false)
 const showEditor = ref(false)
 const showImport = ref(false)
+const showSpecialImport = ref(false)
 const editingId = ref(null)
 const contentMode = ref('preview')
 const stats = ref({ total: 0, by_subject: [], by_type: [] })
@@ -197,6 +234,7 @@ const pagination = reactive({ page: 1, pageSize: 10, itemCount: 0, showSizePicke
 const subjects = ref([])
 const form = reactive(defaultForm())
 const importForm = reactive({ json_data: '', education_level: '', category: '', subject: '', answerData: null })
+const specialImportForm = reactive({ json_data: '', fileName: '', questionCount: 0, imageCount: 0, education_level: '', subject: '' })
 const levelOptions = [{ label: '初中', value: 'junior' }, { label: '高中', value: 'senior' }]
 const typeOptions = [{ label: '单选题', value: 'single' }, { label: '多选题', value: 'multiple' }, { label: '判断题', value: 'judge' }, { label: '填空题', value: 'fill' }, { label: '多空填空题', value: 'multi_fill' }, { label: '简答题', value: 'short' }]
 const qualityOptions = [{ label: '有问题（瑕疵 + 坏题）', value: 'problem' }, { label: '正常', value: 'good' }, { label: '瑕疵', value: 'poor' }, { label: '坏题', value: 'trash' }]
@@ -589,6 +627,55 @@ async function doImport() {
     importing.value = false
   }
 }
+async function readSpecialQuestionFile({ file }) {
+  try {
+    const json_data = await file.file.text()
+    const data = JSON.parse(json_data)
+    if (!Array.isArray(data.questions) || !data.questions.length)
+      throw new Error('JSON 中没有可导入的 questions 数组')
+    const imageCount = new Set(data.questions.flatMap(item => Array.isArray(item.image_urls) ? item.image_urls : [])).size
+    Object.assign(specialImportForm, {
+      json_data,
+      fileName: file.name,
+      questionCount: data.questions.length,
+      imageCount,
+      education_level: data.filters?.subject?.stage?.includes('高中') ? 'senior' : data.filters?.subject?.stage?.includes('初中') ? 'junior' : '',
+      subject: String(data.filters?.subject?.name || '').replace(/^(小学|初中|高中)\s*[·・•-]\s*/, ''),
+    })
+    message.success('特殊题目文件解析成功')
+  }
+  catch (error) {
+    Object.assign(specialImportForm, { json_data: '', fileName: '', questionCount: 0, imageCount: 0 })
+    message.error(error.message || '特殊题目 JSON 格式错误')
+  }
+  return false
+}
+async function doSpecialImport() {
+  if (!specialImportForm.json_data)
+    return message.warning('请先选择特殊题目 JSON 文件')
+  specialImporting.value = true
+  const notice = message.loading('正在下载图片并导入题目，请稍候...', { duration: 0 })
+  try {
+    const result = await phpQuestionsApi.importSpecial({
+      json_data: specialImportForm.json_data,
+      education_level: specialImportForm.education_level,
+      subject: specialImportForm.subject,
+    })
+    notice.destroy()
+    message.success(result.message || '特殊题目导入完成', { duration: 6000 })
+    showSpecialImport.value = false
+    Object.assign(specialImportForm, { json_data: '', fileName: '', questionCount: 0, imageCount: 0, education_level: '', subject: '' })
+    await Promise.all([loadQuestions(), loadStats()])
+  }
+  catch (error) {
+    notice.destroy()
+    const detail = error.legacy?.data?.errors?.[0]
+    message.error(detail || error.message || '特殊题目导入失败', { duration: 8000 })
+  }
+  finally {
+    specialImporting.value = false
+  }
+}
 onMounted(async () => {
   await Promise.all([loadStats(), reloadSubjects()])
   await loadQuestions()
@@ -601,6 +688,11 @@ onMounted(async () => {
 }
 .mt-8 {
   margin-top: 8px;
+}
+.file-summary {
+  margin-top: 10px;
+  color: var(--n-text-color-2);
+  font-size: 13px;
 }
 .question-summary {
   display: block;

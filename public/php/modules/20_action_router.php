@@ -3070,6 +3070,108 @@ if ($action) {
                 jsonOut(true, '题目及关联记录已批量删除', ['deleted' => count($ids)]);
                 break;
 
+            // ---------- 特殊题库 JSON 导入（远程图片落盘） ----------
+            case 'import_special_questions_json':
+                if (!isLoggedIn()) jsonOut(false, '请先登录');
+                requireContentPermission('question_import');
+                $rawJson = (string)($_POST['json_data'] ?? '');
+                if (trim($rawJson) === '') jsonOut(false, '请提供特殊题目 JSON 数据');
+                $data = json_decode($rawJson, true);
+                if (!is_array($data) || !isset($data['questions']) || !is_array($data['questions'])) jsonOut(false, 'JSON 格式不正确：缺少 questions 数组');
+                if (count($data['questions']) < 1 || count($data['questions']) > 10000) jsonOut(false, '单次仅允许导入 1-10000 道题目');
+
+                $subject = normalizeSubject(sanitizeInput($_POST['subject'] ?? ''));
+                if ($subject === '') {
+                    $subjectName = trim((string)($data['filters']['subject']['name'] ?? ''));
+                    $subject = normalizeSubject(preg_replace('/^(小学|初中|高中)\s*[·・•\-]\s*/u', '', $subjectName));
+                }
+                if ($subject === '') $subject = '综合';
+                $rawLevel = trim((string)($_POST['education_level'] ?? ''));
+                if ($rawLevel === '') {
+                    $stage = (string)($data['filters']['subject']['stage'] ?? ($data['filters']['subject']['name'] ?? ''));
+                    $rawLevel = str_contains($stage, '高中') ? 'senior' : 'junior';
+                }
+                $educationLevel = validateEducationLevel($rawLevel);
+                $categoryOverride = validateQuestionCategory($_POST['category'] ?? '', '');
+                $imageDir = dirname(__DIR__, 2) . '/question-images';
+                $createdFiles = [];
+                $imageCache = [];
+                $stats = ['inserted' => 0, 'skipped' => 0, 'errors' => 0, 'images_downloaded' => 0, 'images_reused' => 0];
+                $errorDetails = [];
+                $preparedQuestions = [];
+
+                try {
+                    foreach ($data['questions'] as $index => $source) {
+                        try {
+                            if (!is_array($source)) throw new RuntimeException('题目不是对象');
+                            $sourceId = trim((string)($source['id'] ?? ''));
+                            $content = trim((string)($source['stem_html'] ?? ($source['stem_text'] ?? '')));
+                            if ($content === '') throw new RuntimeException('题干为空');
+                            $urls = is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [];
+                            if (preg_match_all('/<img\b[^>]*\bsrc\s*=\s*(["\'])(.*?)\1/isu', $content, $matches)) {
+                                $urls = array_merge($urls, $matches[2]);
+                            }
+                            $urls = array_values(array_unique(array_filter(array_map('trim', $urls))));
+                            foreach ($urls as $imageUrl) {
+                                if (!isset($imageCache[$imageUrl])) {
+                                    $saved = specialQuestionDownloadImage($imageUrl, $imageDir);
+                                    $imageCache[$imageUrl] = '/question-images/' . basename($saved['path']);
+                                    if ($saved['created']) {
+                                        $createdFiles[] = $saved['path'];
+                                        $stats['images_downloaded']++;
+                                    } else {
+                                        $stats['images_reused']++;
+                                    }
+                                }
+                                $content = str_replace([$imageUrl, htmlspecialchars($imageUrl, ENT_QUOTES | ENT_HTML5, 'UTF-8')], $imageCache[$imageUrl], $content);
+                            }
+                            if (preg_match('/<img\b[^>]*\bsrc\s*=\s*["\']https?:\/\//iu', $content)) throw new RuntimeException('题干仍包含未成功处理的远程图片');
+
+                            $type = specialQuestionType($source);
+                            $category = $categoryOverride !== '' ? $categoryOverride : $type;
+                            $options = specialQuestionNormalizeOptions($source['options'] ?? []);
+                            $answer = $source['answer'] ?? '';
+                            if (is_array($answer)) $answer = implode('、', array_map('strval', $answer));
+                            $answer = trim((string)$answer);
+                            $explanation = trim((string)($source['explanation'] ?? ($source['analysis'] ?? '')));
+                            $rawDifficulty = (float)($source['difficulty'] ?? 0.5);
+                            $difficulty = $rawDifficulty <= 1 ? max(1, min(5, (int)round(1 + $rawDifficulty * 4))) : max(1, min(5, (int)round($rawDifficulty)));
+                            $content = normalizeQuestionContent(sanitizeHtmlContent($content));
+                            $explanation = $explanation !== '' ? sanitizeHtmlContent($explanation) : '';
+                            $preparedQuestions[] = [$sourceId, $content, $type, $category, $options, $answer, $explanation, $difficulty];
+                        } catch (Throwable $questionError) {
+                            $stats['errors']++;
+                            if (count($errorDetails) < 20) $errorDetails[] = '第 ' . ($index + 1) . ' 题：' . $questionError->getMessage();
+                        }
+                    }
+                    if (!$preparedQuestions && $stats['errors'] > 0) throw new RuntimeException($errorDetails[0] ?? '没有题目可以导入');
+
+                    $db->exec('BEGIN IMMEDIATE');
+                    $matchKey = 'special_' . hash('sha256', (string)($data['source'] ?? '') . '|' . $subject . '|' . $educationLevel);
+                    foreach ($preparedQuestions as [$sourceId, $content, $type, $category, $options, $answer, $explanation, $difficulty]) {
+                        $dup = dbFetchOne($db, 'SELECT id FROM questions WHERE content=? AND subject=? AND education_level=? LIMIT 1', [$content, $subject, $educationLevel]);
+                        if ($dup) {
+                            $stats['skipped']++;
+                            continue;
+                        }
+                        $optionsJson = $options ? json_encode($options, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null;
+                        dbQuery($db, 'INSERT INTO questions (subject, question_type, category, education_level, content, options, correct_answer, explanation, difficulty, points, is_html, match_key, source_qid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                            [$subject, $type, $category, $educationLevel, $content, $optionsJson, $answer, $explanation ?: null, $difficulty, 1.0, 1, $matchKey, $sourceId]);
+                        $stats['inserted']++;
+                    }
+                    $db->exec('COMMIT');
+                } catch (Throwable $importError) {
+                    @$db->exec('ROLLBACK');
+                    foreach ($createdFiles as $createdFile) @unlink($createdFile);
+                    jsonOut(false, '特殊题目导入失败：' . $importError->getMessage(), ['stats' => $stats, 'errors' => $errorDetails]);
+                }
+                if ($stats['inserted'] > 0) {
+                    notifyRootsOnContentUpload('内容管理员导入了特殊题目', "本次导入新增 {$stats['inserted']} 道（{$subject}），请抽空确认。", 0);
+                }
+                $message = "导入完成：新增 {$stats['inserted']} / 重复跳过 {$stats['skipped']} / 失败 {$stats['errors']} / 新图片 {$stats['images_downloaded']}";
+                jsonOut(true, $message, ['stats' => $stats, 'errors' => $errorDetails, 'subject' => $subject, 'education_level' => $educationLevel]);
+                break;
+
             // ---------- 批量导入（兼容 import_exam.json 结构） ----------
             case 'import_questions_json':
                 if (!isLoggedIn()) jsonOut(false, "请先登录");
