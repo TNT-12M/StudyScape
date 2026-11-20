@@ -3133,10 +3133,11 @@ if ($action) {
                     $allImageUrls = [];
                     foreach ($data['questions'] as $source) {
                         if (!is_array($source)) continue;
-                        $content = (string)($source['stem_html'] ?? '');
+                        $content = (string)($source['stem_html'] ?? ($source['stem_text'] ?? ''));
                         $urls = is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [];
-                        if (preg_match_all('/<img\b[^>]*\bsrc\s*=\s*(["\'])(.*?)\1/isu', $content, $matches)) {
-                            $urls = array_merge($urls, $matches[2]);
+                        $urls = array_merge($urls, specialQuestionExtractImageUrls($content));
+                        foreach (specialQuestionNormalizeOptions($source['options'] ?? []) as $option) {
+                            $urls = array_merge($urls, specialQuestionExtractImageUrls($option));
                         }
                         $allImageUrls = array_merge($allImageUrls, $urls);
                     }
@@ -3174,19 +3175,23 @@ if ($action) {
                             $content = trim((string)($source['stem_html'] ?? ($source['stem_text'] ?? '')));
                             if ($content === '') throw new RuntimeException('题干为空');
                             $urls = is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [];
-                            if (preg_match_all('/<img\b[^>]*\bsrc\s*=\s*(["\'])(.*?)\1/isu', $content, $matches)) {
-                                $urls = array_merge($urls, $matches[2]);
-                            }
+                            $urls = array_merge($urls, specialQuestionExtractImageUrls($content));
                             $urls = array_values(array_unique(array_filter(array_map('trim', $urls))));
                             foreach ($urls as $imageUrl) {
                                 if (!isset($imageCache[$imageUrl])) throw new RuntimeException($downloadBatch['errors'][$imageUrl] ?? '图片下载失败');
+                            }
+                            $content = specialQuestionReplaceImages($content, $imageCache);
+                            foreach ($urls as $imageUrl) {
                                 $content = str_replace([$imageUrl, htmlspecialchars($imageUrl, ENT_QUOTES | ENT_HTML5, 'UTF-8')], $imageCache[$imageUrl], $content);
                             }
                             if (preg_match('/<img\b[^>]*\bsrc\s*=\s*["\']https?:\/\//iu', $content)) throw new RuntimeException('题干仍包含未成功处理的远程图片');
 
                             $type = specialQuestionType($source);
                             $category = $categoryOverride !== '' ? $categoryOverride : $type;
-                            $options = specialQuestionNormalizeOptions($source['options'] ?? []);
+                            $options = array_map(
+                                static fn(string $option): string => specialQuestionReplaceImages($option, $imageCache),
+                                specialQuestionNormalizeOptions($source['options'] ?? [])
+                            );
                             $answer = $source['answer'] ?? '';
                             if (is_array($answer)) $answer = implode('、', array_map('strval', $answer));
                             $answer = trim((string)$answer);

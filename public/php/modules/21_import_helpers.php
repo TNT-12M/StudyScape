@@ -278,6 +278,31 @@ function specialQuestionNormalizeOptions($options): array {
     return $result;
 }
 
+function specialQuestionExtractImageUrls(string $html): array {
+    $urls = [];
+    if (preg_match_all('/<img\b[^>]*\bsrc\s*=\s*(["\'])(.*?)\1/isu', $html, $matches)) {
+        $urls = array_merge($urls, $matches[2]);
+    }
+    if (preg_match_all('/\[图片\s*[:：]\s*`?(https:\/\/[^\s`<>"\'\]）】]+)/iu', $html, $matches)) {
+        $urls = array_merge($urls, $matches[1]);
+    }
+    return array_values(array_unique(array_filter(array_map('trim', $urls))));
+}
+
+function specialQuestionReplaceImages(string $html, array $imageCache): string {
+    $failed = '（图片加载失败）';
+    $html = preg_replace_callback('/<img\b[^>]*\bsrc\s*=\s*(["\'])(https:\/\/.*?)\1[^>]*>/isu', static function (array $match) use ($imageCache, $failed): string {
+        $url = html_entity_decode(trim($match[2]), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        if (!isset($imageCache[$url])) return $failed;
+        return '<img src="' . htmlspecialchars($imageCache[$url], ENT_QUOTES | ENT_HTML5, 'UTF-8') . '" style="max-width:100%;height:auto;">';
+    }, $html) ?? $html;
+    return preg_replace_callback('/\[图片\s*[:：]\s*`?(https:\/\/[^\s`<>"\'\]）】]+)`?\s*\]?`?/iu', static function (array $match) use ($imageCache, $failed): string {
+        $url = html_entity_decode(trim($match[1]), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        if (!isset($imageCache[$url])) return $failed;
+        return '<img src="' . htmlspecialchars($imageCache[$url], ENT_QUOTES | ENT_HTML5, 'UTF-8') . '" style="max-width:100%;height:auto;">';
+    }, $html) ?? $html;
+}
+
 // =====================================================
 // ============== 批量导入辅助函数 =====================
 // =====================================================
