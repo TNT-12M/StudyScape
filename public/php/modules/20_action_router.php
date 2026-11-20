@@ -2770,6 +2770,8 @@ if ($action) {
                 if ($scope === 'manage_all') requireContentPermission('question_view');
 
                 $category  = validateQuestionCategory($_GET['category'] ?? $_POST['category'] ?? '', '');
+                $quality   = trim((string)($_GET['quality'] ?? $_POST['quality'] ?? ''));
+                if (!in_array($quality, ['', 'good', 'poor', 'trash', 'problem'], true)) $quality = '';
                 $page      = max(1, (int)($_GET['page']   ?? $_POST['page']   ?? 1));
                 $page_size = max(1, min(100, (int)($_GET['page_size'] ?? $_POST['page_size'] ?? 10)));
 
@@ -2779,6 +2781,8 @@ if ($action) {
                 if ($qtype !== '')   { $where[] = 'question_type = ?'; $params[] = $qtype; }
                 if ($educationLevel !== '') { $where[] = 'education_level = ?'; $params[] = $educationLevel; }
                 if ($category !== '') { $where[] = 'category = ?'; $params[] = $category; }
+                if ($quality === 'problem') { $where[] = "quality IN ('poor', 'trash')"; }
+                elseif ($quality !== '') { $where[] = 'quality = ?'; $params[] = $quality; }
                 if ($keyword !== '')  { $where[] = '(content LIKE ? OR explanation LIKE ?)'; $params[] = "%$keyword%"; $params[] = "%$keyword%"; }
                 $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
 

@@ -119,27 +119,46 @@ function qualityScanQuestion(array $q): array {
 // ===== 批量扫描 DB 所有题目并更新 (SQLite3 写法) =====
 function qualityBulkScan($db): array {
     $total = 0; $good = 0; $poor = 0; $trash = 0; $errors = 0;
-
-    // SQLite3 没有 fetchAll, 用 while + fetchArray
     $res = $db->query("SELECT id, content, options, question_type, correct_answer FROM qdb.questions");
-    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
-        $total++;
-        try {
-            $result = qualityScanQuestion($row);
-            $flagsJson = SQLite3::escapeString(json_encode($result['flags'], JSON_UNESCAPED_UNICODE));
-            $now = SQLite3::escapeString(date('Y-m-d H:i:s'));
-            $qid = (int)$row['id'];
-            $quality = SQLite3::escapeString($result['quality']);
-            // 直接拼 SQL, SQLite3->prepare()->bindValue 太繁琐
-            $db->exec("UPDATE qdb.questions SET quality='$quality', quality_flags='$flagsJson', quality_scanned_at='$now' WHERE id=$qid");
-            switch ($result['quality']) {
-                case 'good':  $good++;  break;
-                case 'poor':  $poor++;  break;
-                case 'trash': $trash++; break;
+    if (!$res) {
+        throw new RuntimeException('读取题库失败: ' . $db->lastErrorMsg());
+    }
+
+    $stmt = $db->prepare("UPDATE qdb.questions SET quality = :quality, quality_flags = :flags, quality_scanned_at = :scanned_at WHERE id = :id");
+    if (!$stmt) {
+        throw new RuntimeException('创建质检更新语句失败: ' . $db->lastErrorMsg());
+    }
+
+    $now = date('Y-m-d H:i:s');
+    $db->exec('BEGIN IMMEDIATE TRANSACTION');
+    try {
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+            $total++;
+            try {
+                $result = qualityScanQuestion($row);
+                $stmt->reset();
+                $stmt->bindValue(':quality', $result['quality'], SQLITE3_TEXT);
+                $stmt->bindValue(':flags', json_encode($result['flags'], JSON_UNESCAPED_UNICODE), SQLITE3_TEXT);
+                $stmt->bindValue(':scanned_at', $now, SQLITE3_TEXT);
+                $stmt->bindValue(':id', (int)$row['id'], SQLITE3_INTEGER);
+                $updateResult = $stmt->execute();
+                if (!$updateResult) {
+                    throw new RuntimeException($db->lastErrorMsg());
+                }
+                $updateResult->finalize();
+                switch ($result['quality']) {
+                    case 'good':  $good++;  break;
+                    case 'poor':  $poor++;  break;
+                    case 'trash': $trash++; break;
+                }
+            } catch (\Throwable $e) {
+                $errors++;
             }
-        } catch (\Throwable $e) {
-            $errors++;
         }
+        $db->exec('COMMIT');
+    } catch (\Throwable $e) {
+        $db->exec('ROLLBACK');
+        throw $e;
     }
 
     return compact('total','good','poor','trash','errors');

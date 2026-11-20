@@ -30,6 +30,9 @@
           <n-form-item label="题型">
             <NSelect v-model:value="filters.qtype" clearable :options="typeOptions" style="width:140px" />
           </n-form-item>
+          <n-form-item label="质量">
+            <NSelect v-model:value="filters.quality" clearable :options="qualityOptions" style="width:170px" @update:value="applyQualityFilter" />
+          </n-form-item>
           <n-form-item label="关键词">
             <n-input v-model:value="filters.keyword" clearable placeholder="题干或解析" style="width:220px" @keyup.enter="loadQuestions" />
           </n-form-item>
@@ -43,9 +46,13 @@
       <n-card title="题目列表" segmented>
         <template #header-extra>
           <NSpace>
-            <NButton type="primary" quaternary @click="scanAllQuestions">
-              🔍 一键质检所有题目
-            </NButton><NButton :disabled="!selectedIds.length" @click="bulkCategory">
+            <NButton type="primary" quaternary :loading="scanning" @click="scanAllQuestions">
+              一键质检所有题目
+            </NButton>
+            <NButton :disabled="!problemIdsOnPage.length" @click="selectProblemQuestions">
+              选择本页问题题目
+            </NButton>
+            <NButton :disabled="!selectedIds.length" @click="bulkCategory">
               批量改分类
             </NButton><NButton :disabled="!selectedIds.length" @click="bulkSubject">
               批量改学科
@@ -179,20 +186,23 @@ const expandedRowKeys = ref([])
 const loading = ref(false)
 const saving = ref(false)
 const importing = ref(false)
+const scanning = ref(false)
 const showEditor = ref(false)
 const showImport = ref(false)
 const editingId = ref(null)
 const contentMode = ref('preview')
 const stats = ref({ total: 0, by_subject: [], by_type: [] })
-const filters = reactive({ education_level: '', subject: '', qtype: '', keyword: '' })
+const filters = reactive({ education_level: '', subject: '', qtype: '', quality: '', keyword: '' })
 const pagination = reactive({ page: 1, pageSize: 10, itemCount: 0, showSizePicker: true, pageSizes: [10, 20, 50] })
 const subjects = ref([])
 const form = reactive(defaultForm())
 const importForm = reactive({ json_data: '', education_level: '', category: '', subject: '', answerData: null })
 const levelOptions = [{ label: '初中', value: 'junior' }, { label: '高中', value: 'senior' }]
 const typeOptions = [{ label: '单选题', value: 'single' }, { label: '多选题', value: 'multiple' }, { label: '判断题', value: 'judge' }, { label: '填空题', value: 'fill' }, { label: '多空填空题', value: 'multi_fill' }, { label: '简答题', value: 'short' }]
+const qualityOptions = [{ label: '有问题（瑕疵 + 坏题）', value: 'problem' }, { label: '正常', value: 'good' }, { label: '瑕疵', value: 'poor' }, { label: '坏题', value: 'trash' }]
 const categoryOptions = typeOptions
 const subjectOptions = computed(() => subjects.value.map(item => ({ label: item, value: item })))
+const problemIdsOnPage = computed(() => questions.value.filter(item => item.quality === 'poor' || item.quality === 'trash').map(item => Number(item.id)))
 const statCards = computed(() => [{ label: '题目总数', value: stats.value.total || 0 }, { label: '科目数', value: stats.value.by_subject?.length || 0 }, { label: '题型数', value: stats.value.by_type?.length || 0 }, { label: '当前页', value: questions.value.length }])
 const previewContent = computed(() => {
   const content = form.content || ''
@@ -201,15 +211,22 @@ const previewContent = computed(() => {
   return renderRichText(content)
 })
 const rules = { subject: { required: true, message: '请输入科目' }, education_level: { required: true, message: '请选择学段' }, content: { required: true, message: '请输入题干' }, correct_answer: { required: true, message: '请输入答案' } }
-const columns = [{ type: 'selection' }, { title: '展开', key: 'expand', width: 60, render: row => h(NButton, { size: 'small', quaternary: true, onClick: () => toggleExpand(row.id) }, { default: () => expandedRowKeys.value.includes(row.id) ? '收起' : '展开' }) }, { title: 'ID', key: 'id', width: 70 }, { title: '科目', key: 'subject', width: 100 }, { title: '学段', key: 'education_level', render: row => row.education_level === 'senior' ? '高中' : '初中', width: 80 }, { title: '题型', key: 'question_type', render: row => labelOf(row.question_type), width: 100 }, { title: '题干摘要', key: 'content', width: 500, render: row => h('span', { class: 'question-summary', title: plainSummary(row.content, 240) }, plainSummary(row.content, 120)) }, { title: '难度', key: 'difficulty', width: 75 }, { title: '分值', key: 'points', width: 70 }, { title: '质量', key: 'quality', width: 130, render: row => {
+const columns = [{ type: 'selection' }, { title: '展开', key: 'expand', width: 60, render: row => h(NButton, { size: 'small', quaternary: true, onClick: () => toggleExpand(row.id) }, { default: () => expandedRowKeys.value.includes(row.id) ? '收起' : '展开' }) }, { title: 'ID', key: 'id', width: 70 }, { title: '科目', key: 'subject', width: 100 }, { title: '学段', key: 'education_level', render: row => row.education_level === 'senior' ? '高中' : '初中', width: 80 }, { title: '题型', key: 'question_type', render: row => labelOf(row.question_type), width: 100 }, { title: '题干摘要', key: 'content', width: 500, render: row => h('span', { class: 'question-summary', title: plainSummary(row.content, 240) }, plainSummary(row.content, 120)) }, { title: '难度', key: 'difficulty', width: 75 }, { title: '分值', key: 'points', width: 70 }, { title: '质量', key: 'quality', width: 130, render: (row) => {
   const q = row.quality || 'good'
   const map = { good: { type: 'success', label: '✅ 正常' }, poor: { type: 'warning', label: '⚠️ 瑕疵' }, trash: { type: 'error', label: '❌ 坏题' } }
   const cfg = map[q] || map.good
   const flagLabels = {
-    options_not_4_actual_3: '选项仅3个', options_not_4_actual_1: '选项仅1个',
-    formula_missing: '疑似公式丢失', bracket_mismatch: '括号不配对',
-    answer_empty: '答案为空', content_too_short: '题干过短', image_missing: '如图但无配图',
-    content_empty: '题干为空', ocr_residual: 'OCR残留', option_too_short: '选项过短', option_broken: '选项残缺',
+    options_not_4_actual_3: '选项仅3个',
+    options_not_4_actual_1: '选项仅1个',
+    formula_missing: '疑似公式丢失',
+    bracket_mismatch: '括号不配对',
+    answer_empty: '答案为空',
+    content_too_short: '题干过短',
+    image_missing: '如图但无配图',
+    content_empty: '题干为空',
+    ocr_residual: 'OCR残留',
+    option_too_short: '选项过短',
+    option_broken: '选项残缺',
   }
   const flags = row.quality_flags || []
   const tooltip = flags.map(f => flagLabels[f] || f).join('、')
@@ -331,6 +348,10 @@ async function loadQuestions() {
     loading.value = false
   }
 }
+function applyQualityFilter() {
+  pagination.page = 1
+  loadQuestions()
+}
 function handlePageChange(page) {
   pagination.page = page
   loadQuestions()
@@ -383,27 +404,6 @@ async function saveQuestion() {
     saving.value = false
   }
 }
-function removeQuestion(id) {
-  const qid = Number(id)
-  dialog.warning({
-    title: '删除题目',
-    content: `确定删除 ID 为 ${qid} 的题目吗？删除后会同步清理试卷关联，且不可恢复。`,
-    positiveText: '确认删除',
-    negativeText: '取消',
-    positiveButtonProps: { type: 'error' },
-    onPositiveClick: () => {
-      return phpQuestionsApi.remove(qid)
-        .then(() => {
-          message.success('删除成功')
-          selectedIds.value = selectedIds.value.filter(x => Number(x) !== qid)
-          Promise.all([loadQuestions(), loadStats()])
-        })
-        .catch((err) => {
-          message.error(err.message || '删除失败')
-          return false // 保留对话框
-        })
-    },  })
-}
 function trashQuestion(id) {
   const qid = Number(id)
   dialog.warning({
@@ -414,21 +414,38 @@ function trashQuestion(id) {
     positiveButtonProps: { type: 'warning' },
     onPositiveClick: () => {
       return phpQuestionsApi.qualityTrash({ question_id: qid, reason: 'admin_manual' })
-        .then(() => { message.success('已移入回收站'); Promise.all([loadQuestions(), loadStats()]) })
-        .catch(err => { message.error(err.message || '操作失败'); return false })
-    }
+        .then(() => {
+          message.success('已移入回收站')
+          Promise.all([loadQuestions(), loadStats()])
+        })
+        .catch((err) => {
+          message.error(err.message || '操作失败')
+          return false
+        })
+    },
   })
 }
 async function scanAllQuestions() {
+  scanning.value = true
+  const notice = message.loading('质检中，请稍候...', { duration: 0 })
   try {
-    message.loading({ content: '质检中...', key: 'qscan' })
     const r = await phpQuestionsApi.qualityScanAll()
     const s = r.data?.stats || {}
-    message.success({ content: `质检完成: 正常${s.good||0} / 瑕疵${s.poor||0} / 坏题${s.trash||0}`, key: 'qscan', duration: 5000 })
-    Promise.all([loadQuestions(), loadStats()])
-  } catch (e) {
-    message.error({ content: e.message || '质检失败', key: 'qscan' })
+    notice.destroy()
+    message.success(`质检完成：正常 ${s.good || 0} / 瑕疵 ${s.poor || 0} / 坏题 ${s.trash || 0}`, { duration: 5000 })
+    await Promise.all([loadQuestions(), loadStats()])
   }
+  catch (error) {
+    notice.destroy()
+    message.error(error.message || '质检失败')
+  }
+  finally {
+    scanning.value = false
+  }
+}
+function selectProblemQuestions() {
+  selectedIds.value = [...new Set([...selectedIds.value.map(Number), ...problemIdsOnPage.value])]
+  message.success(`已选择本页 ${problemIdsOnPage.value.length} 道问题题目`)
 }
 async function bulkCategory() {
   const category = await chooseValue('修改分类', categoryOptions)
