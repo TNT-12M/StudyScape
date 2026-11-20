@@ -703,10 +703,27 @@ function pollSpecialImportProgress(jobId) {
   }
   specialImportPollTimer = setTimeout(poll, 500)
 }
+function createSpecialImportJobId() {
+  const webCrypto = globalThis.crypto
+  if (typeof webCrypto?.randomUUID === 'function')
+    return webCrypto.randomUUID()
+
+  const bytes = new Uint8Array(16)
+  if (typeof webCrypto?.getRandomValues === 'function') {
+    webCrypto.getRandomValues(bytes)
+  }
+  else {
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256)
+  }
+
+  bytes[6] = (bytes[6] & 0x0F) | 0x40
+  bytes[8] = (bytes[8] & 0x3F) | 0x80
+  const hex = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
 async function doSpecialImport() {
   if (!specialImportForm.json_data)
     return message.warning('请先选择特殊题目 JSON 文件')
-  const jobId = crypto.randomUUID()
   specialImporting.value = true
   Object.assign(specialImportProgress, defaultSpecialImportProgress(), {
     status: 'running',
@@ -716,8 +733,9 @@ async function doSpecialImport() {
     percent: 1,
     message: '正在启动导入任务',
   })
-  pollSpecialImportProgress(jobId)
   try {
+    const jobId = createSpecialImportJobId()
+    pollSpecialImportProgress(jobId)
     const result = await phpQuestionsApi.importSpecial({
       job_id: jobId,
       json_data: specialImportForm.json_data,
