@@ -272,7 +272,7 @@ if ($action) {
             case 'captcha_verify':
                 if ($_SERVER['REQUEST_METHOD'] !== 'POST') jsonOut(false, '请使用 POST');
                 $purpose = trim((string)($_POST['purpose'] ?? ''));
-                if (!in_array($purpose, ['register', 'forgot_email', 'reset'], true)) jsonOut(false, '非法用途');
+                if (!in_array($purpose, ['register', 'forgot_email', 'reset', 'checkin'], true)) jsonOut(false, '非法用途');
                 $ip = getClientIp();
                 $uid = isLoggedIn() ? (int)getUid() : 0;
                 if (!siteRateAllowed('captcha_verify_ip_' . $ip, 10, 300)) jsonOut(false, '验证过于频繁');

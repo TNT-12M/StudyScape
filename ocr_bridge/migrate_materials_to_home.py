@@ -49,7 +49,7 @@ def main():
     rows = connection.execute("SELECT * FROM materials ORDER BY id").fetchall()
 
     candidates = []
-    missing = 0
+    missing = errors = 0
     for row in rows:
         ready_at_home = (row["storage_node"] == "home"
                          and (not is_pdf(row)
@@ -59,14 +59,20 @@ def main():
             continue
         inspected = bridge_storage("/storage/inspect", {"stored_name": row["stored_name"]}, timeout=70)
         if not inspected.get("ok"):
-            print(f"MISSING id={row['id']} 家里云文件不存在: {row['stored_name']}")
-            missing += 1
+            if inspected.get("exists") is False:
+                print(f"MISSING id={row['id']} 家里云文件不存在: {row['stored_name']}")
+                missing += 1
+            else:
+                print(f"ERROR id={row['id']} 家里云文件读取失败: "
+                      f"{row['stored_name']} ({inspected.get('error', '未知错误')})")
+                errors += 1
             continue
         candidates.append(row)
         kind = "PDF平台水印" if is_pdf(row) else "登记家里云存储"
         print(f"FOUND id={row['id']} {kind} {row['filename']} ({inspected.get('size', 0)} bytes)")
 
-    print(f"待处理 {len(candidates)} 条，家里云缺失 {missing} 条；模式={'执行' if args.yes else 'dry-run'}")
+    print(f"待处理 {len(candidates)} 条，家里云缺失 {missing} 条，读取异常 {errors} 条；"
+          f"模式={'执行' if args.yes else 'dry-run'}")
     if not args.yes:
         connection.close()
         print("dry-run 完成；传入 --yes 才会在家里云原地加水印并更新数据库。")
