@@ -927,6 +927,36 @@ class PHPHandler(BaseHTTPRequestHandler):
                 self._send(502, {"ok": False, "error": result.get("error", "unknown")})
             return
 
+        if path in ("/storage/inspect", "/storage/migrate-existing"):
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except json.JSONDecodeError:
+                self._send(400, {"error": "JSON 格式错误"}); return
+            stored_name = str(payload.get("stored_name") or "").strip()
+            if not stored_name:
+                self._send(400, {"error": "缺少 stored_name"}); return
+            action = "inspect" if path == "/storage/inspect" else "migrate_existing"
+            req_id = f"mig_{int(time.time())}_{secrets.token_hex(4)}"
+            storage_payload = {
+                "action": action, "stored_name": stored_name,
+                "watermark_platform": bool(payload.get("watermark_platform")),
+                "title": payload.get("title", ""),
+            }
+            try:
+                result = asyncio.run_coroutine_threadsafe(
+                    STATE.storage_request(req_id, storage_payload, timeout=300), event_loop
+                ).result(timeout=305)
+            except Exception as e:
+                self._send(504, {"ok": False, "error": str(e)}); return
+            if result.get("ok"):
+                self._send(200, {"ok": True, **{k: v for k, v in result.items() if k != "ok"}})
+            else:
+                self._send(404 if result.get("exists") is False else 502, {
+                    "ok": False, "exists": result.get("exists"),
+                    "error": result.get("error", "migration failed"),
+                })
+            return
+
         if path == "/storage/prepare-variant":
             try:
                 payload = json.loads(body.decode("utf-8")) if body else {}
@@ -1017,7 +1047,8 @@ class PHPHandler(BaseHTTPRequestHandler):
 
         self._send(404, {"error": f"未知端点: {path}", "available": [
             "/upload (POST)", "/export_pdf (POST)",
-            "/storage/store (POST)", "/storage/prepare-variant (POST)",
+            "/storage/store (POST)", "/storage/inspect (POST)",
+            "/storage/migrate-existing (POST)", "/storage/prepare-variant (POST)",
             "/storage/retrieve (POST)", "/storage/delete (POST)"
         ]})
 

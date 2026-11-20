@@ -45,6 +45,9 @@ class MaterialWatermarkTest(unittest.TestCase):
             self.assertEqual(source_hash, watermark.sha256_file(source))
             self.assertTrue(watermark.validate_pdf(platform))
 
+            self.assertEqual(watermark.platform_source_sha256(platform), source_hash)
+            self.assertIsNone(watermark.platform_source_sha256(source))
+
             with fitz.open(platform) as document:
                 self.assertEqual(document.page_count, 5)
                 tags = watermark._parse_tags(document.metadata)

@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Migrate existing materials to home storage. Dry-run unless --yes is given."""
+"""Migrate existing home-storage materials in place. Dry-run unless --yes is given."""
 
 import argparse
-import base64
-import hashlib
 import json
-import mimetypes
 import os
 import sqlite3
 import urllib.error
@@ -13,25 +10,16 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB = os.path.join(ROOT, "exam.db")
-MAT_DIR = os.path.join(ROOT, "materials")
 BRIDGE = "http://127.0.0.1:1201"
 
 
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def bridge_storage(path, body):
+def bridge_storage(path, body, timeout=310):
     request = urllib.request.Request(
         f"{BRIDGE}{path}", data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=190) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         try:
@@ -50,9 +38,8 @@ def is_pdf(row):
 def main():
     global BRIDGE
     parser = argparse.ArgumentParser()
-    parser.add_argument("--yes", action="store_true", help="执行迁移；默认仅 dry-run")
+    parser.add_argument("--yes", action="store_true", help="执行迁移；默认仅检查家里云文件")
     parser.add_argument("--db", default=DB)
-    parser.add_argument("--materials-dir", default=MAT_DIR)
     parser.add_argument("--bridge", default=BRIDGE)
     args = parser.parse_args()
     BRIDGE = args.bridge.rstrip("/")
@@ -62,6 +49,7 @@ def main():
     rows = connection.execute("SELECT * FROM materials ORDER BY id").fetchall()
 
     candidates = []
+    missing = 0
     for row in rows:
         ready_at_home = (row["storage_node"] == "home"
                          and (not is_pdf(row)
@@ -69,46 +57,37 @@ def main():
                                   and int(row["platform_watermark_version"] or 0) == 1)))
         if ready_at_home:
             continue
-        path = os.path.join(args.materials_dir, row["stored_name"])
-        if os.path.isfile(path):
-            candidates.append((row, path))
-        else:
-            print(f"SKIP id={row['id']} 本地原件不存在: {path}")
+        inspected = bridge_storage("/storage/inspect", {"stored_name": row["stored_name"]}, timeout=70)
+        if not inspected.get("ok"):
+            print(f"MISSING id={row['id']} 家里云文件不存在: {row['stored_name']}")
+            missing += 1
+            continue
+        candidates.append(row)
+        kind = "PDF平台水印" if is_pdf(row) else "登记家里云存储"
+        print(f"FOUND id={row['id']} {kind} {row['filename']} ({inspected.get('size', 0)} bytes)")
 
-    print(f"待处理 {len(candidates)} 条；模式={'执行' if args.yes else 'dry-run'}")
-    for row, path in candidates:
-        kind = "PDF平台水印" if is_pdf(row) else "原样上传"
-        print(f"  id={row['id']} {kind} {row['filename']} ({os.path.getsize(path)} bytes)")
+    print(f"待处理 {len(candidates)} 条，家里云缺失 {missing} 条；模式={'执行' if args.yes else 'dry-run'}")
     if not args.yes:
-        print("dry-run 完成；传入 --yes 才会上传、更新数据库并删除旧本地原件。")
+        connection.close()
+        print("dry-run 完成；传入 --yes 才会在家里云原地加水印并更新数据库。")
         return
 
     done = failed = 0
-    for row, path in candidates:
-        source_sha = sha256_file(path)
-        source_size = os.path.getsize(path)
+    for row in candidates:
         pdf = is_pdf(row)
-        try:
-            with open(path, "rb") as stream:
-                encoded = base64.b64encode(stream.read()).decode("ascii")
-        except OSError as error:
-            print(f"FAIL id={row['id']} 读取失败: {error}")
-            failed += 1
-            continue
-
-        response = bridge_storage("/storage/store", {
-            "stored_name": row["stored_name"], "sha256": source_sha,
-            "size": source_size, "mime": row["mime_type"] or mimetypes.guess_type(path)[0] or "",
-            "file_b64": encoded, "watermark_platform": pdf, "title": row["filename"],
+        response = bridge_storage("/storage/migrate-existing", {
+            "stored_name": row["stored_name"],
+            "watermark_platform": pdf,
+            "title": row["filename"],
         })
+        source_sha = str(response.get("source_sha256") or "")
         final_sha = str(response.get("sha256") or "")
         final_size = int(response.get("size") or 0)
-        home_source_sha = str(response.get("source_sha256") or "")
         watermark_version = int(response.get("watermark_version") or 0)
-        if (not response.get("ok") or home_source_sha != source_sha or not final_sha
-                or final_size <= 0 or (pdf and watermark_version != 1)
-                or (not pdf and (final_sha != source_sha or final_size != source_size))):
-            print(f"FAIL id={row['id']} 上传或校验失败: {response.get('error', response)}")
+        if (not response.get("ok") or not source_sha or not final_sha or final_size <= 0
+                or (pdf and watermark_version != 1)
+                or (not pdf and (final_sha != source_sha or watermark_version != 0))):
+            print(f"FAIL id={row['id']} 家里云迁移或校验失败: {response.get('error', response)}")
             failed += 1
             continue
 
@@ -126,19 +105,15 @@ def main():
             connection.commit()
         except Exception as error:
             connection.rollback()
-            print(f"FAIL id={row['id']} 数据库更新失败，保留本地原件: {error}")
+            print(f"FAIL id={row['id']} 数据库更新失败: {error}")
             failed += 1
             continue
 
-        try:
-            os.remove(path)
-            print(f"OK id={row['id']} final_sha={final_sha[:16]} size={final_size}")
-        except OSError as error:
-            print(f"WARN id={row['id']} 已提交数据库，但删除旧本地原件失败: {error}")
+        print(f"OK id={row['id']} final_sha={final_sha[:16]} size={final_size}")
         done += 1
 
     connection.close()
-    print(f"完成: success={done} failed={failed}")
+    print(f"完成: success={done} failed={failed} missing={missing}")
 
 
 if __name__ == "__main__":

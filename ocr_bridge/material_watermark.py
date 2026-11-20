@@ -252,6 +252,21 @@ def _save_atomic(document: Any, output_path: Path) -> str:
     return str(output_path)
 
 
+def platform_source_sha256(path: os.PathLike[str] | str) -> Optional[str]:
+    """Return the original source hash when path is a platform-watermarked PDF."""
+    _require_dependencies()
+    try:
+        with fitz.open(path) as document:
+            tags = _parse_tags(document.metadata)
+            if tags.get("renderer") == PLATFORM_MARK:
+                source_sha = str(tags.get("source_sha256", "")).strip().lower()
+                if len(source_sha) == 64 and all(char in "0123456789abcdef" for char in source_sha):
+                    return source_sha
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return None
+
+
 def render_platform_watermark(source_path: os.PathLike[str] | str,
                               output_path: os.PathLike[str] | str,
                               title: str) -> str:
@@ -396,7 +411,7 @@ user_watermark = render_user_watermark
 
 __all__ = [
     "CJKFontNotFoundError", "PLATFORM_MARK", "RENDERER", "USER_MARK", "VERSION",
-    "WatermarkDependencyError", "find_cjk_font", "platform_watermark",
-    "render_platform_watermark", "render_user_watermark", "sha256_file",
+    "WatermarkDependencyError", "find_cjk_font", "platform_source_sha256",
+    "platform_watermark", "render_platform_watermark", "render_user_watermark", "sha256_file",
     "user_watermark", "validate_pdf",
 ]

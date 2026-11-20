@@ -406,7 +406,7 @@ def _safe_path(root_dir, filename):
 
 
 async def handle_storage(writer, req_id, data):
-    """处理家里云存储请求: store / prepare_variant / retrieve / delete"""
+    """处理家里云存储请求: store / inspect / migrate_existing / prepare_variant / retrieve / delete"""
     action = data.get("action", "")
     stored_name = data.get("stored_name", "")
     scope = data.get("storage_scope", "material")
@@ -424,6 +424,72 @@ async def handle_storage(writer, req_id, data):
         safe_fp = _safe_path(root_dir, stored_name)
         if not safe_fp:
             await reply({"ok": False, "error": "非法文件名"})
+            return
+
+        if action == "inspect":
+            if not os.path.isfile(safe_fp):
+                await reply({"ok": False, "exists": False, "error": "文件不存在"})
+                return
+            file_sha = await asyncio.to_thread(material_watermark.sha256_file, safe_fp)
+            await reply({
+                "ok": True, "exists": True, "sha256": file_sha,
+                "size": os.path.getsize(safe_fp),
+            })
+            return
+
+        if action == "migrate_existing":
+            if scope != "material":
+                await reply({"ok": False, "error": "迁移仅支持 material"})
+                return
+            if not os.path.isfile(safe_fp):
+                await reply({"ok": False, "exists": False, "error": "家里云原件不存在"})
+                return
+
+            current_sha = await asyncio.to_thread(material_watermark.sha256_file, safe_fp)
+            source_size = os.path.getsize(safe_fp)
+            if not data.get("watermark_platform"):
+                source_sha = current_sha
+                await reply({
+                    "ok": True, "exists": True, "source_sha256": source_sha,
+                    "sha256": source_sha, "size": source_size, "watermark_version": 0,
+                })
+                return
+
+            title = str(data.get("title", "")).strip()
+            if not title:
+                await reply({"ok": False, "error": "PDF 平台水印缺少 title"})
+                return
+            existing_source_sha = await asyncio.to_thread(
+                material_watermark.platform_source_sha256, safe_fp,
+            )
+            if existing_source_sha:
+                await reply({
+                    "ok": True, "exists": True, "source_sha256": existing_source_sha,
+                    "sha256": current_sha, "size": source_size, "watermark_version": 1,
+                })
+                return
+            source_sha = current_sha
+            staging_fp = _safe_path(HOME_STAGING_DIR, f"{req_id}.pdf")
+            try:
+                await asyncio.to_thread(
+                    material_watermark.render_platform_watermark,
+                    safe_fp, staging_fp, title,
+                )
+                if not material_watermark.validate_pdf(staging_fp):
+                    raise RuntimeError("平台水印结果校验失败，保留原文件")
+                final_sha = await asyncio.to_thread(material_watermark.sha256_file, staging_fp)
+                final_size = os.path.getsize(staging_fp)
+                os.replace(staging_fp, safe_fp)
+            finally:
+                try:
+                    os.remove(staging_fp)
+                except FileNotFoundError:
+                    pass
+            log.info(f"  💧 存量平台水印完成: {stored_name} ({final_size//1024}KB)")
+            await reply({
+                "ok": True, "exists": True, "source_sha256": source_sha,
+                "sha256": final_sha, "size": final_size, "watermark_version": 1,
+            })
             return
 
         if action == "store":
