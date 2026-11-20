@@ -38,6 +38,7 @@ from config import (
     STORAGE_ROOT, KEY_FILE,
 )
 import material_watermark
+import ocr_watermark
 SERVER_HOST = BRIDGE_REMOTE_HOST  # 兼容旧代码里的变量名
 SERVER_PORT = BRIDGE_REMOTE_PORT
 PIPELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "exam_pipeline.py")
@@ -684,6 +685,7 @@ async def _handle_export_pdf(writer, job_id, task_data):
 async def _handle_ocr(writer, job_id, task_data):
     global _mineru_last_task
     _mineru_last_task = time.time()
+    cleanup_paths = []
     try:
         filename = task_data.get("filename", "unknown.pdf")
         file_b64 = task_data.get("file_b64", "")
@@ -701,22 +703,35 @@ async def _handle_ocr(writer, job_id, task_data):
         tmpdir = HOME_TMP_DIR
         os.makedirs(tmpdir, exist_ok=True)
         tmp_in = os.path.join(tmpdir, f"{job_id}_{filename}")
+        tmp_clean = os.path.join(tmpdir, f"{job_id}_ocr_clean.pdf")
+        tmp_risk = os.path.join(tmpdir, f"{job_id}_ocr_risk.json")
         tmp_out = os.path.join(tmpdir, f"{job_id}_result.json")
+        cleanup_paths.extend((tmp_in, tmp_clean, tmp_risk, tmp_out))
 
         with open(tmp_in, "wb") as f:
             f.write(base64.b64decode(file_b64))
 
-        log.info(f"  处理 {filename} ({len(file_b64)//1024}KB base64) → {tmp_in}")
+        preprocess_risk = ocr_watermark.prepare_ocr_input(tmp_in, tmp_clean)
+        with open(tmp_risk, "w", encoding="utf-8") as f:
+            json.dump(preprocess_risk, f, ensure_ascii=False)
+        pipeline_input = tmp_clean if os.path.isfile(tmp_clean) else tmp_in
+
+        log.info(
+            f"  处理 {filename} ({len(file_b64)//1024}KB base64) → {pipeline_input}; "
+            f"preprocess={preprocess_risk['status']} removed={preprocess_risk['removed_count']} "
+            f"suspicious={preprocess_risk['suspicious_count']}"
+        )
 
         await FrameProto.send(writer, {"type": "PROGRESS", "job_id": job_id, "stage": "mineru_uploading"})
 
         proc = await asyncio.create_subprocess_exec(
             sys.executable, PIPELINE_SCRIPT,
-            tmp_in,
+            pipeline_input,
             "-o", tmp_out,
             "--subject", subject or "综合",
             "--education_level", education_level or "",
             "--paper_name", os.path.splitext(filename)[0],
+            "--preprocess-risk", tmp_risk,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -794,16 +809,19 @@ async def _handle_ocr(writer, job_id, task_data):
         qcount = len(result.get("questions", []))
         log.info(f"  ✅ {job_id} 完成 → {qcount} 道题")
 
-        for p in (tmp_in, tmp_out):
-            try: os.remove(p)
-            except: pass
-
     except Exception as e:
         log.error(f"  {job_id}: {e}\n{traceback.format_exc()}")
         try:
             await FrameProto.send(writer, {"type": "RESULT", "job_id": job_id, "error": str(e)[:200]})
         except:
             pass
+    finally:
+        for path in cleanup_paths:
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError as cleanup_error:
+                log.warning(f"  临时文件清理失败 {path}: {cleanup_error}")
 
 
 if __name__ == "__main__":

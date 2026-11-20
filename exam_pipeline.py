@@ -396,7 +396,33 @@ def extract_text_from_block_content(raw_content: Any) -> str:
     return str(raw_content).strip()
 
 
-def flatten_blocks(page_json: dict) -> list[dict]:
+def _fixed_text_watermark_keys(pages: list[dict]) -> set[tuple]:
+    """Find repeated text at a stable page position without guessing from words alone."""
+    occurrences = {}
+    for page_idx, page in enumerate(pages):
+        for block in page.get("blocks", []):
+            if block.get("type", "text") in ("image", "chart", "table"):
+                continue
+            content = " ".join(extract_text_from_block_content(block.get("content")).split())
+            bbox = block.get("bbox", [0, 0, 1, 1])
+            if len(content) < 3 or len(bbox) < 4:
+                continue
+            width = max(0.0, bbox[2] - bbox[0])
+            height = max(0.0, bbox[3] - bbox[1])
+            center_x = (bbox[0] + bbox[2]) / 2
+            center_y = (bbox[1] + bbox[3]) / 2
+            central_large = (0.2 <= center_x <= 0.8 and 0.18 <= center_y <= 0.82
+                             and width >= 0.25 and height >= 0.015)
+            if not central_large:
+                continue
+            position = tuple(round(float(value) / 0.025) for value in bbox[:4])
+            key = (content.casefold(), position)
+            occurrences.setdefault(key, set()).add(page_idx)
+    minimum_pages = max(2, int(len(pages) * 0.6 + 0.999))
+    return {key for key, page_set in occurrences.items() if len(page_set) >= minimum_pages}
+
+
+def flatten_blocks(page_json: dict, ocr_risk: dict | None = None) -> list[dict]:
     """
     把 MinerU PageJSON 按阅读顺序扁平化为一个 blocks 列表。
     同时过滤噪声（header/footer/page_number/广告/注意事项）。
@@ -405,13 +431,25 @@ def flatten_blocks(page_json: dict) -> list[dict]:
     flat = []
     pages = page_json.get("pages", [])
     skipped_noise = 0
-    
+    # MinerU does not expose reliable text opacity/color metadata here. Repeated
+    # central text may be a shared stem, so only the PDF preprocessor may remove
+    # text when it has stronger object-level evidence.
+    fixed_watermark_keys = set()
+    filtered_fixed = 0
+
     for page_idx, page in enumerate(pages):
         for block in page.get("blocks", []):
             btype = block.get("type", "text")
             content_raw = block.get("content")
             content = extract_text_from_block_content(content_raw)
-            
+            bbox = block.get("bbox", [0, 0, 1, 1])
+            if btype not in ("image", "chart", "table") and len(bbox) >= 4:
+                position = tuple(round(float(value) / 0.025) for value in bbox[:4])
+                fixed_key = (" ".join(content.split()).casefold(), position)
+                if fixed_key in fixed_watermark_keys:
+                    filtered_fixed += 1
+                    continue
+
             # 1. MinerU 原生噪声 type → 跳过
             if btype in NOISE_BLOCK_TYPES:
                 skipped_noise += 1
@@ -489,6 +527,10 @@ def flatten_blocks(page_json: dict) -> list[dict]:
         b["content"] = content
     
     extra = f"  过滤噪声 {skipped_noise} 个" if skipped_noise else ""
+    if filtered_fixed:
+        extra += f"  过滤固定文本水印 {filtered_fixed} 个"
+        if ocr_risk is not None:
+            ocr_risk["flatten_removed_count"] = filtered_fixed
     print(f"[Flatten] ✅ {len(flat)} blocks 扁平化完成{extra}")
     for di, b in enumerate(flat[:25]):
         y1 = b["bbox"][1] if len(b["bbox"]) > 1 else 0
@@ -1009,7 +1051,111 @@ def _read_image_as_base64(image_block: dict, images_dir: str | None) -> str | No
     return None
 
 
-def build_contract_b_questions(questions: list[dict], images_dir: str | None = None) -> list[dict]:
+IMAGE_REF_KEYWORDS = [
+    "如图", "见表", "如图所示", "如图,", "如图，", "见图", "上图", "下图",
+    "图表", "图形", "图像", "表中", "下表", "上表", "直方图", "统计图",
+]
+
+
+def _image_file_fingerprint(block: dict, images_dir: str | None) -> str | None:
+    if not images_dir:
+        return None
+    rel_path = block.get("image_path", "")
+    if not rel_path:
+        return None
+    candidates = [
+        os.path.join(images_dir, rel_path),
+        os.path.join(images_dir, "images", os.path.basename(rel_path)),
+        os.path.join(images_dir, os.path.basename(rel_path)),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                digest = hashlib.sha256()
+                with open(path, "rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                return digest.hexdigest()
+            except OSError:
+                return None
+    return None
+
+
+def _image_repeat_keys(questions: list[dict], images_dir: str | None) -> set[tuple]:
+    occurrences = {}
+    for q in questions:
+        for block in q.get("blocks", []):
+            if block.get("_class") != "image":
+                continue
+            bbox = block.get("bbox", [0, 0, 1, 1])
+            fingerprint = _image_file_fingerprint(block, images_dir)
+            if len(bbox) < 4 or not fingerprint:
+                continue
+            btype = block.get("btype_original", block.get("type", "image"))
+            position = tuple(round(float(value) / 0.025) for value in bbox[:4])
+            occurrences.setdefault((btype, fingerprint, position), set()).add(block.get("page_idx", 0))
+    return {key for key, pages in occurrences.items() if len(pages) >= 2}
+
+
+def _score_question_image(block: dict, has_image_ref: bool, repeated_keys: set[tuple],
+                          images_dir: str | None) -> dict:
+    bbox = block.get("bbox", [0, 0, 1, 1])
+    if len(bbox) < 4:
+        bbox = [0, 0, 1, 1]
+    x0, y0, x1, y1 = (float(value) for value in bbox[:4])
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    area = width * height
+    position = tuple(round(value / 0.025) for value in (x0, y0, x1, y1))
+    btype = block.get("btype_original", block.get("type", "image"))
+    fingerprint = _image_file_fingerprint(block, images_dir)
+    repeated = bool(fingerprint and (btype, fingerprint, position) in repeated_keys)
+
+    score = 0
+    reasons = []
+    if has_image_ref:
+        score += 3
+        reasons.append("question_references_image")
+    if btype in ("chart", "table"):
+        score += 2
+        reasons.append(f"semantic_{btype}")
+    if 0.01 <= area <= 0.55 and height <= 0.75:
+        score += 1
+        reasons.append("plausible_question_figure_size")
+    if repeated:
+        score -= 4
+        reasons.append("repeated_fixed_position")
+    if y1 > 0.82 and height > 0.15 and not has_image_ref:
+        score -= 3
+        reasons.append("large_bottom_image_without_reference")
+    if area > 0.55 and not has_image_ref:
+        score -= 2
+        reasons.append("oversized_without_reference")
+    if area < 0.002:
+        score -= 1
+        reasons.append("tiny_decoration")
+
+    if score >= 2:
+        decision = "accepted"
+    elif score <= -4:
+        decision = "rejected"
+    else:
+        decision = "pending"
+    return {
+        "decision": decision,
+        "risk_score": max(0, min(100, 50 - score * 12)),
+        "score": score,
+        "reasons": reasons,
+        "page_idx": block.get("page_idx", 0),
+        "bbox": list(bbox[:4]),
+        "type": btype,
+        "image_path": block.get("image_path"),
+        "image_url": block.get("image_url"),
+    }
+
+
+def build_contract_b_questions(questions: list[dict], images_dir: str | None = None,
+                               ocr_risk: dict | None = None) -> list[dict]:
     """
     把切好的题目列表转成 StudyScape Contract B (PaperCutter-VL) 格式。
     
@@ -1019,7 +1165,9 @@ def build_contract_b_questions(questions: list[dict], images_dir: str | None = N
     image block 通过 images_dir + image_path 读成 base64 → question_images
     """
     output = []
-    
+    repeated_image_keys = _image_repeat_keys(questions, images_dir)
+    image_risk_counts = {"accepted": 0, "pending": 0, "rejected": 0}
+
     for i, q in enumerate(questions):
         content_parts = []
         options = []
@@ -1111,35 +1259,37 @@ def build_contract_b_questions(questions: list[dict], images_dir: str | None = N
         except (ValueError, TypeError):
             qid = i + 1000
         
-        # ★ 广告/水印图过滤:
-        # 如果题干完全不含图引用关键词 ("如图"/"见表"等), 且 image block 在页面底部 20% 区域
-        # 且图片高度正常 (>15% 页面高度, 不是小角标), 则判定为广告/水印 → 跳过
-        IMAGE_REF_KEYWORDS = ["如图", "见表", "如图所示", "如图,", "如图，", "见图",
-                               "上图", "下图", "图表", "图形", "图像", "表中", "下表", "上表", "直方图", "统计图"]
         has_image_ref = any(kw in question_content for kw in IMAGE_REF_KEYWORDS)
-        if not has_image_ref and image_blocks:
-            before = len(image_blocks)
-            filtered = []
-            for ib in image_blocks:
-                bbox = ib.get("bbox", [0, 0, 1, 1])
-                y1 = bbox[3] if len(bbox) > 3 else 1.0
-                y0 = bbox[1] if len(bbox) > 1 else 0.0
-                img_h = y1 - y0
-                # 可疑: 图片底部在页面底部 20% 区域 + 高度 > 15% 页面 (不是小 icon)
-                if y1 > 0.8 and img_h > 0.15:
-                    print(f"  [广告过滤] 跳过可疑图: page={ib['page_idx']} y1={y1:.2f} h={img_h:.2f} (题干无图引用)")
-                    continue
-                filtered.append(ib)
-            image_blocks = filtered
-            if len(image_blocks) < before:
-                print(f"  [广告过滤] qid={q['qid_text']}: {before} → {len(image_blocks)} 张")
-
-        # ★ question_images: 从 image blocks + images_dir 读 base64
         question_images = []
-        for ib in image_blocks:
-            img_b64 = _read_image_as_base64(ib, images_dir)
-            if img_b64:
-                question_images.append(img_b64)
+        question_image_candidates = []
+        for image_block in image_blocks:
+            assessment = _score_question_image(image_block, has_image_ref, repeated_image_keys, images_dir)
+            decision = assessment["decision"]
+            image_risk_counts[decision] += 1
+            if decision == "accepted":
+                img_b64 = _read_image_as_base64(image_block, images_dir)
+                if img_b64:
+                    question_images.append(img_b64)
+                else:
+                    assessment["decision"] = "rejected"
+                    assessment["reasons"].append("image_payload_unavailable")
+                    image_risk_counts["accepted"] -= 1
+                    image_risk_counts["rejected"] += 1
+            elif decision == "pending":
+                img_b64 = _read_image_as_base64(image_block, images_dir)
+                if img_b64:
+                    assessment["base64"] = img_b64
+                    question_image_candidates.append(assessment)
+                else:
+                    assessment["decision"] = "rejected"
+                    assessment["reasons"].append("image_payload_unavailable")
+                    image_risk_counts["pending"] -= 1
+                    image_risk_counts["rejected"] += 1
+            else:
+                print(
+                    f"  [图片过滤] rejected page={assessment['page_idx']} "
+                    f"score={assessment['score']} reasons={','.join(assessment['reasons'])}"
+                )
         
         item = {
             "question_id": qid,
@@ -1147,6 +1297,7 @@ def build_contract_b_questions(questions: list[dict], images_dir: str | None = N
             "question_content": question_content,
             "question_options": options if options else [],
             "question_images": question_images,
+            "question_image_candidates": question_image_candidates,
             "question_tables": [],
             "answer": answer_text,
             "resolve": resolve_text,
@@ -1154,7 +1305,18 @@ def build_contract_b_questions(questions: list[dict], images_dir: str | None = N
             "source": q.get("section_title", ""),
         }
         output.append(item)
-    
+
+    if ocr_risk is not None:
+        ocr_risk["schema_version"] = 1
+        ocr_risk["image_classification"] = image_risk_counts
+        preprocess = ocr_risk.get("preprocess", {})
+        preprocess_status = preprocess.get("status", "") if isinstance(preprocess, dict) else ""
+        preprocess_suspicious = int(preprocess.get("suspicious_count", 0) or 0) if isinstance(preprocess, dict) else 0
+        ocr_risk["requires_review"] = bool(
+            image_risk_counts["pending"]
+            or preprocess_suspicious
+            or preprocess_status in {"fallback", "suspicious", "failed", "partial"}
+        )
     return output
 
 
@@ -1253,8 +1415,9 @@ def validate_and_clean(questions: list[dict]) -> list[dict]:
     return valid
 
 
-def output_json(questions: list[dict], paper_name: str = "", 
-                subject: str = "", education_level: str = "") -> dict:
+def output_json(questions: list[dict], paper_name: str = "",
+                subject: str = "", education_level: str = "",
+                ocr_risk: dict | None = None) -> dict:
     """
     组装最终 Contract B 包装格式 (api.php importExtractQuestions 模式 0a)。
     """
@@ -1268,6 +1431,7 @@ def output_json(questions: list[dict], paper_name: str = "",
         "subject": subject,
         "education_level": education_level,
         "questions": questions,
+        "ocr_risk": ocr_risk or {},
     }
 
 
@@ -1282,9 +1446,22 @@ def main():
     parser.add_argument("--subject", default="综合", help="科目 (默认: 综合)")
     parser.add_argument("--education_level", default="", help="学段 (初中/高中/大学)")
     parser.add_argument("--paper_name", default="", help="试卷名称 (默认从 PDF 文件名推断)")
+    parser.add_argument("--preprocess-risk", default="", help="OCR 预处理风险 JSON 文件")
     parser.add_argument("--raw-markdown", action="store_true", help="额外保存 MinerU 原始 markdown")
     args = parser.parse_args()
-    
+
+    ocr_risk = {}
+    if args.preprocess_risk:
+        try:
+            with open(args.preprocess_risk, "r", encoding="utf-8") as risk_file:
+                loaded_risk = json.load(risk_file)
+            if isinstance(loaded_risk, dict):
+                ocr_risk["preprocess"] = loaded_risk
+            else:
+                ocr_risk["warnings"] = ["preprocess risk payload is not an object"]
+        except (OSError, ValueError) as exc:
+            ocr_risk["warnings"] = [f"failed to load preprocess risk: {exc}"]
+
     pdf_path = os.path.abspath(args.pdf)
     if not os.path.exists(pdf_path):
         print(f"❌ PDF 不存在: {pdf_path}")
@@ -1328,7 +1505,7 @@ def main():
         sys.exit(1)
     
     # --- Step 2: Flatten ---
-    blocks = flatten_blocks(page_json)
+    blocks = flatten_blocks(page_json, ocr_risk=ocr_risk)
     
     # --- Step 2.5: ★ 自动识别学科 + 学段 (在规则引擎切题之前) ---
     auto_subject, auto_level = detect_subject_and_level(blocks, paper_name=paper_name)
@@ -1345,7 +1522,9 @@ def main():
     questions_raw = group_questions(blocks)
     
     # --- Step 4: Build Contract B ---
-    questions_cb = build_contract_b_questions(questions_raw, images_dir=images_dir)
+    questions_cb = build_contract_b_questions(
+        questions_raw, images_dir=images_dir, ocr_risk=ocr_risk
+    )
     
     # --- Step 5: Validate + Output ---
     questions_clean = validate_and_clean(questions_cb)
@@ -1359,6 +1538,7 @@ def main():
         paper_name=paper_name,
         subject=args.subject,
         education_level=args.education_level,
+        ocr_risk=ocr_risk,
     )
     
     # 写 JSON

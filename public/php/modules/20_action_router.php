@@ -2231,11 +2231,14 @@ if ($action) {
                 $paperName = sanitizeInput($_POST['paper_name'] ?? ($data['paper_name'] ?? pathinfo((string)$file['name'], PATHINFO_FILENAME)));
 
                 $rawQuestions = null;
+                $resultRoot = $data;
                 if (isset($data['questions']) && is_array($data['questions'])) {
                     $rawQuestions = $data['questions'];
                 } elseif (isset($data['result_json']['questions']) && is_array($data['result_json']['questions'])) {
+                    $resultRoot = $data['result_json'];
                     $rawQuestions = $data['result_json']['questions'];
                 } elseif (isset($data['data']['result_json']['questions']) && is_array($data['data']['result_json']['questions'])) {
+                    $resultRoot = $data['data']['result_json'];
                     $rawQuestions = $data['data']['result_json']['questions'];
                 }
                 if (!$rawQuestions) jsonOut(false, 'JSON 中未找到 questions 数组');
@@ -2274,18 +2277,28 @@ if ($action) {
                         'explanation' => $resolve,
                         'difficulty' => max(1, min(5, $difficulty)),
                         'points' => max(0, $points),
-                        'included' => true,
-                        'images' => [],
+                        'included' => $q['included'] ?? true,
+                        'images' => is_array($q['images'] ?? null)
+                            ? $q['images']
+                            : (is_array($q['question_images'] ?? null)
+                                ? array_map(static function ($image) { return ['base64' => $image]; }, $q['question_images'])
+                                : []),
+                        'question_image_candidates' => is_array($q['question_image_candidates'] ?? null) ? $q['question_image_candidates'] : [],
                     ];
                 }
                 if (!$questions) jsonOut(false, 'JSON 中没有有效题目');
 
+                $reviewData = ['questions' => $questions];
+                if (isset($resultRoot['ocr_risk']) && is_array($resultRoot['ocr_risk'])) {
+                    $reviewData['ocr_risk'] = $resultRoot['ocr_risk'];
+                }
+                $reviewJson = json_encode($reviewData, JSON_UNESCAPED_UNICODE);
                 $dir = __DIR__ . '/../../../data/ocr_batches';
                 if (!is_dir($dir)) @mkdir($dir, 0750, true);
                 $stored = 'ocr_import_' . bin2hex(random_bytes(16)) . '.json';
-                file_put_contents($dir . DIRECTORY_SEPARATOR . $stored, json_encode(['questions' => $questions], JSON_UNESCAPED_UNICODE));
+                file_put_contents($dir . DIRECTORY_SEPARATOR . $stored, $reviewJson);
 
-                dbQuery($db, 'INSERT INTO ocr_import_batches(file_name, stored_name, subject, education_level, created_by, status, result_json) VALUES(?,?,?,?,?,\'review\',?)', [$paperName, $stored, $subject, $level, $uid, json_encode(['questions' => $questions], JSON_UNESCAPED_UNICODE)]);
+                dbQuery($db, 'INSERT INTO ocr_import_batches(file_name, stored_name, subject, education_level, created_by, status, result_json) VALUES(?,?,?,?,?,\'review\',?)', [$paperName, $stored, $subject, $level, $uid, $reviewJson]);
                 $batchId = (int)$db->lastInsertRowID();
                 jsonOut(true, "已导入 " . count($questions) . " 道题目，进入审核", ['batch_id' => $batchId, 'status' => 'review', 'question_count' => count($questions)]);
                 break;
@@ -2387,21 +2400,70 @@ if ($action) {
                 $data = json_decode($json !== '' ? $json : (string)$batch['result_json'], true);
                 if (!is_array($data)) jsonOut(false, '审核数据格式无效');
                 $questions = is_array($data['questions'] ?? null) ? $data['questions'] : [];
-                $kept = [];
+                $hasNewImageContract = array_key_exists('ocr_risk', $data);
                 foreach ($questions as $q) {
+                    if (!is_array($q)) continue;
+                    if (array_key_exists('question_image_candidates', $q)) $hasNewImageContract = true;
+                    if (($q['included'] ?? true) === false) continue;
+                    if (!is_array($q['question_image_candidates'] ?? null)) continue;
+                    foreach ($q['question_image_candidates'] as $candidate) {
+                        if (!is_array($candidate) || !in_array((string)($candidate['decision'] ?? 'pending'), ['keep', 'remove'], true)) {
+                            jsonOut(false, '存在未决定的候选图片，请逐图选择保留或移除');
+                        }
+                    }
+                }
+                if ($hasNewImageContract && !empty($data['ocr_risk']['requires_review']) && ($data['ocr_risk']['review_confirmed'] ?? false) !== true) {
+                    jsonOut(false, '该批次需要人工复核，请确认已检查所有候选图片');
+                }
+
+                $validateQuestionImage = static function ($value, $questionLabel) {
+                    $value = trim((string)$value);
+                    $payload = $value;
+                    if (str_starts_with(strtolower($value), 'data:')) {
+                        if (!preg_match('#^data:image/(png|jpeg|webp|bmp);base64,([A-Za-z0-9+/]*={0,2})$#i', $value, $matches)) {
+                            jsonOut(false, "{$questionLabel}包含无效图片，仅支持 png/jpeg/webp/bmp data URI");
+                        }
+                        $payload = $matches[2];
+                    }
+                    if ($payload === '' || strlen($payload) % 4 !== 0 || !preg_match('#^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$#', $payload)) {
+                        jsonOut(false, "{$questionLabel}包含无效的 base64 图片");
+                    }
+                    $decoded = base64_decode($payload, true);
+                    if ($decoded === false) jsonOut(false, "{$questionLabel}包含无效的 base64 图片");
+                    if (strlen($decoded) > 8 * 1024 * 1024) jsonOut(false, "{$questionLabel}单张图片不能超过 8MB");
+                    return [$value, hash('sha256', $decoded)];
+                };
+
+                $kept = [];
+                foreach ($questions as $questionIndex => $q) {
                     if (!is_array($q) || ($q['included'] ?? true) === false) continue;
                     $content = trim((string)($q['content'] ?? $q['text'] ?? ''));
                     if ($content === '' || mb_strlen($content) > 100000) continue;
                     $options = is_array($q['options'] ?? null) ? array_values(array_filter(array_map('strval', $q['options']))) : [];
-                    // OCR 裁切的题目图片（worker 输出 images: [{base64}]，审核页可保留/编辑），
-                    // 透传为 question_images，由 pcvlConvert 去重后内嵌进题干 HTML，避免入库丢图
                     $questionImages = [];
+                    $imageHashes = [];
+                    $questionLabel = '第 ' . ($questionIndex + 1) . ' 题';
                     if (is_array($q['images'] ?? null)) {
                         foreach ($q['images'] as $img) {
-                            $b64 = is_array($img) ? trim((string)($img['base64'] ?? '')) : trim((string)$img);
-                            if ($b64 !== '') $questionImages[] = $b64;
+                            $decision = is_array($img) ? (string)($img['decision'] ?? 'accepted') : 'accepted';
+                            if ($decision !== 'accepted') continue;
+                            $imageValue = is_array($img) ? ($img['base64'] ?? '') : $img;
+                            [$validatedImage, $imageHash] = $validateQuestionImage($imageValue, $questionLabel);
+                            if (isset($imageHashes[$imageHash])) continue;
+                            $imageHashes[$imageHash] = true;
+                            $questionImages[] = $validatedImage;
                         }
                     }
+                    if (is_array($q['question_image_candidates'] ?? null)) {
+                        foreach ($q['question_image_candidates'] as $candidate) {
+                            if (!is_array($candidate) || ($candidate['decision'] ?? '') !== 'keep') continue;
+                            [$validatedImage, $imageHash] = $validateQuestionImage($candidate['base64'] ?? '', $questionLabel);
+                            if (isset($imageHashes[$imageHash])) continue;
+                            $imageHashes[$imageHash] = true;
+                            $questionImages[] = $validatedImage;
+                        }
+                    }
+                    if (count($questionImages) > 12) jsonOut(false, "{$questionLabel}图片不能超过 12 张");
                     $kept[] = ['question_id' => (string)($q['source_qid'] ?? count($kept) + 1), 'question_type' => (string)($q['question_type'] ?? 'single'), 'question_content' => $content, 'question_options' => $options, 'question_images' => $questionImages, 'answer' => (string)($q['correct_answer'] ?? ''), 'resolve' => (string)($q['explanation'] ?? ''), 'difficulty' => max(1, min(5, (int)($q['difficulty'] ?? 3))), 'points' => max(0, (float)($q['points'] ?? 1)), 'is_html' => !empty($q['is_html']) ? 1 : 0, 'subject' => $batch['subject'], 'education_level' => $batch['education_level']];
                 }
                 if (!$kept) jsonOut(false, '没有可入库的题目');
@@ -2419,7 +2481,7 @@ if ($action) {
                     $inserted++;
                 }
                 unset($q);
-                dbQuery($db, 'UPDATE ocr_import_batches SET status=\'committed\', result_json=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?', [json_encode(['questions' => $questions], JSON_UNESCAPED_UNICODE), $id]);
+                dbQuery($db, 'UPDATE ocr_import_batches SET status=\'committed\', result_json=?, updated_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE id=?', [json_encode($data, JSON_UNESCAPED_UNICODE), $id]);
                 if ($inserted > 0) {
                     notifyRootsOnContentUpload('内容管理员完成 OCR 入库', "OCR 批次 #{$id} 本次入库 {$inserted} 道题目，请抽空确认。", $id);
                 }

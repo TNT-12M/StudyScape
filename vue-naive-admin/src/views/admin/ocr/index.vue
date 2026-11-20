@@ -50,12 +50,45 @@
             <details class="ocr-error-raw"><summary>查看原始错误</summary><pre>{{ current.error_message }}</pre></details>
           </div>
         </n-alert>
+        <n-alert v-if="ocrRisk?.requires_review" type="warning" class="risk-review-alert" title="该批次包含可疑图片，需要人工复核">
+          <div v-if="ocrRiskSummary">{{ ocrRiskSummary }}</div>
+          <details v-if="ocrRisk.preprocess?.candidates?.length" class="preprocess-risk-list">
+            <summary>查看 OCR 前检测到的 {{ ocrRisk.preprocess.candidates.length }} 个风险对象</summary>
+            <div v-for="(candidate, riskIndex) in ocrRisk.preprocess.candidates" :key="riskIndex">
+              第 {{ Number(candidate.page || 0) + 1 }} 页 · {{ candidate.type === 'image' ? '图片对象' : '文本对象' }} · {{ candidate.label || '未命名' }}
+            </div>
+          </details>
+          <n-checkbox v-model:checked="ocrRisk.review_confirmed" class="risk-confirm-checkbox">我已检查预处理风险及所有候选图片的保留/移除决定</n-checkbox>
+        </n-alert>
         <n-empty v-if="!questions.length" description="暂无识别题目，请等待 OCR 完成或检查错误信息" />
         <n-list v-else bordered>
           <n-list-item v-for="(question, index) in questions" :key="question.source_qid || index">
             <n-card size="small" :class="{ excluded: !question.included }">
               <template #header><n-space align="center"><n-checkbox v-model:checked="question.included">保留第 {{ index + 1 }} 题</n-checkbox><n-tag>{{ question.question_type || '题目' }}</n-tag></n-space></template>
-              <div v-for="(image, imageIndex) in question.images || []" :key="imageIndex"><img v-if="image.base64" class="question-image" :src="image.base64.startsWith('data:') ? image.base64 : `data:image/jpeg;base64,${image.base64}`" alt="题目图片"></div>
+              <div v-for="(image, imageIndex) in question.images || []" :key="imageIndex" class="candidate-item" :class="image.decision === 'accepted' ? 'candidate-keep' : 'candidate-remove'">
+                <img v-if="image.base64" class="question-image" :src="imageSrc(image.base64)" alt="题目图片">
+                <n-radio-group v-model:value="image.decision" size="small">
+                  <n-radio-button value="accepted">保留</n-radio-button>
+                  <n-radio-button value="remove">移除</n-radio-button>
+                </n-radio-group>
+              </div>
+              <div v-if="question.question_image_candidates?.length" class="candidate-section">
+                <div class="candidate-title">候选图片（{{ question.question_image_candidates.length }} 张）</div>
+                <div v-for="(candidate, candidateIndex) in question.question_image_candidates" :key="candidateIndex" class="candidate-item" :class="`candidate-${candidate.decision}`">
+                  <img v-if="candidate.base64" class="question-image" :src="imageSrc(candidate.base64)" alt="候选题目图片">
+                  <div class="candidate-meta">
+                    <n-space size="small" align="center">
+                      <n-tag v-if="candidate.risk_score != null" size="small" type="warning">风险 {{ candidate.risk_score }}</n-tag>
+                      <n-tag v-if="candidate.page_idx != null" size="small">第 {{ Number(candidate.page_idx) + 1 }} 页</n-tag>
+                      <span v-if="candidateReasonText(candidate)" class="candidate-reasons">{{ candidateReasonText(candidate) }}</span>
+                    </n-space>
+                    <n-radio-group v-model:value="candidate.decision" size="small">
+                      <n-radio-button value="keep">保留</n-radio-button>
+                      <n-radio-button value="remove">移除</n-radio-button>
+                    </n-radio-group>
+                  </div>
+                </div>
+              </div>
               <n-form label-placement="top" class="edit-form">
                 <n-form-item label="题干">
                   <n-input
@@ -124,6 +157,7 @@ const batches = ref([])
 const current = ref(null)
 const reviewCard = ref(null)
 const questions = ref([])
+const ocrRisk = ref(null)
 const activeTab = ref('upload')
 const form = reactive({ education_level: 'junior', subject: '' })
 const importForm = reactive({ paper_name: '', education_level: 'senior', subject: '' })
@@ -238,6 +272,23 @@ const batchColumns = [
 function letter(index) { return String.fromCharCode(65 + (index || 0)) }
 function safeHtml(value) { return renderMathInHtml(sanitizeHtml(value || '')) }
 function safeOption(value) { return renderOption(value) }
+function imageSrc(value) {
+  return String(value || '').startsWith('data:') ? value : `data:image/jpeg;base64,${value}`
+}
+function candidateReasonText(candidate) {
+  const reasons = candidate?.reasons
+  if (Array.isArray(reasons))
+    return reasons.filter(Boolean).join('、')
+  return String(reasons || '')
+}
+const ocrRiskSummary = computed(() => {
+  if (!ocrRisk.value)
+    return ''
+  const reasons = ocrRisk.value.reasons
+  if (Array.isArray(reasons))
+    return reasons.filter(Boolean).join('；')
+  return String(ocrRisk.value.message || reasons || '')
+})
 
 // 美化 OCR 错误信息，从原始 JSON/长文本中提取关键消息
 function prettyOcrError(raw) {
@@ -302,6 +353,23 @@ function normalizeQuestion(question) {
   // 兜底: 兼容某些接口直接返回 images (对象数组)
   if (!Array.isArray(question.images)) {
     question.images = []
+  }
+  question.images = question.images
+    .filter(image => image && typeof image === 'object')
+    .map(image => ({
+      ...image,
+      decision: image.decision === 'remove' ? 'remove' : 'accepted',
+    }))
+  if (Array.isArray(question.question_image_candidates)) {
+    question.question_image_candidates = question.question_image_candidates
+      .filter(candidate => candidate && typeof candidate === 'object')
+      .map(candidate => ({
+        ...candidate,
+        decision: ['keep', 'remove'].includes(candidate.decision) ? candidate.decision : 'pending',
+      }))
+  }
+  else {
+    question.question_image_candidates = []
   }
 
   const source = String(question.content || '').replace(/\r/g, '')
@@ -369,6 +437,9 @@ async function loadBatch(id) {
       savedMetaHint.value = ''
     }
     questions.value = (current.value?.result?.questions || []).map(normalizeQuestion)
+    ocrRisk.value = current.value?.result?.ocr_risk && typeof current.value.result.ocr_risk === 'object'
+      ? { ...current.value.result.ocr_risk, review_confirmed: current.value.result.ocr_risk.review_confirmed === true }
+      : null
     await nextTick()
     reviewCard.value?.$el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   } catch (error) { message.error(error.message) }
@@ -442,9 +513,37 @@ function confirmImportAI() {
   }
 }
 async function commit() {
-  if (!current.value?.id) return
+  if (!current.value?.id)
+    return
+  const pendingCount = questions.value.reduce((count, question) => {
+    if (!question.included)
+      return count
+    return count + question.question_image_candidates.filter(candidate => candidate.decision === 'pending').length
+  }, 0)
+  if (pendingCount > 0) {
+    message.warning(`还有 ${pendingCount} 张候选图片未决定，请逐图选择保留或移除`)
+    return
+  }
+  if (ocrRisk.value?.requires_review && !ocrRisk.value.review_confirmed) {
+    message.warning('请确认已检查所有候选图片后再入库')
+    return
+  }
   committing.value = true
-  try { const result = await phpOcrApi.commit({ batch_id: current.value.id, result_json: JSON.stringify({ ...current.value.result, questions: questions.value }) }); message.success(result.message || '已入库'); await loadBatches(); await loadBatch(current.value.id) } catch (error) { message.error(error.message) } finally { committing.value = false }
+  try {
+    const resultData = { ...current.value.result, questions: questions.value }
+    if (ocrRisk.value)
+      resultData.ocr_risk = ocrRisk.value
+    const result = await phpOcrApi.commit({ batch_id: current.value.id, result_json: JSON.stringify(resultData) })
+    message.success(result.message || '已入库')
+    await loadBatches()
+    await loadBatch(current.value.id)
+  }
+  catch (error) {
+    message.error(error.message)
+  }
+  finally {
+    committing.value = false
+  }
 }
 async function removeBatch(id) { try { await phpOcrApi.remove(id); message.success('批次已删除'); await loadBatches() } catch (error) { message.error(error.message) } }
 
@@ -467,6 +566,9 @@ onMounted(async () => {
           if (r.data?.batch) {
             current.value = r.data.batch
             questions.value = (current.value?.result?.questions || []).map(normalizeQuestion)
+            ocrRisk.value = current.value?.result?.ocr_risk && typeof current.value.result.ocr_risk === 'object'
+              ? { ...current.value.result.ocr_risk, review_confirmed: current.value.result.ocr_risk.review_confirmed === true }
+              : null
           }
         } catch {}
       }
@@ -484,4 +586,47 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .ocr-error-raw summary { cursor: pointer; font-size: 12px; opacity: 0.7; }
 .ocr-error-raw pre { margin: 8px 0 0; padding: 10px; background: rgba(0,0,0,0.06); border-radius: 4px; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }.review-card { scroll-margin-top: 20px; }.excluded { opacity: .45; }.preview { padding: 10px 0; line-height: 1.7; white-space: pre-wrap; }.preview :deep(img) { max-width: 100%; max-height: 360px; }.option-edit-list { display: flex; flex-direction: column; gap: 8px; width: 100%; }.option-edit-row { display: flex; align-items: center; gap: 8px; }.option-letter { font-weight: 600; flex-shrink: 0; min-width: 22px; }.option-input { flex: 1; min-width: 0; }.option-rendered { flex: 1; min-height: 22px; line-height: 1.6; padding: 4px 8px; cursor: text; border: 1px dashed transparent; border-radius: 4px; word-break: break-word; }.option-rendered:hover { border-color: var(--n-border-color); background: var(--n-color-hover); }.stem-rendered { min-height: 60px; line-height: 1.7; padding: 8px 10px; cursor: text; border: 1px dashed transparent; border-radius: 4px; white-space: pre-wrap; word-break: break-word; }.stem-rendered:hover { border-color: var(--n-border-color); background: var(--n-color-hover); }.opt-btn { width: 30px; height: 30px; border: 1px solid var(--n-border-color); background: var(--n-color); color: var(--n-text-color); border-radius: 4px; cursor: pointer; font-size: 16px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }.opt-btn.del:hover { color: #fff; background: var(--n-error-color); border-color: var(--n-error-color); }.opt-btn.add:hover { color: #fff; background: var(--n-primary-color); border-color: var(--n-primary-color); }.question-image { display: block; max-width: 100%; max-height: 360px; margin: 8px 0; }.edit-form { margin-top: 12px; }.actions { display: flex; gap: 8px; }.action-button { border: 1px solid var(--n-border-color); background: var(--n-color); color: var(--n-text-color); padding: 5px 10px; border-radius: 4px; cursor: pointer; }.action-button.primary { color: #fff; background: var(--n-primary-color); border-color: var(--n-primary-color); }.action-button.danger { color: #fff; background: var(--n-error-color); border-color: var(--n-error-color); }
 .status-progress { font-size: 12px; color: var(--n-text-color-3); line-height: 1.4; margin-top: 2px; }
+.risk-review-alert {
+  margin-bottom: 12px;
+}
+.risk-confirm-checkbox {
+  margin-top: 10px;
+}
+.candidate-section {
+  margin: 12px 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--n-border-color);
+}
+.candidate-title {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.candidate-item {
+  padding: 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--n-border-color);
+  border-left-width: 4px;
+  border-radius: 4px;
+}
+.candidate-pending {
+  border-left-color: var(--n-warning-color);
+}
+.candidate-keep {
+  border-left-color: var(--n-success-color);
+}
+.candidate-remove {
+  border-left-color: var(--n-error-color);
+  opacity: 0.65;
+}
+.candidate-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.candidate-reasons {
+  color: var(--n-text-color-2);
+  font-size: 13px;
+}
 </style>
