@@ -34,7 +34,9 @@ import os
 import secrets
 import struct
 import base64
+import binascii
 import logging
+import tempfile
 import hashlib as _hashlib
 import base64 as _b64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -254,6 +256,7 @@ class BridgeState:
         self.lock = asyncio.Lock()
         # 同步存储通道
         self.pending_storage = {}   # request_id → (Event, result_dict)
+        self.storage_streams = {}   # request_id → chunked retrieve state
         self.storage_lock = asyncio.Lock()
         if persist_dir is None:
             persist_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_bridge_jobs")
@@ -539,8 +542,6 @@ class BridgeState:
         try:
             async with self.worker_lock:
                 if not self.worker_writer:
-                    async with self.storage_lock:
-                        self.pending_storage.pop(request_id, None)
                     return {"ok": False, "error": "worker offline"}
                 await FrameProto.send(self.worker_writer, {
                     "type": "STORAGE_TASK",
@@ -550,25 +551,124 @@ class BridgeState:
             try:
                 await asyncio.wait_for(event.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                async with self.storage_lock:
-                    self.pending_storage.pop(request_id, None)
                 return {"ok": False, "error": f"timeout ({timeout}s)"}
             async with self.storage_lock:
                 return dict(result_holder)
         finally:
             async with self.storage_lock:
                 self.pending_storage.pop(request_id, None)
+                stream = self.storage_streams.pop(request_id, None)
+            if stream:
+                stream["file"].close()
+                try:
+                    os.remove(stream["path"])
+                except FileNotFoundError:
+                    pass
 
-    def storage_resolve(self, request_id, result):
-        """worker_loop 收到 STORAGE_RESULT 时调用"""
-        async def _resolve():
-            async with self.storage_lock:
-                item = self.pending_storage.get(request_id)
-            if item:
-                event, holder = item
-                holder.update(result)
-                event.set()
-        asyncio.run_coroutine_threadsafe(_resolve(), event_loop)
+    def _storage_resolve_locked(self, request_id, result):
+        item = self.pending_storage.get(request_id)
+        if item:
+            event, holder = item
+            holder.update(result)
+            event.set()
+
+    async def storage_result(self, msg):
+        """处理普通 STORAGE_RESULT 及 retrieve 分块结果。"""
+        request_id = msg.get("request_id")
+        mtype = msg.get("type")
+        async with self.storage_lock:
+            if request_id not in self.pending_storage:
+                return
+
+            if mtype == "STORAGE_RESULT":
+                result = {k: v for k, v in msg.items() if k not in ("type", "request_id")}
+                file_b64 = result.pop("file_b64", None)
+                if result.get("ok") and file_b64 is not None:
+                    tmp = tempfile.NamedTemporaryFile(prefix="bridge_retrieve_", delete=False)
+                    try:
+                        raw = base64.b64decode(file_b64, validate=True)
+                        tmp.write(raw)
+                        tmp.close()
+                        actual_sha = hashlib.sha256(raw).hexdigest()
+                        expected_size = int(result.get("size", len(raw)))
+                        expected_sha = str(result.get("sha256", actual_sha))
+                        if len(raw) != expected_size or not hmac.compare_digest(actual_sha, expected_sha):
+                            raise ValueError("legacy retrieve size/SHA256 mismatch")
+                        result["temp_path"] = tmp.name
+                    except Exception as exc:
+                        tmp.close()
+                        try:
+                            os.remove(tmp.name)
+                        except FileNotFoundError:
+                            pass
+                        result = {"ok": False, "error": str(exc)}
+                self._storage_resolve_locked(request_id, result)
+                return
+
+            if mtype == "STORAGE_RESULT_BEGIN":
+                if not msg.get("ok"):
+                    self._storage_resolve_locked(request_id, {
+                        "ok": False, "error": msg.get("error", "retrieve failed"),
+                    })
+                    return
+                if request_id in self.storage_streams:
+                    self._storage_resolve_locked(request_id, {"ok": False, "error": "duplicate retrieve begin"})
+                    return
+                tmp = tempfile.NamedTemporaryFile(prefix="bridge_retrieve_", delete=False)
+                self.storage_streams[request_id] = {
+                    "file": tmp, "path": tmp.name, "seq": 0, "size": 0,
+                    "sha256": hashlib.sha256(), "expected_size": int(msg.get("size", 0)),
+                    "expected_sha": str(msg.get("sha256", "")),
+                    "mime": str(msg.get("mime", "application/octet-stream")),
+                }
+                return
+
+            stream = self.storage_streams.get(request_id)
+            if not stream:
+                self._storage_resolve_locked(request_id, {"ok": False, "error": "retrieve stream not started"})
+                return
+
+            try:
+                if mtype == "STORAGE_RESULT_CHUNK":
+                    seq = int(msg.get("seq", -1))
+                    if seq != stream["seq"]:
+                        raise ValueError(f"retrieve chunk seq mismatch expected={stream['seq']} actual={seq}")
+                    raw = base64.b64decode(msg.get("file_b64", ""), validate=True)
+                    if not raw or len(raw) > 192 * 1024:
+                        raise ValueError("invalid retrieve chunk size")
+                    stream["file"].write(raw)
+                    stream["sha256"].update(raw)
+                    stream["size"] += len(raw)
+                    stream["seq"] += 1
+                    return
+
+                if mtype == "STORAGE_RESULT_END":
+                    if int(msg.get("seq", -1)) != stream["seq"]:
+                        raise ValueError("retrieve final seq mismatch")
+                    stream["file"].close()
+                    actual_sha = stream["sha256"].hexdigest()
+                    final_size = int(msg.get("size", -1))
+                    final_sha = str(msg.get("sha256", ""))
+                    if stream["size"] != stream["expected_size"] or stream["size"] != final_size:
+                        raise ValueError("retrieve size mismatch")
+                    if (not stream["expected_sha"] or not final_sha
+                            or not hmac.compare_digest(actual_sha, stream["expected_sha"])
+                            or not hmac.compare_digest(actual_sha, final_sha)):
+                        raise ValueError("retrieve SHA256 mismatch")
+                    self.storage_streams.pop(request_id, None)
+                    self._storage_resolve_locked(request_id, {
+                        "ok": True, "temp_path": stream["path"], "size": stream["size"],
+                        "sha256": actual_sha, "mime": stream["mime"],
+                    })
+                    return
+            except (ValueError, TypeError, binascii.Error) as exc:
+                self.storage_streams.pop(request_id, None)
+                stream["file"].close()
+                try:
+                    os.remove(stream["path"])
+                except FileNotFoundError:
+                    pass
+                self._storage_resolve_locked(request_id, {"ok": False, "error": str(exc)})
 
 
 STATE = BridgeState()
@@ -679,12 +779,11 @@ async def handle_worker(reader, writer):
                             _save_pdf(jid, result["pdf_b64"])
                         log.info(f"  📦 Worker 完成 {jid}: status={'OK' if error is None else 'FAIL'}")
 
-                    elif mtype == "STORAGE_RESULT":
-                        request_id = msg.get("request_id")
-                        result = {k: v for k, v in msg.items() if k not in ("type", "request_id")}
-                        STATE.storage_resolve(request_id, result)
-                        ok = "✅" if result.get("ok") else "❌"
-                        log.info(f"  {ok} STORAGE_RESULT {request_id}: ok={result.get('ok')}")
+                    elif mtype in ("STORAGE_RESULT", "STORAGE_RESULT_BEGIN",
+                                   "STORAGE_RESULT_CHUNK", "STORAGE_RESULT_END"):
+                        await STATE.storage_result(msg)
+                        if mtype in ("STORAGE_RESULT", "STORAGE_RESULT_END"):
+                            log.info(f"  STORAGE result complete {msg.get('request_id')}")
 
                     elif mtype == "BYE":
                         break
@@ -939,6 +1038,7 @@ class PHPHandler(BaseHTTPRequestHandler):
             req_id = f"mig_{int(time.time())}_{secrets.token_hex(4)}"
             storage_payload = {
                 "action": action, "stored_name": stored_name,
+                "storage_scope": payload.get("storage_scope", "material"),
                 "watermark_platform": bool(payload.get("watermark_platform")),
                 "title": payload.get("title", ""),
             }
@@ -1003,21 +1103,40 @@ class PHPHandler(BaseHTTPRequestHandler):
             }
             try:
                 result = asyncio.run_coroutine_threadsafe(
-                    STATE.storage_request(req_id, storage_payload, timeout=60), event_loop
-                ).result(timeout=65)
+                    STATE.storage_request(req_id, storage_payload, timeout=180), event_loop
+                ).result(timeout=185)
             except Exception as e:
                 self._send(500, {"error": str(e)}); return
 
-            if result.get("ok"):
-                self._send(200, {
-                    "ok": True,
-                    "file_b64": result.get("file_b64", ""),
-                    "sha256": result.get("sha256", ""),
-                    "size": result.get("size", 0),
-                    "mime": result.get("mime", ""),
-                })
-            else:
+            if not result.get("ok"):
                 self._send(404, {"ok": False, "error": result.get("error", "not found")})
+                return
+
+            temp_path = result.get("temp_path", "")
+            try:
+                if not temp_path or not os.path.isfile(temp_path):
+                    self._send(502, {"ok": False, "error": "retrieve temp file missing"})
+                    return
+                size = int(result.get("size", os.path.getsize(temp_path)))
+                self.send_response(200)
+                self.send_header("Content-Type", result.get("mime") or "application/octet-stream")
+                self.send_header("Content-Length", str(size))
+                self.send_header("X-Storage-Size", str(size))
+                self.send_header("X-Storage-SHA256", result.get("sha256", ""))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                with open(temp_path, "rb") as stream:
+                    while True:
+                        chunk = stream.read(192 * 1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            finally:
+                if temp_path:
+                    try:
+                        os.remove(temp_path)
+                    except FileNotFoundError:
+                        pass
             return
 
         if path == "/storage/delete":

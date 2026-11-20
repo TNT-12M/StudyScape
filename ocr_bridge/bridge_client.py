@@ -573,10 +573,6 @@ async def handle_storage(writer, req_id, data):
             if not os.path.isfile(safe_fp):
                 await reply({"ok": False, "error": "文件不存在"})
                 return
-            with open(safe_fp, "rb") as stream:
-                raw = stream.read()
-            file_b64 = base64.b64encode(raw).decode()
-            sha = hashlib.sha256(raw).hexdigest()
             ext = stored_name.rsplit(".", 1)[-1].lower() if "." in stored_name else ""
             mime_map = {"pdf": "application/pdf", "doc": "application/msword",
                         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -585,8 +581,29 @@ async def handle_storage(writer, req_id, data):
                         "txt": "text/plain", "md": "text/markdown",
                         "zip": "application/zip", "rar": "application/x-rar-compressed"}
             mime = mime_map.get(ext, "application/octet-stream")
-            log.info(f"  📤 读取文件: {stored_name} ({len(raw)//1024}KB, scope={scope})")
-            await reply({"ok": True, "file_b64": file_b64, "sha256": sha, "size": len(raw), "mime": mime})
+            size = os.path.getsize(safe_fp)
+            sha = await asyncio.to_thread(material_watermark.sha256_file, safe_fp)
+            await FrameProto.send(writer, {
+                "type": "STORAGE_RESULT_BEGIN", "request_id": req_id,
+                "ok": True, "sha256": sha, "size": size, "mime": mime,
+            })
+            seq = 0
+            with open(safe_fp, "rb") as stream:
+                while True:
+                    raw = stream.read(192 * 1024)
+                    if not raw:
+                        break
+                    await FrameProto.send(writer, {
+                        "type": "STORAGE_RESULT_CHUNK", "request_id": req_id,
+                        "seq": seq, "file_b64": base64.b64encode(raw).decode("ascii"),
+                    })
+                    seq += 1
+                    await asyncio.sleep(0)
+            await FrameProto.send(writer, {
+                "type": "STORAGE_RESULT_END", "request_id": req_id,
+                "seq": seq, "sha256": sha, "size": size,
+            })
+            log.info(f"  📤 读取文件: {stored_name} ({size//1024}KB, scope={scope}, chunks={seq})")
 
         elif action == "delete":
             if scope not in ("material", "variant"):

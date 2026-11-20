@@ -33,6 +33,52 @@ if (!function_exists('_bridge_storage')) {
         return ['ok' => $bridgeOk, 'status' => $httpCode, 'data' => $data, 'error' => $data['error'] ?? ''];
     }
 
+    function _bridge_storage_download(array $body, string $tmpPath, string $expectedSha = ''): array {
+        $fh = @fopen($tmpPath, 'w+b');
+        if (!$fh) return ['ok' => false, 'status' => 0, 'error' => '无法创建下载临时文件'];
+
+        $headers = [];
+        $ch = curl_init('http://127.0.0.1:1201/storage/retrieve');
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode($body, JSON_UNESCAPED_UNICODE),
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+            CURLOPT_FILE => $fh,
+            CURLOPT_HEADERFUNCTION => static function ($curl, string $line) use (&$headers): int {
+                $pos = strpos($line, ':');
+                if ($pos !== false) {
+                    $headers[strtolower(trim(substr($line, 0, $pos)))] = trim(substr($line, $pos + 1));
+                }
+                return strlen($line);
+            },
+            CURLOPT_TIMEOUT => 190,
+            CURLOPT_CONNECTTIMEOUT => 5,
+        ]);
+        $ok = curl_exec($ch);
+        $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+        fflush($fh);
+        fclose($fh);
+
+        if ($ok === false || $status < 200 || $status >= 300) {
+            @unlink($tmpPath);
+            return ['ok' => false, 'status' => $status, 'error' => $error ?: "存储后端返回 HTTP {$status}"];
+        }
+
+        $actualSize = (int)(filesize($tmpPath) ?: 0);
+        $headerSize = filter_var($headers['x-storage-size'] ?? null, FILTER_VALIDATE_INT);
+        $headerSha = strtolower((string)($headers['x-storage-sha256'] ?? ''));
+        $actualSha = hash_file('sha256', $tmpPath);
+        if ($headerSize === false || $headerSize < 0 || $actualSize !== $headerSize
+            || !preg_match('/^[a-f0-9]{64}$/', $headerSha) || !hash_equals($headerSha, $actualSha)
+            || ($expectedSha !== '' && !hash_equals(strtolower($expectedSha), $actualSha))) {
+            @unlink($tmpPath);
+            return ['ok' => false, 'status' => 502, 'error' => '下载文件大小或 SHA256 校验失败'];
+        }
+        return ['ok' => true, 'status' => $status, 'size' => $actualSize, 'sha256' => $actualSha];
+    }
+
     /** 文件 → base64 + SHA256 */
     function _file_b64_sha(string $absPath): array {
         $raw = file_get_contents($absPath);
@@ -4412,25 +4458,42 @@ if ($action) {
                         jsonOut(false, '该 PDF 尚未完成平台水印处理，暂不可下载');
                     }
                     $revision = max(1, (int)($mat['revision'] ?? 1));
-                    $identityHash = hash('sha256', $id . '|' . $revision . '|' . $uid . '|' . $username);
-                    $variantName = 'matv_' . substr($identityHash, 0, 40) . '.pdf';
-                    $variantRes = _bridge_storage('/storage/prepare-variant', [
-                        'stored_name' => $mat['stored_name'], 'variant_name' => $variantName,
-                        'username' => $username, 'user_id' => $uid,
-                    ]);
-                    if (!$variantRes['ok']) {
-                        jsonOut(false, '服务端准备专属水印文件失败：' . ($variantRes['error'] ?: '存储后端不可用'));
-                    }
-                    $variantData = $variantRes['data'];
-                    $variantSha = (string)($variantData['sha256'] ?? '');
-                    $variantSize = (int)($variantData['size'] ?? 0);
-                    if ($variantSha === '' || $variantSize <= 0 || ($variantData['variant_name'] ?? '') !== $variantName) {
-                        jsonOut(false, '服务端专属水印文件校验失败，请稍后重试');
-                    }
-                    dbQuery($db,
-                        "INSERT INTO material_download_variants(material_id,user_id,username,material_revision,variant_name,sha256,file_size) VALUES(?,?,?,?,?,?,?) ON CONFLICT(material_id,user_id,username,material_revision) DO UPDATE SET variant_name=excluded.variant_name,sha256=excluded.sha256,file_size=excluded.file_size,updated_at=CURRENT_TIMESTAMP",
-                        [$id, $uid, $username, $revision, $variantName, $variantSha, $variantSize]
+                    $variant = dbFetchOne($db,
+                        'SELECT variant_name, sha256, file_size FROM material_download_variants WHERE material_id=? AND user_id=? AND username=? AND material_revision=?',
+                        [$id, $uid, $username, $revision]
                     );
+                    if ($variant) {
+                        $inspect = _bridge_storage('/storage/inspect', [
+                            'stored_name' => $variant['variant_name'], 'storage_scope' => 'variant',
+                        ]);
+                        $inspectData = $inspect['data'];
+                        if ($inspect['ok'] && (int)($inspectData['size'] ?? 0) === (int)$variant['file_size']
+                            && hash_equals((string)$variant['sha256'], (string)($inspectData['sha256'] ?? ''))) {
+                            $variantName = (string)$variant['variant_name'];
+                            $variantSha = (string)$variant['sha256'];
+                        }
+                    }
+                    if ($variantName === '') {
+                        $identityHash = hash('sha256', $id . '|' . $revision . '|' . $uid . '|' . $username);
+                        $variantName = 'matv_' . substr($identityHash, 0, 40) . '.pdf';
+                        $variantRes = _bridge_storage('/storage/prepare-variant', [
+                            'stored_name' => $mat['stored_name'], 'variant_name' => $variantName,
+                            'username' => $username, 'user_id' => $uid,
+                        ]);
+                        if (!$variantRes['ok']) {
+                            jsonOut(false, '服务端准备专属水印文件失败：' . ($variantRes['error'] ?: '存储后端不可用'));
+                        }
+                        $variantData = $variantRes['data'];
+                        $variantSha = (string)($variantData['sha256'] ?? '');
+                        $variantSize = (int)($variantData['size'] ?? 0);
+                        if ($variantSha === '' || $variantSize <= 0 || ($variantData['variant_name'] ?? '') !== $variantName) {
+                            jsonOut(false, '服务端专属水印文件校验失败，请稍后重试');
+                        }
+                        dbQuery($db,
+                            "INSERT INTO material_download_variants(material_id,user_id,username,material_revision,variant_name,sha256,file_size) VALUES(?,?,?,?,?,?,?) ON CONFLICT(material_id,user_id,username,material_revision) DO UPDATE SET variant_name=excluded.variant_name,sha256=excluded.sha256,file_size=excluded.file_size,updated_at=CURRENT_TIMESTAMP",
+                            [$id, $uid, $username, $revision, $variantName, $variantSha, $variantSize]
+                        );
+                    }
                 }
                 if (!isset($_SESSION['download_tokens']) || !is_array($_SESSION['download_tokens'])) {
                     $_SESSION['download_tokens'] = [];
@@ -4538,10 +4601,11 @@ if ($action) {
 
                 $tmpAbs = '';
                 if (!$useLocal) {
-                    $bridgeRes = _bridge_storage('/storage/retrieve', [
+                    $tmpAbs = sys_get_temp_dir() . '/studyscape_dl_' . bin2hex(random_bytes(8));
+                    $bridgeRes = _bridge_storage_download([
                         'stored_name' => $storedName,
                         'storage_scope' => $isPdf ? 'variant' : 'material',
-                    ]);
+                    ], $tmpAbs, $expectedSha);
                     if (!$bridgeRes['ok']) {
                         $err = $bridgeRes['error'] ?? '家里云未找到文件';
                         http_response_code(502);
@@ -4551,33 +4615,8 @@ if ($action) {
                         include __DIR__ . '/../../error.php';
                         exit;
                     }
-                    $b64 = $bridgeRes['data']['file_b64'] ?? '';
-                    if ($b64 === '') {
-                        http_response_code(404);
-                        $title = '文件不存在';
-                        $message = '家里云未找到该资料。';
-                        include __DIR__ . '/../../error.php';
-                        exit;
-                    }
-                    // 解码 → 临时文件
-                    $tmpAbs = sys_get_temp_dir() . '/studyscape_dl_' . bin2hex(random_bytes(4));
-                    $raw = base64_decode($b64, true);
-                    if ($raw === false) {
-                        http_response_code(502);
-                        include __DIR__ . '/../../error.php';
-                        exit;
-                    }
-                    $actualSha = hash('sha256', $raw);
-                    if ($expectedSha !== '' && !hash_equals($expectedSha, $actualSha)) {
-                        http_response_code(502);
-                        $title = '传输校验失败';
-                        $message = "SHA256 不匹配 (db={$expectedSha} home={$actualSha})";
-                        include __DIR__ . '/../../error.php';
-                        exit;
-                    }
-                    file_put_contents($tmpAbs, $raw);
                     $realAbs = $tmpAbs;
-                    $contentLen = strlen($raw);
+                    $contentLen = (int)$bridgeRes['size'];
                 } else {
                     $realAbs = $localAbs;
                     $contentLen = filesize($localAbs);

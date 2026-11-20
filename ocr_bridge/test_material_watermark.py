@@ -83,6 +83,51 @@ class MaterialWatermarkTest(unittest.TestCase):
             watermark.render_user_watermark(platform, user, "张三", 1001)
             self.assertEqual(user_mtime, user.stat().st_mtime_ns)
 
+    def test_adaptive_rendering_for_small_narrow_landscape_and_rotated_pages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "adaptive-source.pdf"
+            platform = root / "adaptive-platform.pdf"
+            user = root / "adaptive-user.pdf"
+            page_specs = (
+                (80, 100, 0, "tiny body"),
+                (45, 240, 0, "narrow body"),
+                (300, 90, 0, "landscape body"),
+                (100, 220, 90, "rotated body"),
+            )
+
+            with fitz.open() as document:
+                for width, height, rotation, text in page_specs:
+                    page = document.new_page(width=width, height=height)
+                    page.insert_text((3, 12), text, fontsize=5)
+                    page.set_rotation(rotation)
+                document.save(source)
+
+            watermark.render_platform_watermark(source, platform, "自适应测试资料")
+            self.assertTrue(watermark.validate_pdf(platform))
+            with fitz.open(platform) as document:
+                tags = watermark._parse_tags(document.metadata)
+                self.assertEqual(tags["renderer"], watermark.PLATFORM_MARK)
+                self.assertEqual(tags["body_count"], str(len(page_specs)))
+                for index, (_, _, rotation, source_text) in enumerate(page_specs, start=1):
+                    body_text = document[index].get_text().replace("\xa0", " ")
+                    self.assertIn(source_text, body_text)
+                    self.assertIn("StudyScape", body_text)
+                    self.assertEqual(document[index].rotation, rotation)
+
+            watermark.render_user_watermark(platform, user, "张三", 1001)
+            self.assertTrue(watermark.validate_pdf(user))
+            with fitz.open(user) as document:
+                tags = watermark._parse_tags(document.metadata)
+                self.assertEqual(tags["renderer"], watermark.USER_MARK)
+                self.assertEqual(tags["body_count"], str(len(page_specs)))
+                self.assertEqual(tags["username"], "张三")
+                self.assertEqual(tags["user_id"], "1001")
+                for index, (_, _, _, source_text) in enumerate(page_specs, start=1):
+                    body_text = document[index].get_text().replace("\xa0", " ")
+                    self.assertIn(source_text, body_text)
+                    self.assertIn("仅限用户", body_text)
+
     def test_rejects_invalid_input_and_same_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

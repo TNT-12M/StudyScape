@@ -187,16 +187,61 @@ def _atomic_copy(source_path: Path, output_path: Path) -> str:
     return str(output_path)
 
 
+def _fit_rect_to_page(rect: Any, page_rect: Any) -> Any:
+    fitted = fitz.Rect(rect)
+    if fitted.x0 > fitted.x1:
+        fitted.x0, fitted.x1 = fitted.x1, fitted.x0
+    if fitted.y0 > fitted.y1:
+        fitted.y0, fitted.y1 = fitted.y1, fitted.y0
+    if fitted.width > page_rect.width:
+        fitted.x0, fitted.x1 = page_rect.x0, page_rect.x1
+    else:
+        fitted.x0 += max(page_rect.x0 - fitted.x0, 0)
+        fitted.x1 -= max(fitted.x1 - page_rect.x1, 0)
+    if fitted.height > page_rect.height:
+        fitted.y0, fitted.y1 = page_rect.y0, page_rect.y1
+    else:
+        fitted.y0 += max(page_rect.y0 - fitted.y0, 0)
+        fitted.y1 -= max(fitted.y1 - page_rect.y1, 0)
+    return fitted & page_rect
+
+
 def _insert_textbox(page: Any, rect: Any, text: str, font_path: str, fontsize: float,
                     color: tuple[float, float, float], align: int = 0,
-                    opacity: float = 1.0, rotate: int = 0) -> None:
-    result = page.insert_textbox(
-        rect, text, fontname="studyscape-cjk", fontfile=font_path,
-        fontsize=fontsize, color=color, align=align, fill_opacity=opacity,
-        rotate=rotate, overlay=True,
-    )
-    if result < 0:
+                    opacity: float = 1.0, rotate: int = 0,
+                    min_fontsize: float = 3.5) -> None:
+    page_rect = page.rect
+    fitted = _fit_rect_to_page(rect, page_rect)
+    if fitted.width <= 1 or fitted.height <= 1:
         raise RuntimeError(f"PDF 页面文字区域空间不足: {text[:30]}")
+
+    expanded = fitz.Rect(
+        page_rect.x0, max(page_rect.y0, fitted.y0 - 2),
+        page_rect.x1, min(page_rect.y1, fitted.y1 + 2),
+    )
+    candidates = [fitted]
+    if expanded != fitted:
+        candidates.append(expanded)
+    if page_rect != expanded:
+        candidates.append(page_rect)
+
+    size = max(float(fontsize), min_fontsize)
+    sizes = []
+    while size > min_fontsize:
+        sizes.append(size)
+        size = max(min_fontsize, size - max(0.5, size * 0.12))
+    sizes.append(min_fontsize)
+
+    for candidate in candidates:
+        for candidate_size in sizes:
+            result = page.insert_textbox(
+                candidate, text, fontname="studyscape-cjk", fontfile=font_path,
+                fontsize=candidate_size, color=color, align=align,
+                fill_opacity=opacity, rotate=rotate, overlay=True,
+            )
+            if result >= 0:
+                return
+    raise RuntimeError(f"PDF 页面文字区域空间不足: {text[:30]}")
 
 
 def _qr_png(payload: str) -> bytes:
@@ -223,20 +268,38 @@ def _draw_centered_page(page: Any, title: str, subtitle: str, font_path: str,
 def _draw_platform_body(page: Any, font_path: str, qr_png: bytes, title: str) -> None:
     rect = page.rect
     watermark = "学境 · StudyScape"
-    for y in range(90, max(91, int(rect.height - 70)), 145):
-        offset = 25 if (y // 145) % 2 else 0
-        for x in range(-20 + offset, max(1, int(rect.width)), 220):
-            _insert_textbox(page, fitz.Rect(x, y, x + 190, y + 30), watermark,
-                            font_path, 13, (0.50, 0.53, 0.56), 1, 0.13, 0)
+    footer_height = min(34.0, max(8.0, rect.height * 0.24), rect.height)
+    watermark_bottom = rect.height - footer_height
+    if watermark_bottom > 2:
+        y_positions = (range(90, max(91, int(rect.height - 70)), 145)
+                       if watermark_bottom >= 120
+                       else [max(0.0, (watermark_bottom - min(30.0, watermark_bottom)) / 2)])
+        for y in y_positions:
+            offset = 25 if (int(y) // 145) % 2 else 0
+            for x in range(-20 + offset, max(1, int(rect.width)), 220):
+                _insert_textbox(
+                    page, fitz.Rect(x, y, x + 190, min(y + 30, watermark_bottom)),
+                    watermark, font_path, 13, (0.50, 0.53, 0.56), 1, 0.13, 0,
+                )
 
-    footer_top = max(0, rect.height - 34)
+    footer_top = rect.height - footer_height
     page.draw_rect(fitz.Rect(0, footer_top, rect.width, rect.height),
                    color=None, fill=(1, 1, 1), fill_opacity=0.92, overlay=True)
-    _insert_textbox(page, fitz.Rect(24, footer_top + 8, rect.width - 58, rect.height - 5),
-                    f"© StudyScape 学境 · {title}", font_path, 7.5,
+    edge = min(5.0, max(1.0, rect.width * 0.03, rect.height * 0.01))
+    qr_size = min(26.0, max(2.0, footer_height - edge * 2), max(2.0, rect.width * 0.22))
+    qr_rect = fitz.Rect(rect.width - edge - qr_size, footer_top + edge,
+                        rect.width - edge, footer_top + edge + qr_size)
+    if qr_rect.x0 >= 0 and qr_rect.y1 <= rect.height and qr_rect.width >= 2:
+        page.insert_image(qr_rect, stream=qr_png, overlay=True)
+
+    if rect.width >= 120 and footer_height == 34.0:
+        text_box = fitz.Rect(24, footer_top + 8, rect.width - 58, rect.height - 5)
+    else:
+        text_left = min(24.0, max(1.0, rect.width * 0.04))
+        text_right = max(text_left + 1, qr_rect.x0 - max(1.0, edge))
+        text_box = fitz.Rect(text_left, footer_top + edge, text_right, rect.height - edge)
+    _insert_textbox(page, text_box, f"© StudyScape 学境 · {title}", font_path, 7.5,
                     (0.28, 0.31, 0.34), 0)
-    page.insert_image(fitz.Rect(rect.width - 31, footer_top + 3, rect.width - 5, rect.height - 5),
-                      stream=qr_png, overlay=True)
 
 
 def _save_atomic(document: Any, output_path: Path) -> str:
@@ -380,12 +443,26 @@ def render_user_watermark(source_path: os.PathLike[str] | str,
         for page_number in range(body_start, body_start + body_count):
             page = result[page_number]
             rect = page.rect
-            width = min(rect.width - 48, max(245, len(label) * 11))
-            box = fitz.Rect((rect.width - width) / 2, 16, (rect.width + width) / 2, 48)
+            side_margin = min(24.0, max(1.0, rect.width * 0.04))
+            width = min(max(1.0, rect.width - side_margin * 2),
+                        max(245.0, len(label) * 11.0))
+            height = min(32.0, max(7.0, rect.height * 0.22), rect.height)
+            top = min(16.0, max(0.0, (rect.height - height) * 0.08))
+            box = fitz.Rect((rect.width - width) / 2, top,
+                            (rect.width + width) / 2, top + height)
             page.draw_rect(box, color=(0.55, 0.16, 0.16), fill=(1.0, 0.97, 0.97),
-                           width=0.6, fill_opacity=0.88, overlay=True)
-            _insert_textbox(page, fitz.Rect(box.x0 + 7, box.y0 + 7, box.x1 - 7, box.y1 - 5),
-                            label, font_path, 9, (0.55, 0.10, 0.10), 1)
+                           width=min(0.6, max(0.2, height * 0.04)),
+                           fill_opacity=0.88, overlay=True)
+            padding_x = min(7.0, max(0.5, width * 0.03))
+            if height == 32.0:
+                label_box = fitz.Rect(box.x0 + padding_x, box.y0 + 7,
+                                      box.x1 - padding_x, box.y1 - 5)
+            else:
+                padding_y = min(7.0, max(0.5, height * 0.16))
+                label_box = fitz.Rect(box.x0 + padding_x, box.y0 + padding_y,
+                                      box.x1 - padding_x, box.y1 - padding_y)
+            _insert_textbox(page, label_box, label, font_path, min(9.0, height * 0.32),
+                            (0.55, 0.10, 0.10), 1)
 
         metadata = dict(original.metadata)
         metadata.update({
